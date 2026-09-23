@@ -36,7 +36,11 @@ def execute_sql(sql: str = Field(description="The SQL statement to execute on th
             res = executor.execute(eval_result, agent_label="mcp_agent")
             
             if res.status == "applied":
-                results.append(f"Success. Checkpoint: {res.public_id}. Rows affected: {res.rows_affected}.")
+                msg = f"Success. Checkpoint: {res.public_id}. Rows affected: {res.rows_affected}."
+                if res.data is not None:
+                    import json
+                    msg += f"\nData: {json.dumps(res.data, default=str)}"
+                results.append(msg)
             elif res.status == "approval_required":
                 results.append(f"APPROVAL REQUIRED. Token: {res.public_id}. Ask human to run `undogate approve {res.public_id}` in their terminal.")
             elif res.status == "denied":

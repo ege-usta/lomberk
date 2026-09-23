@@ -44,7 +44,8 @@ def execute_query(req: ExecuteRequest):
                 "status": res.status,
                 "checkpoint": res.public_id,
                 "rows_affected": res.rows_affected,
-                "message": res.message
+                "message": res.message,
+                "data": res.data
             })
             
         return {"results": results}

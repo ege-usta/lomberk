@@ -13,6 +13,7 @@ class ExecutionResult(BaseModel):
     checkpoint_id: int | None = None
     public_id: str | None = None
     rows_affected: int = 0
+    data: list[dict] | None = None
     status: str
     message: str
 
@@ -131,8 +132,27 @@ class UndogateExecutor:
             if ddl_undo_plan:
                 cur.execute("UPDATE undogate.checkpoints SET ddl_undo_plan = %s WHERE id = %s", (json.dumps(ddl_undo_plan), cp_id))
 
+            fetched_data = None
             if not skip_execution:
                 cur.execute(sql_to_execute)
+                if cur.description:
+                    columns = [desc[0] for desc in cur.description]
+                    rows = cur.fetchall()
+                    # Convert to list of dicts for JSON serialization with Dynamic Data Masking (DDM)
+                    SENSITIVE_COLUMNS = {"password", "ssn", "credit_card", "secret", "token", "hash"}
+                    fetched_data = []
+                    for row in rows:
+                        row_dict = dict(zip(columns, row))
+                        # Apply Data Masking
+                        for col in columns:
+                            if any(sens in col.lower() for sens in SENSITIVE_COLUMNS) and row_dict[col]:
+                                val_str = str(row_dict[col])
+                                if len(val_str) > 4:
+                                    row_dict[col] = "***MASKED***" + val_str[-4:]
+                                else:
+                                    row_dict[col] = "***MASKED***"
+                        fetched_data.append(row_dict)
+
                 
             rows_affected = max(cur.rowcount, 0)
             
@@ -145,7 +165,7 @@ class UndogateExecutor:
             from undogate.audit import emit_audit_event
             emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "applied", ddl_undo_plan, rows_affected)
             
-            return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, rows_affected=rows_affected, status="applied", message="Success")
+            return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, rows_affected=rows_affected, status="applied", message="Success", data=fetched_data)
             
         except Exception as e:
             conn.rollback()
