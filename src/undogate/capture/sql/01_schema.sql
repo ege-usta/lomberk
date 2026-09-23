@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS undogate.checkpoints (
     decision      TEXT NOT NULL,
     status        TEXT NOT NULL, -- 'applied', 'undone', 'failed', 'pending'
     rows_affected INTEGER,
-    ddl_undo_plan JSONB
+    ddl_undo_plan JSONB,
+    prev_hash     TEXT,
+    hash          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS undogate.row_changes (

@@ -114,3 +114,45 @@ def serve():
 
 if __name__ == "__main__":
     app()
+
+@app.command()
+def verify_ledger():
+    """Verify the cryptographic integrity of the ledger."""
+    dsn = get_admin_dsn()
+    import psycopg
+    
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, sql_text, classification, decision, agent_label, prev_hash, hash FROM undogate.checkpoints ORDER BY id ASC")
+            rows = cur.fetchall()
+            
+            if not rows:
+                console.print("[yellow]Ledger is empty.[/yellow]")
+                return
+                
+            console.print(f"Verifying {len(rows)} checkpoints...")
+            import hashlib
+            
+            prev_expected = 'genesis'
+            broken = False
+            for r in rows:
+                cp_id, sql, cls, dec, agent, prev_hash, actual_hash = r
+                if prev_hash != prev_expected:
+                    console.print(f"[red]Chain broken at ID {cp_id}! Expected prev_hash {prev_expected}, got {prev_hash}[/red]")
+                    broken = True
+                    break
+                    
+                # Recompute hash
+                agent_str = agent if agent else ''
+                data = prev_hash + sql + cls + dec + agent_str
+                computed = hashlib.md5(data.encode('utf-8')).hexdigest()
+                
+                if computed != actual_hash:
+                    console.print(f"[red]Hash mismatch at ID {cp_id}! Computed {computed}, got {actual_hash}[/red]")
+                    broken = True
+                    break
+                    
+                prev_expected = actual_hash
+                
+            if not broken:
+                console.print("[green]Ledger integrity verified successfully! No tampering detected.[/green]")
