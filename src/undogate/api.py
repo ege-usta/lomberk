@@ -79,3 +79,39 @@ async def slack_interactive(request: Request):
         return {"text": f"❌ Rejected checkpoint {token}."}
         
     return {"status": "unknown"}
+
+class JITRequest(BaseModel):
+    agent_name: str
+    tables: list[str]
+
+@app.post("/v1/auth/jit")
+def request_jit_credential(req: JITRequest):
+    """(Enterprise) Request Ephemeral JIT credentials for the agent."""
+    import psycopg
+    import secrets
+    
+    password = secrets.token_urlsafe(16)
+    role_name = f"jit_{req.agent_name}_{secrets.token_hex(4)}"
+    
+    try:
+        with psycopg.connect(agent_dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                # Create role valid for 5 minutes
+                cur.execute(f"CREATE ROLE {role_name} WITH LOGIN PASSWORD '{password}' VALID UNTIL 'now + 5 minutes'")
+                
+                # Grant access to specific tables
+                for table in req.tables:
+                    # Very basic injection protection for table names
+                    if not table.replace("_", "").isalnum():
+                        continue
+                    cur.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON public.{table} TO {role_name}")
+                    
+        return {
+            "status": "success",
+            "role": role_name,
+            "password": password,
+            "expires_in": "5 minutes",
+            "message": "Use these credentials to connect. They will self-destruct in 5 minutes."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

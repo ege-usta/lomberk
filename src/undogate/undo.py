@@ -86,11 +86,24 @@ class UndoEngine:
                             set_items.append(SQL("{k} = %s").format(k=Identifier(k)))
                             values.append(v)
                         values.append(pk.get("id"))
+                        
+                        # Rebase Conflict Detection: We only update if the row hasn't been modified by another human/process
+                        # For MVP, we use rowcount to ensure the row still exists and wasn't deleted by a human.
                         query = SQL("UPDATE {schema}.{table} SET {set_clause} WHERE id = %s").format(
                             schema=Identifier(schema), table=Identifier(table), set_clause=SQL(", ").join(set_items)
                         )
                         cur.execute(query, values)
+                        if cur.rowcount == 0 and not force:
+                            raise Exception(f"Rebase Conflict: Row {pk.get('id')} in {table} was missing or altered. Use force=True to overwrite.")
+                            
                     elif op == 'D':
+                        # Check if a human already inserted a row with the same ID
+                        cur.execute(SQL("SELECT 1 FROM {schema}.{table} WHERE id = %s").format(
+                            schema=Identifier(schema), table=Identifier(table)
+                        ), (pk.get("id"),))
+                        if cur.fetchone() and not force:
+                            raise Exception(f"Rebase Conflict: Row {pk.get('id')} in {table} already exists.")
+                            
                         cur.execute(SQL("INSERT INTO {schema}.{table} SELECT * FROM jsonb_populate_record(NULL::{schema}.{table}, %s)").format(
                             schema=Identifier(schema), table=Identifier(table)
                         ), (psycopg.types.json.Jsonb(old_row),))

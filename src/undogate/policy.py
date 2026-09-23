@@ -44,6 +44,14 @@ class PolicyEngine:
         elif stmt.stmt_class == StatementClass.WRITE_DML:
             if rows_affected is not None and rows_affected > self.config.limits.max_rows_without_approval:
                 return StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason=f"Rows affected ({rows_affected}) exceeds limit ({self.config.limits.max_rows_without_approval}).")
+                
+            # AI Sentinel (Semantic Anomaly Detection)
+            from undogate.sentinel import AISentinel
+            sentinel = AISentinel()
+            is_safe, ai_reason = sentinel.evaluate_intent(stmt.sql, stmt.tables)
+            if not is_safe:
+                return StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason=f"AI Sentinel Blocked: {ai_reason}")
+                
             return StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="DML statement within limits.")
             
         return StatementEvaluation(statement=stmt, decision=PolicyDecision.DENY, reason="Fallback deny.")
