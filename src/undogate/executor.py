@@ -56,6 +56,16 @@ class UndogateExecutor:
                 eval_result.decision.value, 
                 agent_label
             )
+            
+            # Trigger Enterprise Notification
+            from undogate.slack import SlackNotifier
+            SlackNotifier().send_approval_request(
+                token=public_id, 
+                sql=eval_result.statement.sql, 
+                agent=agent_label, 
+                reason=eval_result.reason
+            )
+            
             return ExecutionResult(
                 status="approval_required", 
                 public_id=public_id,
@@ -128,6 +138,11 @@ class UndogateExecutor:
             cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (cp_id, rows_affected))
             
             conn.commit()
+            
+            # Audit Stream
+            from undogate.audit import emit_audit_event
+            emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "applied", ddl_undo_plan, rows_affected)
+            
             return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, rows_affected=rows_affected, status="applied", message="Success")
             
         except Exception as e:
@@ -136,4 +151,9 @@ class UndogateExecutor:
             with psycopg.connect(self.dsn, autocommit=True) as fail_conn:
                 with fail_conn.cursor() as fail_cur:
                     fail_cur.execute("UPDATE undogate.checkpoints SET status = 'failed' WHERE id = %s", (cp_id,))
+            
+            # Audit Stream
+            from undogate.audit import emit_audit_event
+            emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "failed", rows=0)
+                    
             return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="failed", message=str(e))

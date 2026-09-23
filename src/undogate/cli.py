@@ -156,3 +156,35 @@ def verify_ledger():
                 
             if not broken:
                 console.print("[green]Ledger integrity verified successfully! No tampering detected.[/green]")
+
+@app.command()
+def branch(token: str):
+    """(Enterprise) Clone the database branch right before this checkpoint."""
+    # This is an enterprise feature mock targeting Neon API.
+    api_key = os.environ.get("NEON_API_KEY")
+    project_id = os.environ.get("NEON_PROJECT_ID")
+    
+    if not api_key or not project_id:
+        console.print("[yellow]Notice: Neon API credentials not found. Simulating enterprise branching...[/yellow]")
+        console.print(f"[green]Simulated: Created isolated database branch 'undogate_recovery_{token}'[/green]")
+        console.print("[dim]To use real branching, set NEON_API_KEY and NEON_PROJECT_ID.[/dim]")
+        return
+        
+    from undogate.branch import create_branch
+    console.print(f"Creating exact DB branch for token {token} via Neon API...")
+    try:
+        res = create_branch(project_id, api_key, f"recovery_{token}")
+        console.print("[green]Branch created successfully! Connection URI:[/green]")
+        # Normally would parse endpoints, just printing raw for now
+        console.print(res)
+    except Exception as e:
+        console.print(f"[red]Failed to create branch: {e}[/red]")
+
+@app.command()
+def api(port: int = 8000):
+    """(Enterprise) Start the Universal REST + Slack Gateway."""
+    import uvicorn
+    console.print(f"[green]Starting Undogate Enterprise API on port {port}...[/green]")
+    console.print("[dim]- Agent HTTP endpoint: POST http://localhost:8000/v1/execute[/dim]")
+    console.print("[dim]- Slack Webhook endpoint: POST http://localhost:8000/v1/slack/interactive[/dim]")
+    uvicorn.run("undogate.api:app", host="0.0.0.0", port=port)
