@@ -1,13 +1,13 @@
 import os
 import sys
+
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-import uvicorn
 
 from undogate.config import load_config
-from undogate.sql.classify import classify_sql
-from undogate.policy import PolicyEngine
 from undogate.executor import UndogateExecutor
+from undogate.policy import PolicyEngine
+from undogate.sql.classify import classify_sql
 
 app = FastAPI(title="Undogate Enterprise API", description="Drop-in REST Gateway for AI Agents")
 
@@ -87,8 +87,9 @@ class JITRequest(BaseModel):
 @app.post("/v1/auth/jit")
 def request_jit_credential(req: JITRequest):
     """(Enterprise) Request Ephemeral JIT credentials for the agent."""
-    import psycopg
     import secrets
+
+    import psycopg
     
     password = secrets.token_urlsafe(16)
     role_name = f"jit_{req.agent_name}_{secrets.token_hex(4)}"
@@ -115,3 +116,123 @@ def request_jit_credential(req: JITRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+import psycopg
+from fastapi.responses import HTMLResponse
+
+
+@app.get("/v1/checkpoints")
+def get_checkpoints():
+    """Get all checkpoints for the dashboard."""
+    try:
+        with psycopg.connect(agent_dsn) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("SELECT id, public_id, created_at, agent_label, sql_text, classification, decision, status, rows_affected, hash FROM undogate.checkpoints ORDER BY id DESC LIMIT 50")
+                return {"checkpoints": cur.fetchall()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/v1/checkpoints/{public_id}/approve")
+def approve_checkpoint(public_id: str):
+    res = executor.execute_pending(public_id)
+    return {"status": res.status, "message": res.message, "rows_affected": res.rows_affected}
+
+@app.post("/v1/checkpoints/{public_id}/reject")
+def reject_checkpoint(public_id: str):
+    try:
+        with psycopg.connect(agent_dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE undogate.checkpoints SET status = 'denied' WHERE public_id = %s", (public_id,))
+        return {"status": "denied", "message": "Checkpoint rejected."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/", response_class=HTMLResponse)
+def serve_dashboard():
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Undogate Control Plane</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-slate-900 text-slate-200 font-sans p-8">
+        <div class="max-w-6xl mx-auto">
+            <h1 class="text-3xl font-bold text-white mb-2">Undogate Control Plane</h1>
+            <p class="text-slate-400 mb-8">Enterprise AI Agent Security Gateway</p>
+            
+            <div class="bg-slate-800 rounded-lg shadow-xl overflow-hidden border border-slate-700">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="bg-slate-950 border-b border-slate-700 text-sm">
+                            <th class="p-4 font-semibold text-slate-300">Status</th>
+                            <th class="p-4 font-semibold text-slate-300">Token</th>
+                            <th class="p-4 font-semibold text-slate-300">Agent</th>
+                            <th class="p-4 font-semibold text-slate-300">SQL / Intent</th>
+                            <th class="p-4 font-semibold text-slate-300">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="checkpoints-body">
+                        <tr><td colspan="5" class="p-4 text-center">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <script>
+            async function fetchCheckpoints() {
+                const res = await fetch('/v1/checkpoints');
+                const data = await res.json();
+                const tbody = document.getElementById('checkpoints-body');
+                tbody.innerHTML = '';
+                
+                data.checkpoints.forEach(cp => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'border-b border-slate-700 hover:bg-slate-750 transition';
+                    
+                    let statusBadge = '';
+                    if (cp.status === 'pending') statusBadge = '<span class="px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded text-xs font-bold uppercase tracking-wider">Pending</span>';
+                    else if (cp.status === 'applied') statusBadge = '<span class="px-2 py-1 bg-green-500/20 text-green-400 rounded text-xs font-bold uppercase tracking-wider">Applied</span>';
+                    else if (cp.status === 'denied') statusBadge = '<span class="px-2 py-1 bg-red-500/20 text-red-400 rounded text-xs font-bold uppercase tracking-wider">Denied</span>';
+                    else statusBadge = `<span class="px-2 py-1 bg-slate-500/20 text-slate-400 rounded text-xs font-bold uppercase tracking-wider">${cp.status}</span>`;
+
+                    let actions = '';
+                    if (cp.status === 'pending') {
+                        actions = `
+                            <button onclick="approve('${cp.public_id}')" class="px-3 py-1 bg-green-600 hover:bg-green-500 text-white rounded text-sm font-medium transition mr-2">Approve</button>
+                            <button onclick="reject('${cp.public_id}')" class="px-3 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-sm font-medium transition">Reject</button>
+                        `;
+                    }
+                    
+                    tr.innerHTML = `
+                        <td class="p-4 align-top">${statusBadge}</td>
+                        <td class="p-4 align-top font-mono text-sm text-slate-400">${cp.public_id}</td>
+                        <td class="p-4 align-top">${cp.agent_label || 'unknown'}</td>
+                        <td class="p-4 align-top">
+                            <div class="font-mono text-sm bg-slate-950 p-2 rounded text-emerald-400 mb-2 whitespace-pre-wrap">${cp.sql_text}</div>
+                            <div class="text-xs text-slate-400">Class: ${cp.classification} | Hash: ${cp.hash ? cp.hash.substring(0,8) + '...' : '-'}</div>
+                        </td>
+                        <td class="p-4 align-top">${actions}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            }
+
+            async function approve(token) {
+                await fetch(`/v1/checkpoints/${token}/approve`, { method: 'POST' });
+                fetchCheckpoints();
+            }
+            
+            async function reject(token) {
+                await fetch(`/v1/checkpoints/${token}/reject`, { method: 'POST' });
+                fetchCheckpoints();
+            }
+
+            fetchCheckpoints();
+            setInterval(fetchCheckpoints, 5000);
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
