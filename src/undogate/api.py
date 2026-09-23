@@ -1,3 +1,4 @@
+import dotenv; dotenv.load_dotenv()
 import os
 import sys
 
@@ -150,89 +151,186 @@ def reject_checkpoint(public_id: str):
 @app.get("/", response_class=HTMLResponse)
 def serve_dashboard():
     html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Undogate Control Plane</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-slate-900 text-slate-200 font-sans p-8">
-        <div class="max-w-6xl mx-auto">
-            <h1 class="text-3xl font-bold text-white mb-2">Undogate Control Plane</h1>
-            <p class="text-slate-400 mb-8">Enterprise AI Agent Security Gateway</p>
-            
-            <div class="bg-slate-800 rounded-lg shadow-xl overflow-hidden border border-slate-700">
-                <table class="w-full text-left border-collapse">
+<!DOCTYPE html>
+<html lang="en" class="antialiased">
+<head>
+    <meta charset="UTF-8">
+    <title>Undogate Sentinel | Control Plane</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        dark: '#0a0a0b',
+                        surface: '#121214',
+                        surfaceElevated: '#1c1c1f',
+                        border: '#27272a',
+                        primary: '#3b82f6',
+                        danger: '#ef4444',
+                        success: '#22c55e',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'Menlo', 'monospace'],
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+        body { background-color: #0a0a0b; color: #e4e4e7; }
+        .glass { background: rgba(28, 28, 31, 0.6); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .row-enter { animation: slideIn 0.3s ease-out forwards; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #0a0a0b; }
+        ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col font-sans selection:bg-primary selection:text-white">
+
+    <!-- Header -->
+    <header class="glass sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="relative flex h-3 w-3">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+            </div>
+            <h1 class="text-xl font-semibold tracking-tight text-white flex items-center gap-2">
+                Undogate <span class="text-xs px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">SENTINEL</span>
+            </h1>
+        </div>
+        <div class="flex items-center gap-4 text-sm text-zinc-400">
+            <div class="flex items-center gap-1.5">
+                <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div> System Online
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 p-6 md:p-8 max-w-[1400px] mx-auto w-full">
+        
+        <div class="mb-8 flex justify-between items-end">
+            <div>
+                <h2 class="text-2xl font-semibold text-white mb-1">Transaction Ledger</h2>
+                <p class="text-zinc-400 text-sm">Real-time audit of agent database operations.</p>
+            </div>
+        </div>
+
+        <div class="bg-surfaceElevated rounded-xl border border-border shadow-2xl overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm whitespace-nowrap">
                     <thead>
-                        <tr class="bg-slate-950 border-b border-slate-700 text-sm">
-                            <th class="p-4 font-semibold text-slate-300">Status</th>
-                            <th class="p-4 font-semibold text-slate-300">Token</th>
-                            <th class="p-4 font-semibold text-slate-300">Agent</th>
-                            <th class="p-4 font-semibold text-slate-300">SQL / Intent</th>
-                            <th class="p-4 font-semibold text-slate-300">Actions</th>
+                        <tr class="border-b border-border bg-surface text-zinc-400">
+                            <th class="px-6 py-4 font-medium">Status</th>
+                            <th class="px-6 py-4 font-medium">Agent ID</th>
+                            <th class="px-6 py-4 font-medium w-1/2">SQL Signature & Intent</th>
+                            <th class="px-6 py-4 font-medium text-right">Actions</th>
                         </tr>
                     </thead>
-                    <tbody id="checkpoints-body">
-                        <tr><td colspan="5" class="p-4 text-center">Loading...</td></tr>
+                    <tbody id="checkpoints-body" class="divide-y divide-border">
+                        <!-- Loading State -->
+                        <tr><td colspan="4" class="px-6 py-12 text-center text-zinc-500">Initiating neural link...</td></tr>
                     </tbody>
                 </table>
             </div>
         </div>
+    </main>
 
-        <script>
-            async function fetchCheckpoints() {
+    <script>
+        async function fetchCheckpoints() {
+            try {
                 const res = await fetch('/v1/checkpoints');
                 const data = await res.json();
                 const tbody = document.getElementById('checkpoints-body');
-                tbody.innerHTML = '';
                 
+                if (data.checkpoints.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="px-6 py-12 text-center text-zinc-500">No active transactions detected.</td></tr>';
+                    return;
+                }
+
+                let newHtml = '';
                 data.checkpoints.forEach(cp => {
-                    const tr = document.createElement('tr');
-                    tr.className = 'border-b border-slate-700 hover:bg-slate-750 transition';
-                    
                     let statusBadge = '';
-                    if (cp.status === 'pending') statusBadge = '<span class="px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded text-xs font-bold uppercase tracking-wider">Pending</span>';
-                    else if (cp.status === 'applied') statusBadge = '<span class="px-2 py-1 bg-green-500/20 text-green-400 rounded text-xs font-bold uppercase tracking-wider">Applied</span>';
-                    else if (cp.status === 'denied') statusBadge = '<span class="px-2 py-1 bg-red-500/20 text-red-400 rounded text-xs font-bold uppercase tracking-wider">Denied</span>';
-                    else statusBadge = `<span class="px-2 py-1 bg-slate-500/20 text-slate-400 rounded text-xs font-bold uppercase tracking-wider">${cp.status}</span>`;
-
-                    let actions = '';
-                    if (cp.status === 'pending') {
-                        actions = `
-                            <button onclick="approve('${cp.public_id}')" class="px-3 py-1 bg-green-600 hover:bg-green-500 text-white rounded text-sm font-medium transition mr-2">Approve</button>
-                            <button onclick="reject('${cp.public_id}')" class="px-3 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-sm font-medium transition">Reject</button>
-                        `;
-                    }
+                    let actionButtons = '';
                     
-                    tr.innerHTML = `
-                        <td class="p-4 align-top">${statusBadge}</td>
-                        <td class="p-4 align-top font-mono text-sm text-slate-400">${cp.public_id}</td>
-                        <td class="p-4 align-top">${cp.agent_label || 'unknown'}</td>
-                        <td class="p-4 align-top">
-                            <div class="font-mono text-sm bg-slate-950 p-2 rounded text-emerald-400 mb-2 whitespace-pre-wrap">${cp.sql_text}</div>
-                            <div class="text-xs text-slate-400">Class: ${cp.classification} | Hash: ${cp.hash ? cp.hash.substring(0,8) + '...' : '-'}</div>
-                        </td>
-                        <td class="p-4 align-top">${actions}</td>
+                    if (cp.status === 'pending') {
+                        statusBadge = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 text-xs font-medium"><span class="w-1 h-1 rounded-full bg-yellow-400 animate-pulse"></span>PENDING</span>`;
+                        actionButtons = `
+                            <button onclick="approve('${cp.public_id}')" class="px-4 py-1.5 bg-zinc-100 hover:bg-white text-zinc-900 rounded-lg text-sm font-medium transition-all shadow-sm focus:ring-2 focus:ring-white/20 active:scale-95">Approve</button>
+                            <button onclick="reject('${cp.public_id}')" class="px-4 py-1.5 bg-danger/10 hover:bg-danger/20 text-danger border border-danger/20 rounded-lg text-sm font-medium transition-all focus:ring-2 focus:ring-danger/20 active:scale-95">Reject</button>
+                        `;
+                    } else if (cp.status === 'applied') {
+                        statusBadge = `<span class="inline-flex items-center px-2.5 py-1 rounded-md bg-green-500/10 text-green-400 border border-green-500/20 text-xs font-medium">APPLIED</span>`;
+                        actionButtons = `<span class="text-zinc-500 text-sm">Committed</span>`;
+                    } else if (cp.status === 'denied') {
+                        statusBadge = `<span class="inline-flex items-center px-2.5 py-1 rounded-md bg-red-500/10 text-red-400 border border-red-500/20 text-xs font-medium">DENIED</span>`;
+                        actionButtons = `<span class="text-zinc-500 text-sm">Rejected</span>`;
+                    } else {
+                        statusBadge = `<span class="inline-flex items-center px-2.5 py-1 rounded-md bg-zinc-500/10 text-zinc-400 border border-zinc-500/20 text-xs font-medium uppercase">${cp.status}</span>`;
+                        actionButtons = `<span class="text-zinc-500 text-sm">-</span>`;
+                    }
+
+                    // Parse the reason/decision if available in the decision field, normally it's an enum, so we show hash instead
+                    const hashDisplay = cp.hash ? `<div class="mt-2 flex items-center gap-1.5 text-xs text-zinc-500"><svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg> ${cp.hash.substring(0,12)}...</div>` : '';
+
+                    newHtml += `
+                        <tr class="hover:bg-surface transition-colors group">
+                            <td class="px-6 py-5 align-top">
+                                ${statusBadge}
+                                <div class="text-[10px] text-zinc-500 mt-2 font-mono uppercase tracking-wider">${new Date(cp.created_at).toLocaleTimeString()}</div>
+                            </td>
+                            <td class="px-6 py-5 align-top">
+                                <div class="text-sm text-zinc-300 font-medium">${cp.agent_label || 'Anonymous'}</div>
+                                <div class="text-xs text-zinc-500 font-mono mt-1">${cp.public_id}</div>
+                            </td>
+                            <td class="px-6 py-5 align-top whitespace-normal">
+                                <div class="bg-dark/50 border border-border rounded-lg p-3 font-mono text-[13px] text-emerald-400/90 leading-relaxed overflow-x-auto shadow-inner">
+                                    ${cp.sql_text}
+                                </div>
+                                <div class="mt-2 text-xs font-medium text-yellow-500/80 flex items-center gap-1.5">
+                                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                                    Risk Class: ${cp.classification}
+                                </div>
+                                ${hashDisplay}
+                            </td>
+                            <td class="px-6 py-5 align-top text-right">
+                                <div class="flex items-center justify-end gap-2">
+                                    ${actionButtons}
+                                </div>
+                            </td>
+                        </tr>
                     `;
-                    tbody.appendChild(tr);
                 });
+                
+                tbody.innerHTML = newHtml;
+            } catch (err) {
+                console.error("Link severed:", err);
             }
+        }
 
-            async function approve(token) {
-                await fetch(`/v1/checkpoints/${token}/approve`, { method: 'POST' });
-                fetchCheckpoints();
-            }
-            
-            async function reject(token) {
-                await fetch(`/v1/checkpoints/${token}/reject`, { method: 'POST' });
-                fetchCheckpoints();
-            }
-
+        async function approve(token) {
+            await fetch(`/v1/checkpoints/${token}/approve`, { method: 'POST' });
             fetchCheckpoints();
-            setInterval(fetchCheckpoints, 5000);
-        </script>
-    </body>
-    </html>
-    """
+        }
+        
+        async function reject(token) {
+            await fetch(`/v1/checkpoints/${token}/reject`, { method: 'POST' });
+            fetchCheckpoints();
+        }
+
+        fetchCheckpoints();
+        setInterval(fetchCheckpoints, 3000);
+    </script>
+</body>
+</html>
+
+"""
     return html_content
