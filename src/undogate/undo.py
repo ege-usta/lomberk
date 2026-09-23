@@ -1,6 +1,7 @@
 import psycopg
 from psycopg.sql import SQL, Identifier, Literal
 
+
 class UndoEngine:
     def __init__(self, dsn: str):
         self.dsn = dsn
@@ -8,10 +9,59 @@ class UndoEngine:
     def undo(self, checkpoint_id: int, force: bool = False) -> bool:
         with psycopg.connect(self.dsn) as conn:
             with conn.cursor() as cur:
-                # Disable triggers and FK constraints for this transaction
                 cur.execute("SET LOCAL session_replication_role = replica;")
                 
-                # Get all row changes for this checkpoint in reverse order
+                # Check for DDL
+                cur.execute("SELECT ddl_undo_plan FROM undogate.checkpoints WHERE id = %s", (checkpoint_id,))
+                ddl_plan = cur.fetchone()[0]
+                
+                if ddl_plan:
+                    for plan in reversed(ddl_plan):
+                        if plan["type"] == "drop_table":
+                            # Move back from trash
+                            cur.execute(SQL("ALTER TABLE undogate_trash.{backup} RENAME TO {table}").format(
+                                backup=Identifier(plan["backup_name"]),
+                                table=Identifier(plan["table"])
+                            ))
+                            cur.execute(SQL("ALTER TABLE undogate_trash.{table} SET SCHEMA {schema}").format(
+                                table=Identifier(plan["table"]),
+                                schema=Identifier(plan["schema"])
+                            ))
+                        elif plan["type"] == "truncate":
+                            # Insert data back
+                            cur.execute(SQL("INSERT INTO {schema}.{table} SELECT * FROM undogate_trash.{backup}").format(
+                                schema=Identifier(plan["schema"]),
+                                table=Identifier(plan["table"]),
+                                backup=Identifier(plan["backup_name"])
+                            ))
+                            cur.execute(SQL("DROP TABLE undogate_trash.{backup}").format(
+                                backup=Identifier(plan["backup_name"])
+                            ))
+                        elif plan["type"] == "drop_column":
+                            # Add column back
+                            cur.execute(SQL("ALTER TABLE {schema}.{table} ADD COLUMN {col} {col_type}").format(
+                                schema=Identifier(plan["schema"]),
+                                table=Identifier(plan["table"]),
+                                col=Identifier(plan["column"]),
+                                col_type=SQL(plan["col_type"])
+                            ))
+                            # Restore data
+                            cur.execute(SQL("""
+                                UPDATE {schema}.{table} t 
+                                SET {col} = b.{col} 
+                                FROM undogate_trash.{backup} b 
+                                WHERE t.id = b.id
+                            """).format(
+                                schema=Identifier(plan["schema"]),
+                                table=Identifier(plan["table"]),
+                                col=Identifier(plan["column"]),
+                                backup=Identifier(plan["backup_name"])
+                            ))
+                            cur.execute(SQL("DROP TABLE undogate_trash.{backup}").format(
+                                backup=Identifier(plan["backup_name"])
+                            ))
+
+                # Undo DML
                 cur.execute(
                     """
                     SELECT id, table_schema, table_name, op, pk, old_row, new_row 
@@ -23,52 +73,28 @@ class UndoEngine:
                 )
                 changes = cur.fetchall()
                 
-                if not changes:
-                    # Check if it was a DDL or something else
-                    pass
-                    
                 for change in changes:
                     c_id, schema, table, op, pk, old_row, new_row = change
-                    
                     if op == 'I':
-                        # Undo Insert -> Delete
-                        cur.execute(
-                            SQL("DELETE FROM {schema}.{table} WHERE id = {pk_val}").format(
-                                schema=Identifier(schema),
-                                table=Identifier(table),
-                                pk_val=Literal(pk.get("id"))
-                            )
-                        )
+                        cur.execute(SQL("DELETE FROM {schema}.{table} WHERE id = {pk_val}").format(
+                            schema=Identifier(schema), table=Identifier(table), pk_val=Literal(pk.get("id"))
+                        ))
                     elif op == 'U':
-                        # Undo Update -> Update back to old_row
-                        # Using jsonb_populate_record is tricky for UPDATE without knowing columns, 
-                        # but we can construct the SET clause from old_row keys.
                         set_items = []
                         values = []
                         for k, v in old_row.items():
                             set_items.append(SQL("{k} = %s").format(k=Identifier(k)))
                             values.append(v)
-                            
-                        values.append(pk.get("id")) # for WHERE
-                        
+                        values.append(pk.get("id"))
                         query = SQL("UPDATE {schema}.{table} SET {set_clause} WHERE id = %s").format(
-                            schema=Identifier(schema),
-                            table=Identifier(table),
-                            set_clause=SQL(", ").join(set_items)
+                            schema=Identifier(schema), table=Identifier(table), set_clause=SQL(", ").join(set_items)
                         )
                         cur.execute(query, values)
-                        
                     elif op == 'D':
-                        # Undo Delete -> Insert back
-                        cur.execute(
-                            SQL("INSERT INTO {schema}.{table} SELECT * FROM jsonb_populate_record(NULL::{schema}.{table}, %s)").format(
-                                schema=Identifier(schema),
-                                table=Identifier(table)
-                            ),
-                            (psycopg.types.json.Jsonb(old_row),)
-                        )
+                        cur.execute(SQL("INSERT INTO {schema}.{table} SELECT * FROM jsonb_populate_record(NULL::{schema}.{table}, %s)").format(
+                            schema=Identifier(schema), table=Identifier(table)
+                        ), (psycopg.types.json.Jsonb(old_row),))
                         
-                # Mark as undone
                 cur.execute("UPDATE undogate.checkpoints SET status = 'undone' WHERE id = %s", (checkpoint_id,))
                 conn.commit()
                 return True

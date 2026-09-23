@@ -1,11 +1,17 @@
-import pytest
 import psycopg
+import pytest
 from testcontainers.postgres import PostgresContainer
 
 from undogate.capture.install import install_undogate
 from undogate.executor import UndogateExecutor
+from undogate.models import (
+    ClassifiedStatement,
+    PolicyDecision,
+    StatementClass,
+    StatementEvaluation,
+)
 from undogate.undo import UndoEngine
-from undogate.models import StatementClass, ClassifiedStatement, PolicyDecision, StatementEvaluation
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -22,17 +28,16 @@ def setup_db(dsn):
     install_undogate(dsn)
     
     # Create test schema and table
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("""
                 CREATE TABLE public.test_users (
                     id SERIAL PRIMARY KEY,
                     name TEXT NOT NULL,
                     age INT
                 );
             """)
-            # Attach trigger
-            cur.execute("SELECT undogate.attach_trigger_to_table('public', 'test_users');")
+        # Attach trigger
+        cur.execute("SELECT undogate.attach_trigger_to_table('public', 'test_users');")
 
 def test_insert_undo(dsn, setup_db):
     executor = UndogateExecutor(dsn)
@@ -62,19 +67,17 @@ def test_insert_undo(dsn, setup_db):
     # 2. Undo
     undo_engine.undo(cp_id)
     
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Alice'")
-            assert cur.fetchone()[0] == 0
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Alice'")
+        assert cur.fetchone()[0] == 0
             
 def test_update_undo(dsn, setup_db):
     executor = UndogateExecutor(dsn)
     undo_engine = UndoEngine(dsn)
     
     # Insert manually
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO public.test_users (name, age) VALUES ('Bob', 40)")
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO public.test_users (name, age) VALUES ('Bob', 40)")
             
     # Update via executor
     stmt = ClassifiedStatement(sql="UPDATE public.test_users SET age = 41 WHERE name = 'Bob'", stmt_class=StatementClass.WRITE_DML, tables=["public.test_users"])
@@ -83,27 +86,24 @@ def test_update_undo(dsn, setup_db):
     res = executor.execute(eval)
     cp_id = res.checkpoint_id
     
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT age FROM public.test_users WHERE name = 'Bob'")
-            assert cur.fetchone()[0] == 41
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT age FROM public.test_users WHERE name = 'Bob'")
+        assert cur.fetchone()[0] == 41
             
     # Undo
     undo_engine.undo(cp_id)
     
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT age FROM public.test_users WHERE name = 'Bob'")
-            assert cur.fetchone()[0] == 40
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT age FROM public.test_users WHERE name = 'Bob'")
+        assert cur.fetchone()[0] == 40
             
 def test_delete_undo(dsn, setup_db):
     executor = UndogateExecutor(dsn)
     undo_engine = UndoEngine(dsn)
     
     # Insert manually
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO public.test_users (name, age) VALUES ('Charlie', 50)")
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO public.test_users (name, age) VALUES ('Charlie', 50)")
             
     # Delete via executor
     stmt = ClassifiedStatement(sql="DELETE FROM public.test_users WHERE name = 'Charlie'", stmt_class=StatementClass.WRITE_DML, tables=["public.test_users"])
@@ -112,18 +112,16 @@ def test_delete_undo(dsn, setup_db):
     res = executor.execute(eval)
     cp_id = res.checkpoint_id
     
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Charlie'")
-            assert cur.fetchone()[0] == 0
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Charlie'")
+        assert cur.fetchone()[0] == 0
             
     # Undo
     undo_engine.undo(cp_id)
     
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Charlie'")
-            assert cur.fetchone()[0] == 1
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Charlie'")
+        assert cur.fetchone()[0] == 1
 
 def test_cascade_delete_undo(dsn, setup_db):
     executor = UndogateExecutor(dsn)

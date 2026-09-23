@@ -1,12 +1,19 @@
-import pytest
 import psycopg
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from testcontainers.community.postgres import PostgresContainer
-from hypothesis import given, settings, strategies as st
 
 from undogate.capture.install import install_undogate
 from undogate.executor import UndogateExecutor
+from undogate.models import (
+    ClassifiedStatement,
+    PolicyDecision,
+    StatementClass,
+    StatementEvaluation,
+)
 from undogate.undo import UndoEngine
-from undogate.models import StatementClass, ClassifiedStatement, PolicyDecision, StatementEvaluation
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -20,15 +27,14 @@ def dsn(postgres):
 @pytest.fixture(scope="module")
 def setup_db(dsn):
     install_undogate(dsn)
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("""
                 CREATE TABLE public.prop_users (
                     id SERIAL PRIMARY KEY,
                     val INT NOT NULL
                 );
             """)
-            cur.execute("SELECT undogate.attach_trigger_to_table('public', 'prop_users');")
+        cur.execute("SELECT undogate.attach_trigger_to_table('public', 'prop_users');")
 
 def get_checksum(dsn):
     with psycopg.connect(dsn) as conn:
