@@ -2,6 +2,7 @@ import json
 
 import pglast
 import psycopg
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from undogate.ddl.handlers import handle_drop_column, handle_drop_table, handle_truncate
@@ -18,9 +19,10 @@ class ExecutionResult(BaseModel):
 class UndogateExecutor:
     def __init__(self, dsn: str):
         self.dsn = dsn
+        self.pool = ConnectionPool(dsn, min_size=1, max_size=20, timeout=30)
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str) -> str:
-        with psycopg.connect(self.dsn) as conn:
+        with self.pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT undogate.begin_checkpoint(%s, %s, %s, %s)",
@@ -31,7 +33,7 @@ class UndogateExecutor:
                 return cur.fetchone()[0]
 
     def execute_pending(self, public_id: str) -> ExecutionResult:
-        with psycopg.connect(self.dsn) as conn:
+        with self.pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT id, sql_text, status FROM undogate.checkpoints WHERE public_id = %s", (public_id,))
                 row = cur.fetchone()
@@ -72,7 +74,7 @@ class UndogateExecutor:
                 message=f"{eval_result.reason}. Use 'undogate approve {public_id}'"
             )
 
-        with psycopg.connect(self.dsn) as conn:
+        with self.pool.connection() as conn:
             with conn.cursor() as cur:
                 # Begin new checkpoint
                 cur.execute(

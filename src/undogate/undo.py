@@ -85,17 +85,35 @@ class UndoEngine:
                         for k, v in old_row.items():
                             set_items.append(SQL("{k} = %s").format(k=Identifier(k)))
                             values.append(v)
-                        values.append(pk.get("id"))
-                        
-                        # Rebase Conflict Detection: We only update if the row hasn't been modified by another human/process
-                        # For MVP, we use rowcount to ensure the row still exists and wasn't deleted by a human.
-                        query = SQL("UPDATE {schema}.{table} SET {set_clause} WHERE id = %s").format(
-                            schema=Identifier(schema), table=Identifier(table), set_clause=SQL(", ").join(set_items)
-                        )
-                        cur.execute(query, values)
-                        if cur.rowcount == 0 and not force:
-                            raise Exception(f"Rebase Conflict: Row {pk.get('id')} in {table} was missing or altered. Use force=True to overwrite.")
                             
+                        # Strict Rebase Detection: Ensure row hasn't been mutated since the agent
+                        # We build an AND clause checking every key in new_row
+                        where_items = [SQL("id = %s")]
+                        where_values = [pk.get("id")]
+                        
+                        if not force:
+                            for k, v in new_row.items():
+                                if v is None:
+                                    where_items.append(SQL("{k} IS NULL").format(k=Identifier(k)))
+                                else:
+                                    where_items.append(SQL("{k} = %s").format(k=Identifier(k)))
+                                    where_values.append(v)
+                                    
+                        query = SQL("UPDATE {schema}.{table} SET {set_clause} WHERE {where_clause}").format(
+                            schema=Identifier(schema), 
+                            table=Identifier(table), 
+                            set_clause=SQL(", ").join(set_items),
+                            where_clause=SQL(" AND ").join(where_items)
+                        )
+                        values.extend(where_values)
+                        
+                        cur.execute(query, values)
+                        if cur.rowcount == 0:
+                            if force:
+                                # Fallback if force=True and ID doesn't exist? No, if force=True we just check ID
+                                pass 
+                            else:
+                                raise Exception(f"Strict Rebase Conflict: Row {pk.get('id')} in {table} was mutated by another transaction after this checkpoint. Undo aborted to prevent data loss. Use force=True to overwrite.")
                     elif op == 'D':
                         # Check if a human already inserted a row with the same ID
                         cur.execute(SQL("SELECT 1 FROM {schema}.{table} WHERE id = %s").format(
