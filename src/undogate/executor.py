@@ -139,6 +139,17 @@ class UndogateExecutor:
                     columns = [desc[0] for desc in cur.description]
                     rows = cur.fetchall()
                     # Convert to list of dicts for JSON serialization with Dynamic Data Masking (DDM)
+                    
+                    # MCP Tainted Data Neutralizer (Second-Order Prompt Injection Shield)
+                    # Strips out LLM control tokens and markdown commands from DB payloads
+                    def sanitize_payload(val_str: str) -> str:
+                        import re
+                        # Remove anything that looks like an LLM system prompt override or tag
+                        val_str = re.sub(r'(?i)<\|.*?\|>', '[SANITIZED_TOKEN]', val_str)
+                        val_str = re.sub(r'(?i)<!--.*?-->', '[SANITIZED_COMMENT]', val_str)
+                        val_str = re.sub(r'(?i)system:\s*override', '[SANITIZED_OVERRIDE]', val_str)
+                        return val_str
+
                     SENSITIVE_COLUMNS = {"password", "ssn", "credit_card", "secret", "token", "hash"}
                     fetched_data = []
                     for row in rows:
@@ -151,6 +162,8 @@ class UndogateExecutor:
                                     row_dict[col] = "***MASKED***" + val_str[-4:]
                                 else:
                                     row_dict[col] = "***MASKED***"
+                            elif isinstance(row_dict[col], str):
+                                row_dict[col] = sanitize_payload(row_dict[col])
                         fetched_data.append(row_dict)
 
                 
