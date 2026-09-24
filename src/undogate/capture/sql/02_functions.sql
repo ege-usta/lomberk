@@ -50,6 +50,26 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
+
+CREATE OR REPLACE FUNCTION undogate.claim_checkpoint(p_cp_id BIGINT) RETURNS UUID AS $$
+DECLARE
+    v_token UUID;
+    v_status TEXT;
+BEGIN
+    SELECT status INTO v_status FROM undogate.checkpoints WHERE id = p_cp_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Checkpoint not found';
+    END IF;
+    IF v_status NOT IN ('pending', 'approved') THEN
+        RAISE EXCEPTION 'Checkpoint not executable';
+    END IF;
+    
+    v_token := gen_random_uuid();
+    UPDATE undogate.checkpoints SET exec_token = v_token WHERE id = p_cp_id;
+    RETURN v_token;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
+
 -- 2. Row Trigger Function
 CREATE OR REPLACE FUNCTION undogate.capture_row_change() RETURNS TRIGGER AS $$
 DECLARE
@@ -61,18 +81,43 @@ DECLARE
     v_new JSONB := NULL;
     v_caller TEXT;
 BEGIN
+    v_caller := session_user;
     v_cp_id_text := current_setting('undogate.checkpoint_id', true);
+    
     IF v_cp_id_text IS NULL OR v_cp_id_text = '' THEN
-        -- If current user is the agent role, DENY contextless writes
-        IF session_user = '__AGENT_ROLE__' THEN
+        IF v_caller = '__AGENT_ROLE__' THEN
             RAISE EXCEPTION 'Undogate Security Violation: DML execution attempted outside of a trusted checkpoint context.';
         ELSE
-            -- Normal backend application writing, just return NEW (skip capture)
-            RETURN NULL; -- Wait, AFTER trigger returning NULL is fine, but for row triggers it's usually RETURN NULL for AFTER.
+            RETURN NULL;
         END IF;
     END IF;
     
     v_cp_id := v_cp_id_text::BIGINT;
+    
+    -- Anti-forgery guard: Validate checkpoint ownership and state
+    DECLARE
+        v_cp_token UUID;
+        v_cp_status TEXT;
+        v_guc_token TEXT;
+    BEGIN
+        SELECT exec_token, status INTO v_cp_token, v_cp_status 
+        FROM undogate.checkpoints 
+        WHERE id = v_cp_id;
+        
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Undogate Security Violation: Invalid checkpoint context.';
+        END IF;
+        
+        v_guc_token := current_setting('undogate.exec_token', true);
+        
+        IF v_cp_token IS NULL OR v_guc_token IS NULL OR v_cp_token::TEXT != v_guc_token THEN
+            RAISE EXCEPTION 'Undogate Security Violation: Checkpoint forged or execution token mismatch.';
+        END IF;
+        
+        IF v_cp_status NOT IN ('pending', 'approved') THEN
+            RAISE EXCEPTION 'Undogate Security Violation: Checkpoint is not in an executable state.';
+        END IF;
+    END;
     
     v_seq := current_setting('undogate.seq', true)::BIGINT + 1;
     PERFORM set_config('undogate.seq', v_seq::text, true);
@@ -178,6 +223,7 @@ CREATE OR REPLACE FUNCTION undogate.grant_agent_access(p_agent_role TEXT) RETURN
 BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA undogate TO %I', p_agent_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.begin_checkpoint TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.claim_checkpoint TO %I', p_agent_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.finish_checkpoint TO %I', p_agent_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.reject_checkpoint TO %I', p_agent_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.fail_checkpoint TO %I', p_agent_role);

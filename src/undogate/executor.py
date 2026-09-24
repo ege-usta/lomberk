@@ -78,7 +78,8 @@ class UndogateExecutor:
                 from undogate.sentinel import AISentinel
                 safe, reason = AISentinel()._ast_firewall(sql_to_execute)
                 if not safe:
-                    cur.execute("UPDATE undogate.checkpoints SET status = 'denied' WHERE id = %s", (cp_id,))
+                    cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+
                     conn.commit()
                     return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
 
@@ -154,13 +155,22 @@ class UndogateExecutor:
                 cur.execute("SELECT public_id FROM undogate.checkpoints WHERE id = %s", (cp_id,))
                 public_id = cur.fetchone()[0]
                 
+                conn.commit()
+                
                 return self._execute_internal(conn, cur, cp_id, public_id, eval_result.statement.sql)
+
                 
     def _execute_internal(self, conn, cur, cp_id, public_id, sql_to_execute) -> ExecutionResult:
         try:
-            # Set the local configuration for the transaction so triggers know the cp_id
+            # Claim the checkpoint to get the execution token
+            cur.execute("SELECT undogate.claim_checkpoint(%s)", (cp_id,))
+            exec_token = cur.fetchone()[0]
+            
+            # Set the local configuration for the transaction so triggers know the cp_id and token
             cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
+            cur.execute("SELECT set_config('undogate.exec_token', %s, true)", (str(exec_token),))
             cur.execute("SELECT set_config('undogate.seq', '0', true)")
+
             
             # Enforce Registration and Lock
             from undogate.sql.classify import extract_tables_from_ast

@@ -39,6 +39,8 @@ def setup_db(dsn, runtime_dsn):
         cur.execute("CREATE TABLE IF NOT EXISTS public.users (id SERIAL PRIMARY KEY, data TEXT, role TEXT, password TEXT)")
         cur.execute("CREATE TABLE IF NOT EXISTS public.dangerous_function ()")
         cur.execute("INSERT INTO public.users (data) VALUES ('test_admin'); SELECT undogate.register_table('public', 'users', 'id', 'mcp_agent')")
+        cur.execute("REVOKE SELECT, UPDATE ON public.users FROM mcp_agent")
+        cur.execute("GRANT SELECT (id, data, role), UPDATE (id, data, role) ON public.users TO mcp_agent")
 
 def test_llm_safe_boolean_mock(monkeypatch):
     from undogate.sentinel import AISentinel
@@ -82,8 +84,8 @@ def test_timeout_mock(monkeypatch):
     assert "Network/API failure" in reason
     
 
-def test_api_valid_approval_flow(monkeypatch, dsn, setup_db):
-    monkeypatch.setenv("UNDOGATE_AGENT_DSN", dsn)
+def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
+    monkeypatch.setenv("UNDOGATE_AGENT_DSN", runtime_dsn)
     monkeypatch.setenv("UNDOGATE_API_KEY", "agent")
     monkeypatch.setenv("UNDOGATE_ADMIN_KEY", "admin")
     
@@ -112,56 +114,80 @@ def test_api_valid_approval_flow(monkeypatch, dsn, setup_db):
             cur.execute("SELECT data FROM public.users WHERE id = 1")
             assert cur.fetchone()[0] == "updated"
 
+
+
+
 def test_p0_quoted_identifier_injection(dsn, runtime_dsn, setup_db):
+    from undogate.executor import UndogateExecutor
+    import psycopg
     executor = UndogateExecutor(runtime_dsn)
-    # The statement has a maliciously crafted table name that tries to inject SQL
-    # Due to RangeVar fixes, this table name will simply be treated as a literal table name.
-    # It will fail the registration check rather than executing `SELECT 1;`
+    
     stmt = ClassifiedStatement(sql='UPDATE public."users; SELECT 1; --" SET data=\'x\' WHERE id=1', stmt_class=StatementClass.WRITE_DML, tables=[])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
-    try:
-        res = executor.execute(eval)
-        assert res.status == "failed"
-    except Exception as e:
-        pass
-
-def test_p0_runtime_missing_context(dsn, runtime_dsn, setup_db):
-    # If mcp_agent tries to insert without a checkpoint, the trigger should block it
-    import psycopg
-    with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        try:
-            cur.execute("INSERT INTO public.users (data) VALUES ('bypass')")
-            assert False, "Should have raised an exception"
-        except psycopg.errors.RaiseException as e:
-            assert "Undogate Security Violation" in str(e)
-
-def test_p0_runtime_checkpoint_state_change(dsn, runtime_dsn, setup_db):
-    # Check that the mcp_agent CANNOT execute an arbitrary UPDATE on checkpoints
-    import psycopg
-    with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        try:
-            cur.execute("UPDATE undogate.checkpoints SET status = 'applied' WHERE id = 1")
-            assert False, "Should have raised permission denied"
-        except psycopg.errors.InsufficientPrivilege as e:
-            assert "permission denied for table checkpoints" in str(e)
+    
+    res = executor.execute(eval)
+    assert res.status == "failed"
+    assert "does not exist" in res.message or "not registered" in res.message
 
 def test_p0_sensitive_alias_leak(dsn, runtime_dsn, setup_db):
+    from undogate.executor import UndogateExecutor
+    import psycopg
     executor = UndogateExecutor(runtime_dsn)
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE public.users SET password = 'real-synthetic-secret' WHERE id = 1")
+        
     stmt = ClassifiedStatement(sql='SELECT password AS safe_val FROM public.users', stmt_class=StatementClass.READ, tables=["public.users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Test")
-    try:
-        res = executor.execute(eval)
-        assert res.status in ("failed", "denied")
-    except Exception as e:
-        pass
+    
+    res = executor.execute(eval)
+    assert res.status == "failed"
+    assert "Access denied: Query contains sensitive columns" in res.message
 
 def test_p0_sensitive_returning_leak(dsn, runtime_dsn, setup_db):
+    from undogate.executor import UndogateExecutor
     executor = UndogateExecutor(runtime_dsn)
-    stmt = ClassifiedStatement(sql='UPDATE public.users SET data=\'x\' RETURNING password', stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
+    
+    stmt = ClassifiedStatement(sql='UPDATE public.users SET data=\'x\' WHERE id=1 RETURNING password', stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
-    try:
-        res = executor.execute(eval)
-        assert res.status in ("failed", "denied")
-    except Exception as e:
-        pass
+    
+    res = executor.execute(eval)
+    assert res.status == "failed"
+    assert "Access denied: Query contains sensitive columns" in res.message
 
+def test_p0_whole_row_wildcard_leak(dsn, runtime_dsn, setup_db):
+    from undogate.executor import UndogateExecutor
+    executor = UndogateExecutor(runtime_dsn)
+    
+    stmt = ClassifiedStatement(sql='SELECT * FROM public.users', stmt_class=StatementClass.READ, tables=["public.users"])
+    eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Test")
+    
+    res = executor.execute(eval)
+    assert res.status == "failed"
+    assert "Access denied" in res.message or "permission denied" in res.message
+
+def test_p0_runtime_missing_context(dsn, runtime_dsn, setup_db):
+    import psycopg
+    import pytest
+    with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.RaiseException, match="Undogate Security Violation"):
+            cur.execute("INSERT INTO public.users (data) VALUES ('bypass')")
+
+def test_p0_forged_context_rejected(dsn, runtime_dsn, setup_db):
+    import psycopg
+    import pytest
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'pending')")
+        cp_id = cur.fetchone()[0]
+        
+    with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
+        with pytest.raises(psycopg.errors.RaiseException, match="Invalid checkpoint context|Security Violation"):
+            cur.execute("INSERT INTO public.users (data) VALUES ('forged')")
+
+def test_p0_runtime_checkpoint_state_change(dsn, runtime_dsn, setup_db):
+    import psycopg
+    import pytest
+    with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="permission denied"):
+            cur.execute("UPDATE undogate.checkpoints SET status = 'applied' WHERE id = 1")

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS undogate.checkpoints (
     decision      TEXT NOT NULL,
     status        TEXT NOT NULL, -- 'applied', 'undone', 'failed', 'pending'
     rows_affected INTEGER,
+    exec_token UUID,
     ddl_undo_plan JSONB,
     prev_hash     TEXT,
     hash          TEXT
