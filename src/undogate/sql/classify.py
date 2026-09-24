@@ -92,42 +92,39 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
     return results
 
 def extract_tables_from_ast(ast):
-    tables = []
-    for stmt_dict in ast:
-        refs = list(referenced_relations(stmt_dict))
-        for ref in refs:
-            # ref is a string like 'public.users' or '"public"."users"'
-            # pglast's referenced_relations returns the string. We need to parse it safely.
-            # actually referenced_relations already formats it.
-            # But wait, pglast provides `stmt.relation` for updates/deletes!
-            # Let's write a safe string parser or use psycopg.sql ?
-            # Actually, instead of split('.'), let's just find the last dot that isn't inside quotes.
-            # For simplicity, if we know we only support unquoted or properly quoted, we can just split by '.'
-            # But the requirement is: "Noktalı/quoted/mixed-case identifier hedeflerini AST üzerinden doğru çöz."
-            pass
+    class RangeVarVisitor(Visitor):
+        def __init__(self):
+            super().__init__()
+            self.tables = []
+        def visit_RangeVar(self, ancestors, node):
+            schema = node.schemaname if getattr(node, 'schemaname', None) else 'public'
+            table = node.relname
+            if table:
+                self.tables.append((schema, table))
             
-def extract_tables_from_ast(ast):
-    tables = []
+    visitor = RangeVarVisitor()
     for stmt_dict in ast:
-        refs = list(referenced_relations(stmt_dict))
-        for ref in refs:
-            # A safe way to split a SQL identifier by dot, respecting double quotes
-            parts = []
-            current = ""
-            in_quotes = False
-            for char in ref:
-                if char == '"':
-                    in_quotes = not in_quotes
-                    current += char
-                elif char == '.' and not in_quotes:
-                    parts.append(current)
-                    current = ""
-                else:
-                    current += char
-            parts.append(current)
+        visitor(stmt_dict)
+    return list(dict.fromkeys(visitor.tables))
+
+
+def check_sensitive_columns(ast):
+    from pglast.visitors import Visitor
+    class ColumnRefVisitor(Visitor):
+        def __init__(self):
+            super().__init__()
+            self.sensitive_found = []
+            self.sensitive_keywords = {"password", "token", "secret", "ssn", "hash", "credit_card"}
             
-            if len(parts) == 1:
-                tables.append(('public', parts[0].strip('"')))
-            elif len(parts) == 2:
-                tables.append((parts[0].strip('"'), parts[1].strip('"')))
-    return tables
+        def visit_ColumnRef(self, ancestors, node):
+            # Fields is a list of String or A_Star nodes
+            for field in node.fields:
+                if hasattr(field, 'sval'):
+                    val = field.sval.lower()
+                    if any(k in val for k in self.sensitive_keywords):
+                        self.sensitive_found.append(field.sval)
+                        
+    visitor = ColumnRefVisitor()
+    for stmt_dict in ast:
+        visitor(stmt_dict)
+    return visitor.sensitive_found

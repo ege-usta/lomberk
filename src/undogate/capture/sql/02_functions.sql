@@ -43,7 +43,10 @@ CREATE OR REPLACE FUNCTION undogate.finish_checkpoint(
 BEGIN
     UPDATE undogate.checkpoints 
     SET status = 'applied', rows_affected = p_rows_affected
-    WHERE id = p_cp_id;
+    WHERE id = p_cp_id AND status = 'pending';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Checkpoint % not found or invalid state transition.', p_cp_id;
+    END IF;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
@@ -56,11 +59,12 @@ DECLARE
     v_pk JSONB;
     v_old JSONB := NULL;
     v_new JSONB := NULL;
+    v_caller TEXT;
 BEGIN
     v_cp_id_text := current_setting('undogate.checkpoint_id', true);
     IF v_cp_id_text IS NULL OR v_cp_id_text = '' THEN
         -- If current user is the agent role, DENY contextless writes
-        IF current_user = '__AGENT_ROLE__' THEN
+        IF session_user = '__AGENT_ROLE__' THEN
             RAISE EXCEPTION 'Undogate Security Violation: DML execution attempted outside of a trusted checkpoint context.';
         ELSE
             -- Normal backend application writing, just return NEW (skip capture)
@@ -147,7 +151,10 @@ CREATE OR REPLACE FUNCTION undogate.fail_checkpoint(
 BEGIN
     UPDATE undogate.checkpoints 
     SET status = 'failed'
-    WHERE id = p_cp_id;
+    WHERE id = p_cp_id AND status = 'pending';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Checkpoint % not found or invalid state transition.', p_cp_id;
+    END IF;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 

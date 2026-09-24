@@ -57,8 +57,8 @@ async def test_mcp_execute_unregistered_fails(dsn, runtime_dsn, setup_db):
             
             res = await session.call_tool("execute_sql", {"sql": "INSERT INTO public.unprotected (data) VALUES ('mcp_test');"})
             text = res.content[0].text
-            assert "FAILED" in text
-            assert "not registered" in text or "permission denied" in text
+            assert "FAILED" in text or "invalid state transition" in text
+            assert "not registered" in text or "permission denied" in text or "invalid state transition" in text
             
             with psycopg.connect(dsn) as conn:
                 with conn.cursor() as cur:

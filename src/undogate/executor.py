@@ -2,6 +2,7 @@ import json
 
 import pglast
 import psycopg
+from psycopg import sql
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
@@ -118,10 +119,18 @@ class UndogateExecutor:
             )
 
         if eval_result.statement.stmt_class.value == "READ":
+            import pglast
+            from undogate.sql.classify import check_sensitive_columns
+            ast = pglast.parse_sql(eval_result.statement.sql)
+            sens_cols = check_sensitive_columns(ast)
+            if sens_cols:
+                return ExecutionResult(status="failed", message=f"Access denied: Query contains sensitive columns {sens_cols}")
+                
             with self.pool.connection() as conn:
+
                 with conn.cursor() as cur:
                     cur.execute("SET TRANSACTION READ ONLY")
-                    cur.execute("SET statement_timeout = '5s'")
+                    cur.execute("SET LOCAL statement_timeout = '5s'")
                     try:
                         cur.execute(eval_result.statement.sql)
                         fetched_data = None
@@ -164,25 +173,42 @@ class UndogateExecutor:
                     raise Exception(f"Direct DML on system schema {schema} is forbidden.")
                 
                 # Lock the table to prevent DDL races
-                cur.execute(f"LOCK TABLE {schema}.{table} IN ROW EXCLUSIVE MODE;")
+                cur.execute(sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE;").format(sql.Identifier(schema), sql.Identifier(table)))
                 
-                # Verify registration OID
+                # Verify registration OID and Trigger
                 cur.execute("""
-                    SELECT c.oid, r.table_oid
+                    SELECT c.oid, r.table_oid, r.pk_column,
+                           t.tgenabled, p.proname
                     FROM pg_class c
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                     LEFT JOIN undogate.registered_tables r 
                         ON r.schema_name = n.nspname AND r.table_name = c.relname
+                    LEFT JOIN pg_trigger t
+                        ON t.tgrelid = c.oid AND t.tgname = 'undogate_capture'
+                    LEFT JOIN pg_proc p ON p.oid = t.tgfoid
                     WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'
                 """, (schema, table))
                 row = cur.fetchone()
                 if not row:
                     raise Exception(f"Table {schema}.{table} does not exist.")
-                actual_oid, reg_oid = row
+                actual_oid, reg_oid, pk_col, tg_enabled, tg_func = row
+                
                 if reg_oid is None:
                     raise Exception(f"Table {schema}.{table} is not registered in Undogate.")
                 if actual_oid != reg_oid:
                     raise Exception(f"Table {schema}.{table} OID mismatch. It may have been dropped and recreated. Re-register required.")
+                if tg_func != 'capture_row_change':
+                    raise Exception(f"Table {schema}.{table} missing or invalid capture trigger function.")
+                if tg_enabled == 'D':
+                    raise Exception(f"Table {schema}.{table} capture trigger is disabled.")
+                    
+                # Verify PK column exists
+                cur.execute("""
+                    SELECT 1 FROM pg_attribute
+                    WHERE attrelid = %s AND attname = %s AND attnum > 0 AND NOT attisdropped
+                """, (actual_oid, pk_col))
+                if not cur.fetchone():
+                    raise Exception(f"Registered PK column {pk_col} does not exist on table {schema}.{table}.")
                     
             ddl_undo_plan = []
 
@@ -190,6 +216,12 @@ class UndogateExecutor:
 
             # We must parse again to find DDL reversible objects if any
             ast = pglast.parse_sql(sql_to_execute)
+            
+            from undogate.sql.classify import check_sensitive_columns
+            sens_cols = check_sensitive_columns(ast)
+            if sens_cols:
+                raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
+
             for stmt_dict in ast:
                 stmt = stmt_dict.stmt
                 stmt_type = type(stmt).__name__
@@ -225,7 +257,7 @@ class UndogateExecutor:
 
             fetched_data = None
             if not skip_execution:
-                cur.execute("SET statement_timeout = '5s'")
+                cur.execute("SET LOCAL statement_timeout = '5s'")
                 cur.execute(sql_to_execute)
                 if cur.description:
                     columns = [desc[0] for desc in cur.description]
