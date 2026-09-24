@@ -50,15 +50,16 @@ class UndogateExecutor:
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str) -> str:
         with self.pool.connection() as conn:
-
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT undogate.begin_checkpoint(%s, %s, %s, %s)",
+                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s, 'pending')",
                     (sql, stmt_class, decision, agent_label)
                 )
-                cp_id = cur.fetchone()[0]
-                cur.execute("SELECT public_id FROM undogate.checkpoints WHERE id = %s", (cp_id,))
-                return cur.fetchone()[0]
+                row = cur.fetchone()
+                cp_id = row[0]
+                public_id = row[1]
+                conn.commit()
+                return public_id
 
     def execute_pending(self, public_id: str) -> ExecutionResult:
         with self.pool.connection() as conn:
@@ -148,13 +149,14 @@ class UndogateExecutor:
             with conn.cursor() as cur:
                 # Begin new checkpoint
                 cur.execute(
-                    "SELECT undogate.begin_checkpoint(%s, %s, %s, %s)",
+                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s)",
                     (eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label)
                 )
-                cp_id = cur.fetchone()[0]
-                cur.execute("SELECT public_id FROM undogate.checkpoints WHERE id = %s", (cp_id,))
-                public_id = cur.fetchone()[0]
+                row = cur.fetchone()
+                cp_id = row[0]
+                public_id = row[1]
                 
+                conn.commit()
                 conn.commit()
                 
                 return self._execute_internal(conn, cur, cp_id, public_id, eval_result.statement.sql)
@@ -185,10 +187,10 @@ class UndogateExecutor:
                 # Lock the table to prevent DDL races
                 cur.execute(sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE;").format(sql.Identifier(schema), sql.Identifier(table)))
                 
-                # Verify registration OID and Trigger
+                # Verify registration OID and Trigger exact properties
                 cur.execute("""
                     SELECT c.oid, r.table_oid, r.pk_column,
-                           t.tgenabled, p.proname
+                           t.tgenabled, p.proname, np.nspname as func_schema, t.tgtype
                     FROM pg_class c
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                     LEFT JOIN undogate.registered_tables r 
@@ -196,29 +198,38 @@ class UndogateExecutor:
                     LEFT JOIN pg_trigger t
                         ON t.tgrelid = c.oid AND t.tgname = 'undogate_capture'
                     LEFT JOIN pg_proc p ON p.oid = t.tgfoid
+                    LEFT JOIN pg_namespace np ON np.oid = p.pronamespace
                     WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'
                 """, (schema, table))
                 row = cur.fetchone()
                 if not row:
                     raise Exception(f"Table {schema}.{table} does not exist.")
-                actual_oid, reg_oid, pk_col, tg_enabled, tg_func = row
+                actual_oid, reg_oid, pk_col, tg_enabled, tg_func, func_schema, tg_type = row
                 
                 if reg_oid is None:
                     raise Exception(f"Table {schema}.{table} is not registered in Undogate.")
                 if actual_oid != reg_oid:
                     raise Exception(f"Table {schema}.{table} OID mismatch. It may have been dropped and recreated. Re-register required.")
-                if tg_func != 'capture_row_change':
-                    raise Exception(f"Table {schema}.{table} missing or invalid capture trigger function.")
+                if tg_func != 'capture_row_change' or func_schema != 'undogate':
+                    raise Exception(f"Table {schema}.{table} missing or invalid capture trigger function. Must be undogate.capture_row_change.")
                 if tg_enabled == 'D':
                     raise Exception(f"Table {schema}.{table} capture trigger is disabled.")
+                
+                # Check tgtype: AFTER (2), INSERT (4), DELETE (8), UPDATE (16) => 2 | 4 | 8 | 16 = 30.
+                # But it's FOR EACH ROW (1). So tgtype must contain these bits.
+                # Bit 1 (0x01) = ROW, Bit 2 (0x02) = BEFORE, Bit 64 (0x40) = INSTEAD OF
+                if not (tg_type & 1) or (tg_type & 2) or (tg_type & 64):
+                    raise Exception(f"Table {schema}.{table} trigger is not AFTER EACH ROW.")
                     
-                # Verify PK column exists
+                # Verify PK column exists AND has a unique/primary key constraint
                 cur.execute("""
-                    SELECT 1 FROM pg_attribute
-                    WHERE attrelid = %s AND attname = %s AND attnum > 0 AND NOT attisdropped
+                    SELECT 1
+                    FROM pg_constraint con
+                    JOIN pg_attribute a ON a.attnum = ANY(con.conkey) AND a.attrelid = con.conrelid
+                    WHERE con.conrelid = %s AND a.attname = %s AND con.contype IN ('p', 'u')
                 """, (actual_oid, pk_col))
                 if not cur.fetchone():
-                    raise Exception(f"Registered PK column {pk_col} does not exist on table {schema}.{table}.")
+                    raise Exception(f"Registered PK column {pk_col} does not have a valid Primary Key or Unique constraint on table {schema}.{table}.")
                     
             ddl_undo_plan = []
 
@@ -293,7 +304,7 @@ class UndogateExecutor:
             # Mark checkpoint as failed
             with psycopg.connect(self.dsn, autocommit=True) as fail_conn:
                 with fail_conn.cursor() as fail_cur:
-                    fail_cur.execute("SELECT undogate.fail_checkpoint(%s)", (cp_id,))
+                    fail_cur.execute("SELECT undogate.fail_checkpoint(%s)", (public_id,))
 
             
             # Audit Stream

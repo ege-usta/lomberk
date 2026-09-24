@@ -3,36 +3,25 @@ CREATE OR REPLACE FUNCTION undogate.begin_checkpoint(
     p_sql_text TEXT,
     p_classification TEXT,
     p_decision TEXT,
-    p_agent_label TEXT DEFAULT NULL
-) RETURNS BIGINT AS $$
+    p_agent_label TEXT,
+    p_initial_status TEXT DEFAULT 'pending',
+    OUT o_cp_id BIGINT,
+    OUT o_public_id TEXT
+) AS $$
 DECLARE
-    v_cp_id BIGINT;
     v_public_id TEXT;
-    v_prev_hash TEXT;
-    v_hash TEXT;
+    v_id BIGINT;
 BEGIN
-    v_public_id := 'cp_' || substr(md5(random()::text || clock_timestamp()::text), 1, 8);
+    v_public_id := 'cp_' || substr(md5(random()::text), 1, 8);
     
-    LOCK TABLE undogate.checkpoints IN EXCLUSIVE MODE;
+    INSERT INTO undogate.checkpoints (
+        public_id, sql_text, classification, decision, agent_label, status
+    ) VALUES (
+        v_public_id, p_sql_text, p_classification, p_decision, p_agent_label, p_initial_status
+    ) RETURNING id INTO v_id;
     
-    SELECT hash INTO v_prev_hash 
-    FROM undogate.checkpoints 
-    ORDER BY id DESC LIMIT 1;
-    
-    IF v_prev_hash IS NULL THEN
-        v_prev_hash := 'genesis';
-    END IF;
-    
-    v_hash := md5(v_prev_hash || p_sql_text || p_classification || p_decision || COALESCE(p_agent_label, ''));
-    
-    INSERT INTO undogate.checkpoints (public_id, agent_label, sql_text, classification, decision, status, prev_hash, hash)
-    VALUES (v_public_id, p_agent_label, p_sql_text, p_classification, p_decision, 'pending', v_prev_hash, v_hash)
-    RETURNING id INTO v_cp_id;
-    
-    PERFORM set_config('undogate.checkpoint_id', v_cp_id::text, true);
-    PERFORM set_config('undogate.seq', '0', true);
-    
-    RETURN v_cp_id;
+    o_cp_id := v_id;
+    o_public_id := v_public_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
@@ -40,13 +29,23 @@ CREATE OR REPLACE FUNCTION undogate.finish_checkpoint(
     p_cp_id BIGINT,
     p_rows_affected INTEGER
 ) RETURNS VOID AS $$
+DECLARE
+    v_token UUID;
+    v_guc TEXT;
 BEGIN
-    UPDATE undogate.checkpoints 
-    SET status = 'applied', rows_affected = p_rows_affected
-    WHERE id = p_cp_id AND status = 'pending';
+    SELECT exec_token INTO v_token FROM undogate.checkpoints WHERE id = p_cp_id AND status = 'pending';
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Checkpoint % not found or invalid state transition.', p_cp_id;
     END IF;
+    
+    v_guc := current_setting('undogate.exec_token', true);
+    IF v_token IS NULL OR v_guc IS NULL OR v_token::TEXT != v_guc THEN
+        RAISE EXCEPTION 'Security Violation: Cannot finish checkpoint without valid execution token.';
+    END IF;
+
+    UPDATE undogate.checkpoints 
+    SET status = 'applied', rows_affected = p_rows_affected
+    WHERE id = p_cp_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
@@ -191,14 +190,14 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
 CREATE OR REPLACE FUNCTION undogate.fail_checkpoint(
-    p_cp_id BIGINT
+    p_public_id TEXT
 ) RETURNS VOID AS $$
 BEGIN
     UPDATE undogate.checkpoints 
     SET status = 'failed'
-    WHERE id = p_cp_id AND status = 'pending';
+    WHERE public_id = p_public_id AND status = 'pending';
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'Checkpoint % not found or invalid state transition.', p_cp_id;
+        RAISE EXCEPTION 'Checkpoint % not found or invalid state transition.', p_public_id;
     END IF;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
@@ -229,9 +228,9 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.fail_checkpoint TO %I', p_agent_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.get_pending_checkpoint TO %I', p_agent_role);
     
-    -- Agent only needs SELECT on checkpoints to fetch id, but they can use get_pending_checkpoint instead!
-    -- Actually they do need SELECT in execute_pending if they don't use the function. Let's just grant SELECT, but NOT UPDATE.
-    EXECUTE format('GRANT SELECT ON undogate.checkpoints TO %I', p_agent_role);
+    -- Explicitly revoke legacy grants that might have been given in older versions
+    EXECUTE format('REVOKE ALL ON undogate.checkpoints FROM %I', p_agent_role);
+    -- SELECT ON checkpoints intentionally not granted to protect exec_token
     EXECUTE format('GRANT SELECT ON undogate.registered_tables TO %I', p_agent_role);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
