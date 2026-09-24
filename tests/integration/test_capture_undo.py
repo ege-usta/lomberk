@@ -23,11 +23,22 @@ def dsn(postgres):
     return postgres.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
 
 @pytest.fixture(scope="module")
-def setup_db(dsn):
-    # Install undogate
-    install_undogate(dsn)
+def runtime_dsn(dsn):
+    # Parse dsn to replace username with mcp_agent
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(dsn)
+    return urlunparse((parsed.scheme, f"mcp_agent:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+@pytest.fixture(scope="module")
+def setup_db(dsn, runtime_dsn):
+    # Admin creates runtime role
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP ROLE IF EXISTS mcp_agent")
+        cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
     
-    # Create test schema and table
+    install_undogate(dsn, agent_role="mcp_agent")
+
+    # Create test schema and table as Admin
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
                 CREATE TABLE public.test_users (
@@ -36,11 +47,20 @@ def setup_db(dsn):
                     age INT
                 );
             """)
-        # Attach trigger
-        cur.execute("SELECT undogate.attach_trigger_to_table('public', 'test_users');")
+        cur.execute("SELECT undogate.register_table('public', 'test_users', 'id', 'mcp_agent');")
 
-def test_insert_undo(dsn, setup_db):
-    executor = UndogateExecutor(dsn)
+def assert_runtime_role(dsn):
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT current_user, session_user")
+        curr, sess = cur.fetchone()
+        assert curr == 'mcp_agent'
+        assert sess == 'mcp_agent'
+        cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'mcp_agent'")
+        assert cur.fetchone()[0] is False
+
+def test_insert_undo(dsn, runtime_dsn, setup_db):
+    assert_runtime_role(runtime_dsn)
+    executor = UndogateExecutor(runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_users (name, age) VALUES ('Alice', 30)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_users"])
@@ -48,7 +68,7 @@ def test_insert_undo(dsn, setup_db):
     
     # 1. Execute
     res = executor.execute(eval)
-    assert res.status == "applied"
+    assert res.status == "applied", res.message
     assert res.rows_affected == 1
     cp_id = res.checkpoint_id
     
@@ -71,8 +91,8 @@ def test_insert_undo(dsn, setup_db):
         cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Alice'")
         assert cur.fetchone()[0] == 0
             
-def test_update_undo(dsn, setup_db):
-    executor = UndogateExecutor(dsn)
+def test_update_undo(dsn, runtime_dsn, setup_db):
+    executor = UndogateExecutor(runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     # Insert manually
@@ -97,8 +117,8 @@ def test_update_undo(dsn, setup_db):
         cur.execute("SELECT age FROM public.test_users WHERE name = 'Bob'")
         assert cur.fetchone()[0] == 40
             
-def test_delete_undo(dsn, setup_db):
-    executor = UndogateExecutor(dsn)
+def test_delete_undo(dsn, runtime_dsn, setup_db):
+    executor = UndogateExecutor(runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     # Insert manually
@@ -123,8 +143,8 @@ def test_delete_undo(dsn, setup_db):
         cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Charlie'")
         assert cur.fetchone()[0] == 1
 
-def test_cascade_delete_undo(dsn, setup_db):
-    executor = UndogateExecutor(dsn)
+def test_cascade_delete_undo(dsn, runtime_dsn, setup_db):
+    executor = UndogateExecutor(runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     with psycopg.connect(dsn, autocommit=True) as conn:
@@ -136,7 +156,7 @@ def test_cascade_delete_undo(dsn, setup_db):
                     total INT
                 );
             """)
-            cur.execute("SELECT undogate.attach_trigger_to_table('public', 'test_orders');")
+            cur.execute("SELECT undogate.register_table('public', 'test_orders', 'id', 'mcp_agent');")
             
             # Insert User and Order
             cur.execute("INSERT INTO public.test_users (name, age) VALUES ('Dave', 60) RETURNING id")

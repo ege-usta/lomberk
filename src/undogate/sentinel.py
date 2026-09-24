@@ -8,32 +8,66 @@ class AISentinel:
     def __init__(self):
         self.api_key = os.environ.get("OPENAI_API_KEY")
         self.model = os.environ.get("UNDOGATE_SENTINEL_MODEL", "gpt-4o-mini")
-        
 
     def _ast_firewall(self, sql: str) -> tuple[bool, str]:
         import pglast
+        violations = []
+        
+        ALLOWED_STMTS = {'RawStmt', 'SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt'}
+
+        def traverse(node):
+            if isinstance(node, dict):
+                node_type = node.get('@')
+                
+                if node_type and node_type.endswith('Stmt'):
+                    if node_type not in ALLOWED_STMTS:
+                        violations.append(f"Command {node_type} is structurally banned")
+                
+                if node_type == 'SelectStmt':
+                    if node.get('intoClause') is not None:
+                        violations.append("SELECT INTO is structurally banned")
+                elif node_type == 'UpdateStmt':
+                    if node.get('whereClause') is None:
+                        violations.append("UPDATE statement missing WHERE clause")
+                elif node_type == 'DeleteStmt':
+                    if node.get('whereClause') is None:
+                        violations.append("DELETE statement missing WHERE clause")
+                
+                if node_type in ['InsertStmt', 'UpdateStmt', 'DeleteStmt']:
+                    relation = node.get('relation')
+                    if relation and isinstance(relation, dict) and relation.get('schemaname') is None:
+                        violations.append(f"Unqualified relation write in {node_type} (missing schema)")
+                        
+                if node_type == 'FuncCall':
+                    violations.append("Function calls are structurally banned in Round 1A")
+                            
+                for k, v in node.items():
+                    traverse(v)
+            elif isinstance(node, (list, tuple)):
+                for item in node:
+                    traverse(item)
+            elif hasattr(node, '__call__'):
+                try:
+                    traverse(node(skip_none=True))
+                except Exception:
+                    # Do not silently pass errors during AST traversal
+                    violations.append("AST traversal encountered an unsupported structure")
+
         try:
             ast = pglast.parse_sql(sql)
-            for stmt_dict in ast:
-                stmt = stmt_dict.stmt
-                stmt_type = type(stmt).__name__
+            if len(ast) > 1:
+                return False, "AST Firewall: Multiple stacked SQL statements detected."
                 
-                # Rule 1: No un-scoped DML (Missing WHERE clause)
-                if stmt_type == "UpdateStmt" and getattr(stmt, 'whereClause', None) is None:
-                    return False, "AST Firewall: UPDATE statement missing WHERE clause (Full table scan blocked)."
-                if stmt_type == "DeleteStmt" and getattr(stmt, 'whereClause', None) is None:
-                    return False, "AST Firewall: DELETE statement missing WHERE clause (Full table scan blocked)."
-                    
-                # Rule 2: Multi-statement execution blocking (SQL Injection prevention)
-                if len(ast) > 1:
-                    return False, "AST Firewall: Multiple stacked SQL statements detected. Possible injection."
-                    
-                # Rule 3: Ban highly destructive operations entirely unless explicitly whitelisted
-                if stmt_type in ["TruncateStmt", "DropdbStmt", "DropRoleStmt"]:
-                    return False, f"AST Firewall: Command {stmt_type} is structurally banned for AI agents."
-                    
+            for raw_stmt in ast:
+                traverse(raw_stmt(skip_none=True))
+            
+            if violations:
+                return False, "AST Firewall: " + " | ".join(violations)
+                
         except pglast.parser.ParseError as e:
-            return False, f"AST Firewall: Malformed SQL syntax. {e!s}"
+            return False, f"AST Firewall: Malformed SQL syntax. {str(e)}"
+        except Exception as e:
+            return False, f"AST Firewall: Unexpected error during parsing: {str(e)}"
             
         return True, ""
 
@@ -80,7 +114,10 @@ class AISentinel:
                 res_data = json.loads(response.read().decode())
                 content = res_data["choices"][0]["message"]["content"]
                 result = json.loads(content)
-                return result.get("safe", True), result.get("reason", "No reason provided")
+                safe_val = result.get("safe")
+                if not isinstance(safe_val, bool):
+                    return False, "Sentinel Error: Invalid boolean format in LLM response"
+                return safe_val, result.get("reason", "No reason provided")
         except Exception as e:
-            # On API failure, fail open or fail closed? Fail open for MVP.
-            return True, f"Sentinel Error: {e}"
+            # On API failure, fail closed for security.
+            return False, f"Sentinel Error: Network/API failure ({e})"

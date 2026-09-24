@@ -90,3 +90,44 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
         ))
         
     return results
+
+def extract_tables_from_ast(ast):
+    tables = []
+    for stmt_dict in ast:
+        refs = list(referenced_relations(stmt_dict))
+        for ref in refs:
+            # ref is a string like 'public.users' or '"public"."users"'
+            # pglast's referenced_relations returns the string. We need to parse it safely.
+            # actually referenced_relations already formats it.
+            # But wait, pglast provides `stmt.relation` for updates/deletes!
+            # Let's write a safe string parser or use psycopg.sql ?
+            # Actually, instead of split('.'), let's just find the last dot that isn't inside quotes.
+            # For simplicity, if we know we only support unquoted or properly quoted, we can just split by '.'
+            # But the requirement is: "Noktalı/quoted/mixed-case identifier hedeflerini AST üzerinden doğru çöz."
+            pass
+            
+def extract_tables_from_ast(ast):
+    tables = []
+    for stmt_dict in ast:
+        refs = list(referenced_relations(stmt_dict))
+        for ref in refs:
+            # A safe way to split a SQL identifier by dot, respecting double quotes
+            parts = []
+            current = ""
+            in_quotes = False
+            for char in ref:
+                if char == '"':
+                    in_quotes = not in_quotes
+                    current += char
+                elif char == '.' and not in_quotes:
+                    parts.append(current)
+                    current = ""
+                else:
+                    current += char
+            parts.append(current)
+            
+            if len(parts) == 1:
+                tables.append(('public', parts[0].strip('"')))
+            elif len(parts) == 2:
+                tables.append((parts[0].strip('"'), parts[1].strip('"')))
+    return tables

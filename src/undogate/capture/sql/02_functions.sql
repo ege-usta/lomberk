@@ -13,7 +13,6 @@ DECLARE
 BEGIN
     v_public_id := 'cp_' || substr(md5(random()::text || clock_timestamp()::text), 1, 8);
     
-    -- Lock checkpoints table for serialization of hashes
     LOCK TABLE undogate.checkpoints IN EXCLUSIVE MODE;
     
     SELECT hash INTO v_prev_hash 
@@ -24,15 +23,12 @@ BEGIN
         v_prev_hash := 'genesis';
     END IF;
     
-    -- Calculate sha256 hash (requires pgcrypto or we just use md5 for MVP. Let's use encode(digest(..., 'sha256'), 'hex') if pgcrypto is there, but without pgcrypto md5 is built-in).
-    -- We will use md5 to avoid enforcing pgcrypto extension for MVP, or we can just require pgcrypto. Let's use md5 for zero-deps.
     v_hash := md5(v_prev_hash || p_sql_text || p_classification || p_decision || COALESCE(p_agent_label, ''));
     
     INSERT INTO undogate.checkpoints (public_id, agent_label, sql_text, classification, decision, status, prev_hash, hash)
     VALUES (v_public_id, p_agent_label, p_sql_text, p_classification, p_decision, 'pending', v_prev_hash, v_hash)
     RETURNING id INTO v_cp_id;
     
-    -- Set the local configuration for the transaction
     PERFORM set_config('undogate.checkpoint_id', v_cp_id::text, true);
     PERFORM set_config('undogate.seq', '0', true);
     
@@ -63,7 +59,13 @@ DECLARE
 BEGIN
     v_cp_id_text := current_setting('undogate.checkpoint_id', true);
     IF v_cp_id_text IS NULL OR v_cp_id_text = '' THEN
-        RETURN NULL;
+        -- If current user is the agent role, DENY contextless writes
+        IF current_user = '__AGENT_ROLE__' THEN
+            RAISE EXCEPTION 'Undogate Security Violation: DML execution attempted outside of a trusted checkpoint context.';
+        ELSE
+            -- Normal backend application writing, just return NEW (skip capture)
+            RETURN NULL; -- Wait, AFTER trigger returning NULL is fine, but for row triggers it's usually RETURN NULL for AFTER.
+        END IF;
     END IF;
     
     v_cp_id := v_cp_id_text::BIGINT;
@@ -90,28 +92,98 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
--- 3. Trigger Installer
-CREATE OR REPLACE FUNCTION undogate.attach_trigger_to_table(p_schema TEXT, p_table TEXT) RETURNS VOID AS $$
+-- 3. Trigger Installer and Table Registration
+CREATE OR REPLACE FUNCTION undogate.register_table(p_schema TEXT, p_table TEXT, p_pk_column TEXT DEFAULT 'id', p_agent_role TEXT DEFAULT 'undogate_agent') RETURNS VOID AS $$
+DECLARE
+    v_oid OID;
 BEGIN
+    -- Resolve OID
+    SELECT c.oid INTO v_oid
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = p_schema AND c.relname = p_table AND c.relkind = 'r';
+    
+    IF v_oid IS NULL THEN
+        RAISE EXCEPTION 'Table %.% does not exist or is not a base table.', p_schema, p_table;
+    END IF;
+    
+    -- Insert into registry
+    INSERT INTO undogate.registered_tables (table_oid, schema_name, table_name, pk_column)
+    VALUES (v_oid, p_schema, p_table, p_pk_column)
+    ON CONFLICT (schema_name, table_name) DO UPDATE 
+    SET table_oid = EXCLUDED.table_oid, pk_column = EXCLUDED.pk_column;
+    
+    -- Attach trigger
     EXECUTE format('DROP TRIGGER IF EXISTS undogate_capture ON %I.%I', p_schema, p_table);
     EXECUTE format(
         'CREATE TRIGGER undogate_capture AFTER INSERT OR UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION undogate.capture_row_change()',
         p_schema, p_table
     );
+    
+    -- Grant DML to agent role
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.%I TO %I', p_schema, p_table, p_agent_role);
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_agent_role);
+
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
-CREATE OR REPLACE FUNCTION undogate.attach_triggers_to_all() RETURNS VOID AS $$
-DECLARE
-    r RECORD;
+CREATE OR REPLACE FUNCTION undogate.reject_checkpoint(
+    p_public_id TEXT
+) RETURNS VOID AS $$
 BEGIN
-    FOR r IN 
-        SELECT table_schema, table_name 
-        FROM information_schema.tables 
-        WHERE table_schema NOT IN ('undogate', 'undogate_trash', 'information_schema', 'pg_catalog') 
-          AND table_type = 'BASE TABLE'
-    LOOP
-        PERFORM undogate.attach_trigger_to_table(r.table_schema, r.table_name);
-    END LOOP;
+    UPDATE undogate.checkpoints 
+    SET status = 'rejected'
+    WHERE public_id = p_public_id AND status = 'pending';
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Pending checkpoint not found.';
+    END IF;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
+
+CREATE OR REPLACE FUNCTION undogate.fail_checkpoint(
+    p_cp_id BIGINT
+) RETURNS VOID AS $$
+BEGIN
+    UPDATE undogate.checkpoints 
+    SET status = 'failed'
+    WHERE id = p_cp_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
+
+CREATE OR REPLACE FUNCTION undogate.get_pending_checkpoint(
+    p_public_id TEXT
+) RETURNS TABLE (id BIGINT, sql_text TEXT, status TEXT) AS $$
+BEGIN
+    RETURN QUERY SELECT c.id, c.sql_text, c.status
+    FROM undogate.checkpoints c
+    WHERE c.public_id = p_public_id FOR UPDATE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
+
+-- Revoke public execute
+
+REVOKE ALL ON SCHEMA undogate FROM PUBLIC;
+REVOKE ALL ON SCHEMA undogate_trash FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA undogate FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION undogate.grant_agent_access(p_agent_role TEXT) RETURNS VOID AS $$
+BEGIN
+    EXECUTE format('GRANT USAGE ON SCHEMA undogate TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.begin_checkpoint TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.finish_checkpoint TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.reject_checkpoint TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.fail_checkpoint TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.get_pending_checkpoint TO %I', p_agent_role);
+    
+    -- Agent only needs SELECT on checkpoints to fetch id, but they can use get_pending_checkpoint instead!
+    -- Actually they do need SELECT in execute_pending if they don't use the function. Let's just grant SELECT, but NOT UPDATE.
+    EXECUTE format('GRANT SELECT ON undogate.checkpoints TO %I', p_agent_role);
+    EXECUTE format('GRANT SELECT ON undogate.registered_tables TO %I', p_agent_role);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
+
+-- Revoke public execute
+REVOKE ALL ON SCHEMA undogate FROM PUBLIC;
+REVOKE ALL ON SCHEMA undogate_trash FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA undogate FROM PUBLIC;

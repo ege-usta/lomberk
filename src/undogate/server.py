@@ -8,24 +8,46 @@ from undogate.config import load_config
 from undogate.executor import UndogateExecutor
 from undogate.policy import PolicyEngine
 from undogate.sql.classify import classify_sql
+from undogate.sentinel import AISentinel
 
-app = MCPServer("undogate")
-config = load_config()
+_executor_instance = None
+_policy_engine_instance = None
 
-agent_dsn_env = config.database.agent_dsn_env
-agent_dsn = os.environ.get(agent_dsn_env, os.environ.get("UNDOGATE_ADMIN_DSN"))
+def get_executor():
+    global _executor_instance, _policy_engine_instance
+    if _executor_instance is None:
+        config = load_config()
+        dsn = os.environ.get(config.database.agent_dsn_env)
+        if not dsn:
+            raise ValueError(f"Database DSN must be provided via {config.database.agent_dsn_env}")
+        _executor_instance = UndogateExecutor(dsn)
+        _policy_engine_instance = PolicyEngine(config)
+    return _executor_instance, _policy_engine_instance
 
-if not agent_dsn:
-    print(f"Error: Database DSN must be provided via {agent_dsn_env} or UNDOGATE_ADMIN_DSN env var.", file=sys.stderr)
+# Fail at startup if config is missing
+try:
+    get_executor()
+except ValueError as e:
+    print(f"Startup Refusal: {e}", file=sys.stderr)
     sys.exit(1)
 
-executor = UndogateExecutor(agent_dsn)
-policy_engine = PolicyEngine(config)
+app = MCPServer("undogate")
+
 
 @app.tool()
 def execute_sql(sql: str = Field(description="The SQL statement to execute on the PostgreSQL database.")) -> str:
     """Executes a SQL statement with Undogate protection."""
     try:
+        try:
+            executor, policy_engine = get_executor()
+        except ValueError as e:
+            return f"Error: {str(e)}"
+            
+        sentinel = AISentinel()
+        safe, reason = sentinel._ast_firewall(sql)
+        if not safe:
+            return f"Hard Gate Denied: {reason}"
+
         statements = classify_sql(sql)
         if not statements:
              return "Success (no statements executed)."
@@ -54,4 +76,8 @@ def execute_sql(sql: str = Field(description="The SQL statement to execute on th
          return f"Error executing SQL: {e}"
 
 if __name__ == "__main__":
-    app.run()
+    try:
+        app.run()
+    finally:
+        if _executor_instance and hasattr(_executor_instance, 'pool'):
+            _executor_instance.pool.close()

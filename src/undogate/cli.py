@@ -1,3 +1,4 @@
+import dotenv; dotenv.load_dotenv()
 import os
 import sys
 
@@ -112,8 +113,6 @@ def serve():
     server_path = os.path.join(os.path.dirname(__file__), "server.py")
     os.execvp(sys.executable, [sys.executable, server_path])
 
-if __name__ == "__main__":
-    app()
 
 @app.command()
 def verify_ledger():
@@ -188,3 +187,6 @@ def api(port: int = 8000):
     console.print("[dim]- Agent HTTP endpoint: POST http://localhost:8000/v1/execute[/dim]")
     console.print("[dim]- Slack Webhook endpoint: POST http://localhost:8000/v1/slack/interactive[/dim]")
     uvicorn.run("undogate.api:app", host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    app()
