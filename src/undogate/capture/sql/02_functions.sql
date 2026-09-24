@@ -1,10 +1,17 @@
+
+-- LEGACY CLEANUP: Drop old signatures to prevent bypass
+DROP FUNCTION IF EXISTS undogate.begin_checkpoint(TEXT, TEXT, TEXT, TEXT);
+DROP FUNCTION IF EXISTS undogate.begin_checkpoint(TEXT, TEXT, TEXT, TEXT, TEXT);
+DROP FUNCTION IF EXISTS undogate.claim_checkpoint(BIGINT);
+DROP FUNCTION IF EXISTS undogate.finish_checkpoint(BIGINT, INTEGER);
+DROP FUNCTION IF EXISTS undogate.fail_checkpoint(BIGINT);
+
 -- 1. Checkpoint Management
 CREATE OR REPLACE FUNCTION undogate.begin_checkpoint(
     p_sql_text TEXT,
     p_classification TEXT,
     p_decision TEXT,
     p_agent_label TEXT,
-    p_initial_status TEXT DEFAULT 'pending',
     OUT o_cp_id BIGINT,
     OUT o_public_id TEXT
 ) AS $$
@@ -12,12 +19,13 @@ DECLARE
     v_public_id TEXT;
     v_id BIGINT;
 BEGIN
-    v_public_id := 'cp_' || substr(md5(random()::text), 1, 8);
+    -- public_id is an unguessable 128-bit UUID acting as a capability token
+    v_public_id := 'cp_' || replace(gen_random_uuid()::text, '-', '');
     
     INSERT INTO undogate.checkpoints (
         public_id, sql_text, classification, decision, agent_label, status
     ) VALUES (
-        v_public_id, p_sql_text, p_classification, p_decision, p_agent_label, p_initial_status
+        v_public_id, p_sql_text, p_classification, p_decision, p_agent_label, 'pending'
     ) RETURNING id INTO v_id;
     
     o_cp_id := v_id;
@@ -26,16 +34,17 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
 CREATE OR REPLACE FUNCTION undogate.finish_checkpoint(
-    p_cp_id BIGINT,
+    p_public_id TEXT,
     p_rows_affected INTEGER
 ) RETURNS VOID AS $$
 DECLARE
     v_token UUID;
+    v_status TEXT;
     v_guc TEXT;
 BEGIN
-    SELECT exec_token INTO v_token FROM undogate.checkpoints WHERE id = p_cp_id AND status = 'pending';
+    SELECT exec_token INTO v_token FROM undogate.checkpoints WHERE public_id = p_public_id AND status = 'executing';
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'Checkpoint % not found or invalid state transition.', p_cp_id;
+        RAISE EXCEPTION 'Checkpoint % not found or not in executing state.', p_public_id;
     END IF;
     
     v_guc := current_setting('undogate.exec_token', true);
@@ -45,26 +54,30 @@ BEGIN
 
     UPDATE undogate.checkpoints 
     SET status = 'applied', rows_affected = p_rows_affected
-    WHERE id = p_cp_id;
+    WHERE public_id = p_public_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
 
 
-CREATE OR REPLACE FUNCTION undogate.claim_checkpoint(p_cp_id BIGINT) RETURNS UUID AS $$
+CREATE OR REPLACE FUNCTION undogate.claim_checkpoint(
+    p_public_id TEXT
+) RETURNS UUID AS $$
 DECLARE
     v_token UUID;
     v_status TEXT;
+    v_id BIGINT;
 BEGIN
-    SELECT status INTO v_status FROM undogate.checkpoints WHERE id = p_cp_id FOR UPDATE;
+    v_token := gen_random_uuid();
+    
+    UPDATE undogate.checkpoints 
+    SET exec_token = v_token, status = 'executing'
+    WHERE public_id = p_public_id AND status = 'pending'
+    RETURNING id INTO v_id;
+    
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'Checkpoint not found';
-    END IF;
-    IF v_status NOT IN ('pending', 'approved') THEN
-        RAISE EXCEPTION 'Checkpoint not executable';
+        RAISE EXCEPTION 'Checkpoint % not found or not in pending state.', p_public_id;
     END IF;
     
-    v_token := gen_random_uuid();
-    UPDATE undogate.checkpoints SET exec_token = v_token WHERE id = p_cp_id;
     RETURN v_token;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
@@ -113,7 +126,7 @@ BEGIN
             RAISE EXCEPTION 'Undogate Security Violation: Checkpoint forged or execution token mismatch.';
         END IF;
         
-        IF v_cp_status NOT IN ('pending', 'approved') THEN
+        IF v_cp_status != 'executing' THEN
             RAISE EXCEPTION 'Undogate Security Violation: Checkpoint is not in an executable state.';
         END IF;
     END;
@@ -195,7 +208,7 @@ CREATE OR REPLACE FUNCTION undogate.fail_checkpoint(
 BEGIN
     UPDATE undogate.checkpoints 
     SET status = 'failed'
-    WHERE public_id = p_public_id AND status = 'pending';
+    WHERE public_id = p_public_id AND status IN ('pending', 'executing');
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Checkpoint % not found or invalid state transition.', p_public_id;
     END IF;

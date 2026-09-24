@@ -146,7 +146,7 @@ def test_p0_quoted_identifier_injection(dsn, runtime_dsn, setup_db):
     eval_valid = StatementEvaluation(statement=stmt_valid, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
     res_valid = executor.execute(eval_valid)
     
-    assert res_valid.status == "applied"
+    assert res_valid.status == "applied", res_valid.message
 
 def test_p0_sensitive_alias_leak(dsn, runtime_dsn, setup_db):
     from undogate.executor import UndogateExecutor
@@ -224,14 +224,59 @@ def test_p0_runtime_checkpoint_state_change(dsn, runtime_dsn, setup_db):
             cur.execute("UPDATE undogate.checkpoints SET status = 'applied' WHERE id = 1")
 
 
-def test_p0_finish_checkpoint_spoofing(dsn, runtime_dsn, setup_db):
+def test_p0_capability_spoofing(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'pending')")
-        cp_id = cur.fetchone()[0]
-        
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'ALLOW', 'mcp_agent')")
+        row = cur.fetchone()
+        cp_id = row[0]
+        public_id = row[1]
+
     with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        # 1. mcp_agent tries to claim with invalid public_id (only knows cp_id)
+        with pytest.raises(psycopg.errors.RaiseException, match="Checkpoint invalid_public_id not found"):
+            cur.execute("SELECT undogate.claim_checkpoint('invalid_public_id')")
+            
+        # 2. Try to fail with invalid public_id
+        with pytest.raises(psycopg.errors.RaiseException, match="Checkpoint invalid_public_id not found"):
+            cur.execute("SELECT undogate.fail_checkpoint('invalid_public_id')")
+            
+        # 3. Try to finish with valid public_id but wrong token
+        # First we simulate the control plane claiming it
+        with psycopg.connect(dsn, autocommit=True) as dsn_conn, dsn_conn.cursor() as dsn_cur:
+            dsn_cur.execute("SELECT undogate.claim_checkpoint(%s)", (public_id,))
+            
         with pytest.raises(psycopg.errors.RaiseException, match="Cannot finish checkpoint without valid execution token"):
-            # mcp_agent tries to call finish_checkpoint on a checkpoint they didn't claim
-            cur.execute("SELECT undogate.finish_checkpoint(%s, 1)", (cp_id,))
+            cur.execute("SELECT undogate.finish_checkpoint(%s, 1)", (public_id,))
+
+def test_p0_token_stealing_different_backend(dsn, runtime_dsn, setup_db):
+    import psycopg
+    import pytest
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO public.users(data) VALUES (''x'')', 'WRITE_DML', 'ALLOW', 'mcp_agent')")
+        row = cur.fetchone()
+        cp_id = row[0]
+        public_id = row[1]
+        
+        cur.execute("SELECT undogate.claim_checkpoint(%s)", (public_id,))
+        token = cur.fetchone()[0]
+        
+    # Now in a DIFFERENT connection, try to use the stolen token
+    with psycopg.connect(runtime_dsn, autocommit=False) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                # Agent sets GUC with the stolen token
+                cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
+                cur.execute("SELECT set_config('undogate.exec_token', %s, false)", (str(token),))
+                cur.execute("SELECT set_config('undogate.seq', '0', true)")
+                
+                # Simulate that the REAL connection has already finished it
+                with psycopg.connect(dsn, autocommit=True) as dsn_conn, dsn_conn.cursor() as dsn_cur:
+                    dsn_cur.execute("SELECT set_config('undogate.exec_token', %s, false)", (str(token),))
+                    dsn_cur.execute("SELECT undogate.finish_checkpoint(%s, 1)", (public_id,))
+                
+                # Now that it's applied, the trigger should reject the delayed/stolen token usage
+                with pytest.raises(psycopg.errors.RaiseException, match="Undogate Security Violation"):
+                    cur.execute("INSERT INTO public.users(data) VALUES ('stolen')")

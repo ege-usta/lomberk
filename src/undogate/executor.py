@@ -52,7 +52,7 @@ class UndogateExecutor:
         with self.pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s, 'pending')",
+                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s)",
                     (sql, stmt_class, decision, agent_label)
                 )
                 row = cur.fetchone()
@@ -165,7 +165,7 @@ class UndogateExecutor:
     def _execute_internal(self, conn, cur, cp_id, public_id, sql_to_execute) -> ExecutionResult:
         try:
             # Claim the checkpoint to get the execution token
-            cur.execute("SELECT undogate.claim_checkpoint(%s)", (cp_id,))
+            cur.execute("SELECT undogate.claim_checkpoint(%s)", (public_id,))
             exec_token = cur.fetchone()[0]
             
             # Set the local configuration for the transaction so triggers know the cp_id and token
@@ -289,7 +289,7 @@ class UndogateExecutor:
             rows_affected = max(cur.rowcount, 0)
             
             # Finish checkpoint
-            cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (cp_id, rows_affected))
+            cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (public_id, rows_affected))
             
             conn.commit()
             
