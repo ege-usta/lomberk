@@ -178,6 +178,10 @@ BEGIN
     IF v_pk IS NULL THEN
         RAISE EXCEPTION 'Undogate Security Violation: Table %.% has no primary key.', TG_TABLE_SCHEMA, TG_TABLE_NAME;
     END IF;
+    
+    IF (SELECT indnatts FROM pg_index WHERE indrelid = TG_RELID AND indisprimary) > 1 THEN
+        RAISE EXCEPTION 'Undogate Security Violation: Composite primary keys are not supported (%.%).', TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    END IF;
 
     IF TG_OP = 'DELETE' THEN
         v_old := row_to_json(OLD);
@@ -192,10 +196,10 @@ BEGIN
     END IF;
 
     INSERT INTO undogate.row_changes (
-        checkpoint_id, table_schema, table_name, op, pk,
+        checkpoint_id, table_schema, table_name, table_oid, op, pk,
         old_row, new_row, seq
     ) VALUES (
-        v_cp_id, TG_TABLE_SCHEMA, TG_TABLE_NAME, substr(TG_OP, 1, 1), jsonb_build_object(v_pk, COALESCE(v_old->>v_pk, v_new->>v_pk)),
+        v_cp_id, TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_RELID, substr(TG_OP, 1, 1), jsonb_build_object(v_pk, COALESCE(v_old->>v_pk, v_new->>v_pk)),
         v_old, v_new, v_seq
     );
 
@@ -369,6 +373,8 @@ DECLARE
     v_set_clauses TEXT;
     v_affected INT := 0;
     v_seq_val BIGINT;
+    v_live_pk TEXT;
+    v_live_pk_count INT;
 BEGIN
     -- 1. Fetch and lock original checkpoint
     SELECT id, status INTO v_cp_id, v_status
@@ -398,10 +404,11 @@ BEGIN
         EXECUTE format('LOCK TABLE %I.%I IN SHARE ROW EXCLUSIVE MODE NOWAIT', v_change.table_schema, v_change.table_name);
         
         -- Validate table identity (OID match)
-        IF v_change.table_oid IS NOT NULL THEN
-            IF v_change.table_oid != (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass::oid THEN
-                RAISE EXCEPTION 'Table identity drifted for %.%', v_change.table_schema, v_change.table_name;
-            END IF;
+        IF v_change.table_oid IS NULL THEN
+            RAISE EXCEPTION 'Table identity missing (NULL OID) for %.%', v_change.table_schema, v_change.table_name;
+        END IF;
+        IF v_change.table_oid != (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass::oid THEN
+            RAISE EXCEPTION 'Table identity drifted for %.%', v_change.table_schema, v_change.table_name;
         END IF;
 
         -- Check unsupported schemas
@@ -416,7 +423,8 @@ BEGIN
 
         IF EXISTS (
             SELECT 1 FROM pg_constraint 
-            WHERE conrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass 
+            WHERE (conrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass 
+               OR confrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass)
             AND contype = 'f'
         ) THEN
             RAISE EXCEPTION 'Unsupported schema: Foreign keys not allowed on %', v_change.table_name;
@@ -435,6 +443,8 @@ BEGIN
             SELECT 1 FROM pg_trigger 
             WHERE tgrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass
             AND tgname = 'undogate_capture' AND tgenabled = 'O'
+            AND tgtype = 29 AND tgattr = '' 
+            AND tgfoid = 'undogate.capture_row_change'::regproc
         ) THEN
             RAISE EXCEPTION 'Capture trigger missing or disabled on %', v_change.table_name;
         END IF;
@@ -465,7 +475,7 @@ BEGIN
 
     -- 4. Apply reverse DML in LIFO order
     FOR v_change IN 
-        SELECT table_schema, table_name, op, pk, old_row, new_row 
+        SELECT table_schema, table_name, table_oid, op, pk, old_row, new_row 
         FROM undogate.row_changes 
         WHERE checkpoint_id = v_cp_id 
         ORDER BY seq DESC
@@ -475,11 +485,29 @@ BEGIN
         
         v_full_table := quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name);
         
+        -- Validate PK hasn't drifted
+        BEGIN
+            SELECT a.attname, i.indnatts INTO v_live_pk, v_live_pk_count
+            FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = v_change.table_oid AND i.indisprimary;
+            
+            IF v_live_pk IS NULL THEN
+                RAISE EXCEPTION 'Security Violation: Table % has no primary key', v_full_table;
+            END IF;
+            IF v_live_pk_count > 1 THEN
+                RAISE EXCEPTION 'Security Violation: Composite primary keys are not supported (%)', v_full_table;
+            END IF;
+            IF NOT (v_change.pk ? v_live_pk) THEN
+                RAISE EXCEPTION 'Security Violation: PK identity drifted for % (expected %, got %)', v_full_table, array_to_string(ARRAY(SELECT jsonb_object_keys(v_change.pk)), ','), v_live_pk;
+            END IF;
+        END;
+        
         IF v_change.op = 'I' THEN
             EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', 
                 v_full_table, 
-                (SELECT key FROM jsonb_each(v_change.pk) LIMIT 1), 
-                (SELECT value#>>'{}' FROM jsonb_each(v_change.pk) LIMIT 1)) INTO v_curr;
+                v_live_pk, 
+                (v_change.pk->>v_live_pk)) INTO v_curr;
             
             IF v_curr IS NULL THEN
                 RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
@@ -492,14 +520,14 @@ BEGIN
             
             EXECUTE format('DELETE FROM %s WHERE %I = %L', 
                 v_full_table, 
-                (SELECT key FROM jsonb_each(v_change.pk) LIMIT 1), 
-                (SELECT value#>>'{}' FROM jsonb_each(v_change.pk) LIMIT 1));
+                v_live_pk, 
+                (v_change.pk->>v_live_pk));
                 
         ELSIF v_change.op = 'U' THEN
             EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', 
                 v_full_table, 
-                (SELECT key FROM jsonb_each(v_change.pk) LIMIT 1), 
-                (SELECT value#>>'{}' FROM jsonb_each(v_change.pk) LIMIT 1)) INTO v_curr;
+                v_live_pk, 
+                (v_change.pk->>v_live_pk)) INTO v_curr;
                 
             IF v_curr IS NULL THEN
                 RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
@@ -522,8 +550,8 @@ BEGIN
             EXECUTE format('UPDATE %s SET %s WHERE %I = %L', 
                 v_full_table, 
                 v_set_clauses, 
-                (SELECT key FROM jsonb_each(v_change.pk) LIMIT 1), 
-                (SELECT value#>>'{}' FROM jsonb_each(v_change.pk) LIMIT 1)) USING v_change.old_row;
+                v_live_pk, 
+                (v_change.pk->>v_live_pk)) USING v_change.old_row;
 
         ELSIF v_change.op = 'D' THEN
             EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', v_full_table, v_full_table) USING v_change.old_row;

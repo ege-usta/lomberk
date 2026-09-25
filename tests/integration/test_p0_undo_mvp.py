@@ -130,6 +130,11 @@ def test_undo_unsupported_schema(control_dsn, runtime_dsn, dsn, setup_db, monkey
         cur.execute("SELECT undogate.register_table('public', 'test_rule', 'id', 'mcp_agent');")
         cur.execute("CREATE RULE test_rule_insert AS ON INSERT TO public.test_rule DO ALSO NOTIFY some_event;")
         
+        # Inheritance
+        cur.execute("CREATE TABLE public.test_parent (id INT PRIMARY KEY, val TEXT);")
+        cur.execute("CREATE TABLE public.test_child (child_val TEXT) INHERITS (public.test_parent);")
+        cur.execute("SELECT undogate.register_table('public', 'test_child', 'id', 'mcp_agent');")
+
         # Trigger
         cur.execute("CREATE TABLE public.test_trigger (id INT PRIMARY KEY, val TEXT);")
         cur.execute("SELECT undogate.register_table('public', 'test_trigger', 'id', 'mcp_agent');")
