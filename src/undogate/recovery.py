@@ -1,6 +1,6 @@
 import time
 import random
-from typing import Callable, Dict, Any
+from typing import Callable, Dict, Any, Tuple
 
 class RecoveryBudgetExhausted(Exception):
     def __init__(self, last_known_state: str, resume_id: str | None, operation_id: str):
@@ -9,60 +9,80 @@ class RecoveryBudgetExhausted(Exception):
         self.operation_id = operation_id
         super().__init__(f"Recovery budget exhausted. Last known state: {last_known_state}")
 
+class TransientError(Exception):
+    pass
+
 def execute_with_recovery(
     operation_id: str,
     submit_fn: Callable[[], Dict[str, Any]],
     status_fn: Callable[[str], str],
-    max_retries: int = 5,
+    timeout_seconds: float = 15.0,
     base_delay: float = 0.5,
-    max_delay: float = 5.0
+    max_delay: float = 5.0,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep
 ) -> Dict[str, Any]:
-    """
-    submit_fn: A function that submits the operation and returns the result payload (e.g. from API/MCP)
-    status_fn: A function that takes a public_id and returns the current status.
-    """
+    
+    deadline = clock() + timeout_seconds
     last_known_state = "unknown"
     resume_id = None
     last_res = None
+    attempt = 0
     
-    for attempt in range(max_retries + 1):
+    while clock() < deadline:
+        attempt += 1
         try:
-            res = submit_fn()
-            last_res = res
-            
-            # Extract status from response (assuming array of results for API, or single for MCP)
-            if "results" in res and len(res["results"]) > 0:
-                first_res = res["results"][0]
-                status = first_res.get("status")
-                resume_id = first_res.get("checkpoint_id")
+            if not resume_id:
+                # We don't have a public ID yet; submit or safely look up by operation_id
+                res = submit_fn()
+                last_res = res
+                
+                if "results" in res:
+                    if len(res["results"]) != 1:
+                        raise ValueError(f"Expected exactly 1 result in array, got {len(res['results'])}")
+                    item = res["results"][0]
+                    status = item.get("status")
+                    current_id = item.get("checkpoint_id")
+                else:
+                    status = res.get("status")
+                    current_id = res.get("checkpoint_id") or res.get("public_id")
+                    
+                if not status:
+                    raise ValueError("Response missing status field.")
+                    
+                last_known_state = status
+                if current_id:
+                    resume_id = current_id
             else:
-                status = res.get("status")
-                resume_id = res.get("checkpoint_id") or res.get("public_id")
+                # We have a public ID; use status_fn to poll
+                status = status_fn(resume_id)
+                last_known_state = status
                 
-            last_known_state = status or last_known_state
-            
-            # If status is terminal (applied, failed, denied, undone) or needs explicit action (approval_required)
-            if status in ["applied", "failed", "denied", "approval_required", "undone"]:
-                return res
-            
-            # If status is 'approved', it means it's approved but not yet executed (or we lost the execution response)
-            # We do NOT auto-execute it here. It requires manual intervention or a separate worker.
-            if status == "approved":
-                return res
+                if last_res is None:
+                    last_res = {"results": [{"status": status, "checkpoint_id": resume_id}]}
+                elif "results" in last_res:
+                    last_res["results"][0]["status"] = status
+                else:
+                    last_res["status"] = status
+                    
+            if status in ["applied", "undone", "already_undone", "failed", "denied", "approval_required", "approved"]:
+                return last_res
                 
+        except TransientError:
+            pass
         except Exception as e:
-            # If there's an exception (like 502 unknown), we treat it as unknown
-            # For HTTP 409 Conflict, submit_fn should raise it and we just let it propagate
-            if hasattr(e, "status_code") and e.status_code == 409:
-                raise
-            last_known_state = "unknown"
+            # Re-raise any non-transient configuration/logic/auth/payload errors
+            raise e
             
-        if attempt < max_retries:
-            # Exponential backoff with jitter
-            delay = min(max_delay, base_delay * (2 ** attempt))
-            jitter = random.uniform(0, 0.1 * delay)
-            time.sleep(delay + jitter)
+        remaining_time = deadline - clock()
+        if remaining_time <= 0:
+            break
             
+        delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+        jitter = random.uniform(0, 0.1 * delay)
+        sleep_time = min(delay + jitter, remaining_time)
+        sleeper(sleep_time)
+        
     raise RecoveryBudgetExhausted(
         last_known_state=last_known_state,
         resume_id=resume_id,

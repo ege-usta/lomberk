@@ -1,17 +1,23 @@
-import psycopg
+import sys
 import uuid
-
-import time
+import psycopg
 import json
 import logging
 from fastapi.testclient import TestClient
 from undogate.api import app
-from undogate.recovery import execute_with_recovery, RecoveryBudgetExhausted
+from undogate.recovery import execute_with_recovery, RecoveryBudgetExhausted, TransientError
 import os
 from testcontainers.postgres import PostgresContainer
+from typer.testing import CliRunner
+from undogate.cli import app as cli_app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("pilot")
+
+def assert_eq(actual, expected, msg):
+    if actual != expected:
+        logger.error(f"ASSERTION FAILED: {msg} (Expected: {expected}, Got: {actual})")
+        sys.exit(1)
 
 def run_pilot():
     logger.info("Starting local pilot...")
@@ -23,102 +29,108 @@ def run_pilot():
         dsn = postgres.get_connection_url().replace("postgresql+psycopg2", "postgresql")
         runtime_dsn = dsn.replace("test:test", "mcp_agent:secret")
         
-        # 1. Setup DB Roles
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
             
-        # 2. Install undogate
         from undogate.capture.install import install_undogate
         install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
         
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("CREATE TABLE public.pilot_users (id SERIAL PRIMARY KEY, email TEXT NOT NULL)")
             cur.execute("CREATE TABLE public.pilot_unprotected (id SERIAL PRIMARY KEY, email TEXT NOT NULL)")
-            cur.execute("SELECT undogate.register_table('public', 'pilot_unprotected', 'id', 'mcp_agent')")
             cur.execute("GRANT ALL ON SCHEMA public TO mcp_agent")
             cur.execute("GRANT ALL ON ALL TABLES IN SCHEMA public TO mcp_agent")
             cur.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO mcp_agent")
             cur.execute("SELECT undogate.register_table('public', 'pilot_users', 'id', 'mcp_agent')")
+            cur.execute("SELECT undogate.register_table('public', 'pilot_unprotected', 'id', 'mcp_agent')")
 
-        # 3. Setup client environment
         os.environ["UNDOGATE_ADMIN_DSN"] = dsn.replace('test:test', 'undogate_control:secret')
         os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
         os.environ["UNDOGATE_API_KEY"] = "agent-key"
         os.environ["UNDOGATE_ADMIN_KEY"] = "admin-key"
-        os.environ["UNDOGATE_PROTECTED_TABLES"] = '["pilot_users"]'
+        
         if "OPENAI_API_KEY" in os.environ:
             del os.environ["OPENAI_API_KEY"]
             
         import undogate.api
         undogate.api._executor_instance = None
         undogate.api._policy_engine_instance = None
+        
         with TestClient(app) as client:
-            # Helper to execute with recovery
-            def execute_sql(sql: str, op_id: str):
+            def execute_sql(sql: str, op_id: str, use_auth=True):
+                headers = {"X-API-Key": "agent-key"} if use_auth else {}
+                
                 def submit():
-                    res = client.post("/v1/execute", json={"sql": sql, "operation_id": op_id}, headers={"X-API-Key": "agent-key"})
+                    res = client.post("/v1/execute", json={"sql": sql, "operation_id": op_id}, headers=headers)
                     if res.status_code == 409:
-                        class HTTPError(Exception):
-                            status_code = 409
-                            detail = res.json()["detail"]
-                        raise HTTPError()
-                    if res.status_code == 502:
-                        raise Exception("Network Error")
+                        class HTTPConflict(Exception):
+                            pass
+                        raise HTTPConflict(res.json()["detail"])
+                    if res.status_code == 401 or res.status_code == 403:
+                        raise ValueError(f"Unauthorized: {res.status_code}")
+                    if res.status_code == 502 or res.status_code == 500: # We use 500 to mock network drop from testclient sometimes
+                        raise TransientError("Network Error")
                     return res.json()
                 
                 def status_fn(pub_id):
-                    return client.get(f"/v1/checkpoints/{pub_id}/status", headers={"X-API-Key": "admin-key"}).json()["status"]
+                    # Admin key for status polling
+                    s_res = client.get(f"/v1/checkpoints/{pub_id}/status", headers={"X-API-Key": "admin-key"})
+                    if s_res.status_code == 502 or s_res.status_code == 500:
+                        raise TransientError("Network Error")
+                    return s_res.json()["status"]
                 
-                return execute_with_recovery(op_id, submit, status_fn, base_delay=0.1, max_delay=0.5)
+                return execute_with_recovery(op_id, submit, status_fn, timeout_seconds=5.0, base_delay=0.1, max_delay=0.5)
 
-            # --- PILOT SCENARIO 1: Approval Required DML (Over limit) ---
             logger.info("--- SCENARIO 1: Approval Required & Recovery ---")
             op1 = str(uuid.uuid4())
-            # Insert 2 rows to exceed default max_rows=1
             res1 = execute_sql("INSERT INTO public.pilot_users (email) VALUES ('a@a.com'), ('b@b.com')", op1)
+            assert_eq(res1["results"][0]["status"], "approval_required", "S1 status should be approval_required")
             pub_id1 = res1["results"][0]["checkpoint_id"]
-            logger.info(f"Submit 1 status: {res1['results'][0]['status']} (pub_id: {pub_id1})")
             
-            # Admin approves
             res_appr = client.post(f"/v1/checkpoints/{pub_id1}/approve", headers={"X-API-Key": "admin-key"})
-            logger.info(f"Admin approve status: {res_appr.json()['status']}")
+            assert_eq(res_appr.json()["status"], "approved", "S1 admin approve should be approved")
             
-            # Retry original submit
             res1_retry = execute_sql("INSERT INTO public.pilot_users (email) VALUES ('a@a.com'), ('b@b.com')", op1)
-            logger.info(f"Retry 1 status: {res1_retry['results'][0]['status']} - {res1_retry['results'][0]['message']}")
+            assert_eq(res1_retry["results"][0]["status"], "applied", "S1 retry should be applied")
             
-            # --- PILOT SCENARIO 2: Runtime Commit Loss ---
-            # Using pilot_unprotected so it executes directly without approval
+            with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM public.pilot_users")
+                assert_eq(cur.fetchone()[0], 2, "S1 exactly 2 rows inserted")
+
             logger.info("--- SCENARIO 2: Runtime Commit Loss ---")
-            import undogate.executor
-            
             original_exit = psycopg.Transaction.__exit__
             commit_count = 0
             
-            def patched_exit(self, exc_type, exc_val, exc_tb):
+            def patched_exit_mcp(self, exc_type, exc_val, exc_tb):
                 nonlocal commit_count
                 original_exit(self, exc_type, exc_val, exc_tb)
                 if exc_type is None and self.connection and "mcp_agent" in self.connection.info.user:
                     commit_count += 1
                     if commit_count == 1:
-                        raise psycopg.OperationalError("Simulated TCP Drop after DML Commit")
+                        raise psycopg.OperationalError("Simulated TCP Drop")
 
-            psycopg.Transaction.__exit__ = patched_exit
-            
+            psycopg.Transaction.__exit__ = patched_exit_mcp
             op2 = str(uuid.uuid4())
+            
             try:
                 execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('c@c.com')", op2)
-            except Exception as e:
-                logger.info(f"Client got network error, restoring network...")
+            except TransientError:
+                pass # First attempt fails, but recovery loops! Wait!
                 
-            psycopg.Transaction.__exit__ = original_exit # restore network
+            psycopg.Transaction.__exit__ = original_exit
             
-            # Client recovers
+            # Since execute_sql wraps recovery, it will naturally loop until timeout, or until the network is restored.
+            # So we restore it above (simulating network coming back), and let's just make sure it recovers:
             res2 = execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('c@c.com')", op2)
-            logger.info(f"Recovered status: {res2['results'][0]['status']} - {res2['results'][0]['message']}")
-            
-            # --- PILOT SCENARIO 3: Checkpoint Creation Loss ---
+            assert_eq(res2["results"][0]["status"], "applied", "S2 recovered status should be applied")
+
+            with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+                pub_id2 = res2["results"][0]["checkpoint_id"]
+                cur.execute("SELECT count(*) FROM undogate.row_changes WHERE checkpoint_id = (SELECT id FROM undogate.checkpoints WHERE public_id = %s)", (pub_id2,))
+                c = cur.fetchone()[0]
+                assert_eq(c, 1, "S2 only 1 capture mutation happened")
+                
             logger.info("--- SCENARIO 3: Checkpoint Creation Loss ---")
             commit_count = 0
             def patched_exit_cp(self, exc_type, exc_val, exc_tb):
@@ -127,53 +139,81 @@ def run_pilot():
                 if exc_type is None and self.connection and "undogate_control" in self.connection.info.user:
                     commit_count += 1
                     if commit_count == 1:
-                        raise psycopg.OperationalError("Simulated TCP Drop after CP Commit")
+                        raise psycopg.OperationalError("Simulated TCP Drop CP")
 
             psycopg.Transaction.__exit__ = patched_exit_cp
-            
             op3 = str(uuid.uuid4())
             try:
                 execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('d@d.com')", op3)
-            except Exception as e:
-                logger.info(f"Client got CP creation error, restoring network...")
+            except TransientError:
+                pass
                 
             psycopg.Transaction.__exit__ = original_exit
-            
             res3 = execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('d@d.com')", op3)
-            logger.info(f"Recovered CP status: {res3['results'][0]['status']} - {res3['results'][0]['message']}")
-            
-            # --- PILOT SCENARIO 4: Payload Conflict & Unauthorized ---
+            assert_eq(res3["results"][0]["status"], "approved", "S3 recovered CP status should be approved, NOT applied")
+
+            with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+                pub_id3 = res3["results"][0]["checkpoint_id"]
+                cur.execute("SELECT count(*) FROM undogate.row_changes WHERE checkpoint_id = (SELECT id FROM undogate.checkpoints WHERE public_id = %s)", (pub_id3,))
+                c = cur.fetchone()[0]
+                assert_eq(c, 0, "S3 ZERO additional iş mutations happened")
+                
             logger.info("--- SCENARIO 4: Conflicts & Errors ---")
             try:
-                execute_sql("INSERT INTO public.pilot_users (email) VALUES ('e@e.com')", op3)
+                execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('e@e.com')", op3)
+                logger.error("S4 Should have raised Conflict")
+                sys.exit(1)
             except Exception as e:
-                logger.info(f"Conflict error properly raised: 409")
+                assert_eq(e.__class__.__name__, "HTTPConflict", "S4 Should raise HTTPConflict exactly")
                 
+            logger.info("--- SCENARIO 5: Unauthorized Action ---")
+            try:
+                execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('f@f.com')", str(uuid.uuid4()), use_auth=False)
+                logger.error("S5 Should have raised Unauthorized")
+                sys.exit(1)
+            except ValueError as e:
+                if "Unauthorized" not in str(e):
+                    logger.error("S5 Should raise Unauthorized ValueError")
+                    sys.exit(1)
 
-            # --- PILOT SCENARIO 5: Explicit Undo ---
-            logger.info("--- SCENARIO 5: Explicit Undo ---")
+            logger.info("--- SCENARIO 6: Explicit Undo via CLI (Public Interface) ---")
             pub_id_undo = res2['results'][0]['checkpoint_id']
-            # Authorized Undo (via direct executor to match CLI)
-            import undogate.api
-            res_undo1 = undogate.api._executor_instance.execute_undo(pub_id_undo)
-            logger.info(f"Undo 1 status: {res_undo1.status}")
+            runner = CliRunner()
             
-            # Second Undo -> already undone
-            res_undo2 = undogate.api._executor_instance.execute_undo(pub_id_undo)
-            if res_undo2.status == "failed" and "already undone" in res_undo2.message.lower():
-                logger.info("Second undo correctly rejected as already undone.")
+            res_cli = runner.invoke(cli_app, ["undo", pub_id_undo])
+            assert_eq(res_cli.exit_code, 0, "CLI Undo exit code")
+            if "already undone" in res_cli.stdout.lower() or "failed" in res_cli.stdout.lower():
+                logger.error(f"S6 Undo failed incorrectly: {res_cli.stdout}")
+                sys.exit(1)
                 
-            # Verify ledger and source table independently
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
                 cur.execute("SELECT email FROM public.pilot_unprotected WHERE email = 'c@c.com'")
                 row = cur.fetchone()
-                logger.info(f"Source row verification after undo: {'Found' if row else 'Not found (SUCCESS)'}")
+                assert_eq(row, None, "S6 Source row should be deleted (undone)")
                 
                 cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pub_id_undo,))
                 cp_status = cur.fetchone()[0]
-                logger.info(f"Ledger status: {cp_status}")
+                assert_eq(cp_status, "undone", "S6 Ledger status should be undone")
                 
-            logger.info("Pilot completed successfully.")
+            # Second undo
+            res_cli2 = runner.invoke(cli_app, ["undo", pub_id_undo])
+            if "already undone" not in res_cli2.stdout.lower():
+                logger.error(f"S6 Second Undo failed to report already undone: {res_cli2.stdout}")
+                sys.exit(1)
+
+            logger.info("--- SCENARIO 7: DB Unreachable & Budget Exhaustion ---")
+            def failing_submit():
+                raise TransientError("DB Unreachable")
+            
+            try:
+                execute_with_recovery("op_unreach", failing_submit, lambda x: "unknown", timeout_seconds=1.0, base_delay=0.1, max_delay=0.2)
+                logger.error("S7 Should have exhausted budget")
+                sys.exit(1)
+            except RecoveryBudgetExhausted as e:
+                assert_eq(e.last_known_state, "unknown", "S7 Last known state")
+                assert_eq(e.operation_id, "op_unreach", "S7 Operation ID")
+
+            logger.info("Pilot completed successfully with all assertions verified.")
             
     finally:
         postgres.stop()
