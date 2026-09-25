@@ -24,126 +24,46 @@ class UndogateExecutor:
         import psycopg
         import json
         
-        # We must use control_dsn, but executor uses whatever self.dsn is. 
-        # API should initialize UndogateExecutor with control_dsn for this.
-        
         try:
             with psycopg.connect(self.dsn, autocommit=False) as conn:
-                with conn.transaction(), conn.cursor() as cur:
-                    # 1. Lock the source checkpoint
-                    try:
-                        cur.execute("SELECT id, status, sql_text FROM undogate.checkpoints WHERE public_id = %s FOR UPDATE NOWAIT", (public_id,))
-                    except psycopg.errors.LockNotAvailable:
-                        return ExecutionResult(status="busy", message="Checkpoint is busy.", public_id=public_id, rows_affected=0)
-                        
-                    row = cur.fetchone()
-                    if not row:
-                        return ExecutionResult(status="denied", message="Checkpoint not found.", public_id=public_id, rows_affected=0)
-                    
-                    cp_id, status, sql_text = row
-                    
-                    if status == "undone":
+                try:
+                    with conn.transaction(), conn.cursor() as cur:
+                        cur.execute("SELECT undogate.execute_undo(%s, %s)", (public_id, agent_label))
+                        result = cur.fetchone()[0]
+                        return ExecutionResult(
+                            status='undone', 
+                            public_id=public_id, 
+                            rows_affected=result['rows_affected'], message='Undo successful.'
+                        )
+                except psycopg.errors.LockNotAvailable:
+                    return ExecutionResult(status="busy", message="Checkpoint is busy.", public_id=public_id, rows_affected=0)
+                except psycopg.errors.UniqueViolation as e:
+                    return ExecutionResult(status="conflict", message="Unique constraint violation during undo.", public_id=public_id, rows_affected=0)
+                except psycopg.errors.DeadlockDetected as e:
+                    return ExecutionResult(status="busy", message="Deadlock detected.", public_id=public_id, rows_affected=0)
+                except psycopg.errors.QueryCanceled as e:
+                    return ExecutionResult(status="busy", message="Statement timeout.", public_id=public_id, rows_affected=0)
+                except psycopg.errors.RaiseException as e:
+                    error_msg = str(e)
+                    if "Checkpoint not found" in error_msg or "Cannot undo checkpoint in state" in error_msg:
+                        return ExecutionResult(status="denied", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
+                    elif "already undone" in error_msg:
                         return ExecutionResult(status="already_undone", message="Checkpoint already undone.", public_id=public_id, rows_affected=0)
-                    
-                    if status != "applied":
-                        return ExecutionResult(status="denied", message=f"Cannot undo checkpoint in state: {status}", public_id=public_id, rows_affected=0)
-                        
-                    # Fetch changes in LIFO order
-                    cur.execute("SELECT id, table_schema, table_name, op, pk, old_row, new_row FROM undogate.row_changes WHERE checkpoint_id = %s ORDER BY seq DESC", (cp_id,))
-                    changes = cur.fetchall()
-                    
-                    if not changes:
-                        # Nothing to undo
-                        pass
-                        
-                    tables_involved = set()
-                    for c in changes:
-                        tables_involved.add((c[1], c[2]))
-                        
-                    # Validate tables (no FKs, no extra triggers, no rules)
-                    for schema, table in tables_involved:
-                        # Lock table against DDL
-                        try:
-                            cur.execute("SELECT undogate.lock_table_for_undo(%s, %s)", (schema, table))
-                        except psycopg.errors.LockNotAvailable:
-                            return ExecutionResult(status="busy", message=f"Table {schema}.{table} is locked by another transaction.", public_id=public_id, rows_affected=0)
-                            
-                        # Check FKs
-                        cur.execute("""
-                            SELECT COUNT(*) FROM pg_constraint c
-                            JOIN pg_class t1 ON c.conrelid = t1.oid
-                            JOIN pg_namespace n1 ON t1.relnamespace = n1.oid
-                            LEFT JOIN pg_class t2 ON c.confrelid = t2.oid
-                            LEFT JOIN pg_namespace n2 ON t2.relnamespace = n2.oid
-                            WHERE contype = 'f' AND (
-                                (n1.nspname = %s AND t1.relname = %s) OR 
-                                (n2.nspname = %s AND t2.relname = %s)
-                            )
-                        """, (schema, table, schema, table))
-                        if cur.fetchone()[0] > 0:
-                            return ExecutionResult(status="failed", message=f"Table {schema}.{table} has foreign keys, which is unsupported for undo.", public_id=public_id, rows_affected=0)
-                            
-                        # Check Triggers
-                        cur.execute("""
-                            SELECT COUNT(*) FROM pg_trigger t
-                            JOIN pg_class c ON t.tgrelid = c.oid
-                            JOIN pg_namespace n ON c.relnamespace = n.oid
-                            WHERE n.nspname = %s AND c.relname = %s AND t.tgisinternal = false AND t.tgname != 'undogate_capture'
-                        """, (schema, table))
-                        if cur.fetchone()[0] > 0:
-                            return ExecutionResult(status="failed", message=f"Table {schema}.{table} has unsupported application triggers.", public_id=public_id, rows_affected=0)
-                            
-                        # Check Rules
-                        cur.execute("""
-                            SELECT COUNT(*) FROM pg_rewrite r
-                            JOIN pg_class c ON r.ev_class = c.oid
-                            JOIN pg_namespace n ON c.relnamespace = n.oid
-                            WHERE n.nspname = %s AND c.relname = %s AND r.rulename != '_RETURN'
-                        """, (schema, table))
-                        if cur.fetchone()[0] > 0:
-                            return ExecutionResult(status="failed", message=f"Table {schema}.{table} has unsupported rules.", public_id=public_id, rows_affected=0)
-                            
-                    # Start undo context
-                    cur.execute("SELECT * FROM undogate.begin_checkpoint(%s, 'WRITE_DML', %s)", (f"UNDO {public_id}", agent_label))
-                    undo_cp_row = cur.fetchone()
-                    undo_cp_id, undo_public_id = undo_cp_row[0], undo_cp_row[1]
-                    
-                    cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (undo_public_id,))
-                    token = cur.fetchone()[0]
-                    
-                    cur.execute("SELECT undogate.claim_checkpoint(%s)", (token,))
-                    
-                    # Create undo_operation record
-                    cur.execute("INSERT INTO undogate.undo_operations (source_checkpoint_id, undo_checkpoint_id) VALUES (%s, %s)", (cp_id, undo_cp_id))
-                    
-                    # Apply reverse operations
-                    for c_id, schema, table, op, pk_json, old_row, new_row in changes:
-                        pk_col = list(pk_json.keys())[0]
-                        pk_val = str(pk_json[pk_col])
-                        
-                        try:
-                            cur.execute("SELECT undogate.execute_undo_dml(%s, %s, %s, %s, %s, %s, %s)", 
-                                (schema, table, op, pk_col, pk_val, json.dumps(old_row) if old_row else None, json.dumps(new_row) if new_row else None))
-                        except psycopg.errors.LockNotAvailable:
-                            return ExecutionResult(status="busy", message=f"Row {pk_val} in {schema}.{table} is locked.", public_id=public_id, rows_affected=0)
-                        except psycopg.errors.UniqueViolation:
-                            return ExecutionResult(status="failed", message=f"Row {pk_val} already exists in {schema}.{table}. Conflict.", public_id=public_id, rows_affected=0)
-                        except Exception as e:
-                            # Catch the raise exceptions from PL/pgSQL
-                            return ExecutionResult(status="failed", message=str(e), public_id=public_id, rows_affected=0)
-                            
-                    # Update status
-                    cur.execute("UPDATE undogate.checkpoints SET status = 'undone' WHERE id = %s", (cp_id,))
-                    cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (token, 1))
-                    
-                    # Transaction context manager will commit
-                    return ExecutionResult(status="undone", message="Undo successful.", public_id=public_id, rows_affected=1)
-                    
-        except psycopg.OperationalError:
-            return ExecutionResult(status="outcome_unknown", message="Network failure.", public_id=public_id, rows_affected=0)
-        except Exception as e:
-            # Revert everything implicitly since we're in a 'with conn:' context but we caught it
-            return ExecutionResult(status="failed", message=str(e), public_id=public_id, rows_affected=0)
+                    elif "Unsupported schema" in error_msg or "identity drifted" in error_msg or "missing, disabled" in error_msg:
+                        return ExecutionResult(status="failed", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
+                    elif "Conflict" in error_msg:
+                        return ExecutionResult(status="conflict", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
+                    else:
+                        return ExecutionResult(status="failed", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
+                except psycopg.OperationalError as e:
+                    raise e
+                except psycopg.Error as e:
+                    # Other postgres errors (foreign key violation, check constraint violation, etc)
+                    if e.sqlstate and e.sqlstate.startswith('08'):
+                        raise psycopg.OperationalError(str(e)) # Let it bubble up for outcome_unknown
+                    return ExecutionResult(status="failed", message=str(e).split('\n')[0], public_id=public_id, rows_affected=0)
+        except psycopg.OperationalError as e:
+            return ExecutionResult(status="outcome_unknown", message=str(e), public_id=public_id)
 
     def _mask_and_sanitize_rows(self, columns, rows):
         import re

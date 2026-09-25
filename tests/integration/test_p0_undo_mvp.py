@@ -64,7 +64,7 @@ def test_undo_basic_operations(control_dsn, runtime_dsn, dsn, setup_db, monkeypa
 
     # Now Undo DELETE
     res_undo_del = executor.execute_undo(res_del.public_id)
-    assert res_undo_del.status == "undone"
+    assert res_undo_del.status == "undone", res_undo_del.message
     
     # Verify row is back
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
@@ -73,7 +73,7 @@ def test_undo_basic_operations(control_dsn, runtime_dsn, dsn, setup_db, monkeypa
         
     # Undo UPDATE
     res_undo_upd = executor.execute_undo(res_upd.public_id)
-    assert res_undo_upd.status == "undone"
+    assert res_undo_upd.status == "undone", res_undo_upd.message
     
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT val FROM public.test_undo WHERE my_pk = 1")
@@ -103,7 +103,7 @@ def test_undo_conflict_rollback(control_dsn, runtime_dsn, dsn, setup_db, monkeyp
         
     # Undo should fail (Conflict) because row 3 doesn't match post-image
     res_undo = executor.execute_undo(res.public_id)
-    assert res_undo.status == "failed"
+    assert res_undo.status == "conflict"
     assert "Conflict" in res_undo.message
     
     # Rollback must be complete: row 2 should STILL exist
@@ -149,15 +149,15 @@ def test_undo_unsupported_schema(control_dsn, runtime_dsn, dsn, setup_db, monkey
     # Undo should fail for all
     undo_fk = executor.execute_undo(res_fk.public_id)
     assert undo_fk.status == "failed"
-    assert "foreign keys" in undo_fk.message
+    assert "Foreign keys" in undo_fk.message
 
     undo_rule = executor.execute_undo(res_rule.public_id)
     assert undo_rule.status == "failed"
-    assert "rules" in undo_rule.message
+    assert "Rules" in undo_rule.message
 
     undo_trig = executor.execute_undo(res_trig.public_id)
     assert undo_trig.status == "failed"
-    assert "application triggers" in undo_trig.message
+    assert "Triggers" in undo_trig.message
 def test_undo_commit_loss(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = UndogateExecutor(control_dsn, runtime_dsn)
@@ -179,7 +179,7 @@ def test_undo_commit_loss(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
 
     # Undo should hit exception
     res_undo = executor.execute_undo(res.public_id)
-    assert res_undo.status == "outcome_unknown"
+    assert res_undo.status == "outcome_unknown", res_undo.message
     
     # Check the real status
     monkeypatch.setattr(psycopg.Transaction, "__exit__", original_exit)
@@ -188,3 +188,25 @@ def test_undo_commit_loss(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
     # Subsequent calls should return already_undone
     res_undo2 = executor.execute_undo(res.public_id)
     assert res_undo2.status == "already_undone"
+
+def test_undo_pk_drift_same_oid(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    from undogate.executor import UndogateExecutor
+    executor = UndogateExecutor(control_dsn, runtime_dsn)
+
+    # INSERT
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_undo (my_pk, val) VALUES (99, 'initial');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+    eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
+    res_ins = executor.execute(eval_result)
+    assert res_ins.status == "applied"
+    
+    # Drop PK constraint, insert second row with same values
+    import psycopg
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE public.test_undo DROP CONSTRAINT test_undo_pkey;")
+        cur.execute("INSERT INTO public.test_undo (my_pk, val) VALUES (99, 'initial');")
+        
+    # Try to undo
+    res_undo = executor.execute_undo(res_ins.public_id)
+    assert res_undo.status == "failed"
+    assert "has no primary key" in res_undo.message or "Security Violation" in res_undo.message

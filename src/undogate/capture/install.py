@@ -28,10 +28,13 @@ def install_undogate(admin_dsn: str, control_role: str, agent_role: str):
             cur.execute("DROP FUNCTION IF EXISTS undogate.begin_checkpoint(TEXT, TEXT, TEXT);")
             cur.execute("DROP FUNCTION IF EXISTS undogate.approve_checkpoint(BIGINT, TEXT);")
             cur.execute("DROP FUNCTION IF EXISTS undogate.claim_checkpoint(BIGINT);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.claim_checkpoint(UUID);")
             cur.execute("DROP FUNCTION IF EXISTS undogate.fail_checkpoint(BIGINT, TEXT);")
             cur.execute("DROP FUNCTION IF EXISTS undogate.finish_checkpoint(BIGINT, INTEGER);")
             cur.execute("DROP FUNCTION IF EXISTS undogate.get_pending_checkpoint(BIGINT);")
             cur.execute("DROP FUNCTION IF EXISTS undogate.attach_trigger_to_table(TEXT, TEXT);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.execute_undo_dml(TEXT, TEXT, CHAR, TEXT, TEXT, JSONB, JSONB);"); cur.execute("DROP FUNCTION IF EXISTS undogate.execute_undo_dml(TEXT, TEXT, CHAR, JSONB, JSONB);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.lock_table_for_undo(TEXT, TEXT);")
             
             # 1. Read and execute schema
             with open(sql_dir / "01_schema.sql", "r") as f:
@@ -44,6 +47,12 @@ def install_undogate(admin_dsn: str, control_role: str, agent_role: str):
                 cur.execute(func_sql)
                 
             # Grant schema usage and functions
+            cur.execute(sql.SQL("REVOKE ALL ON undogate.checkpoints FROM {}").format(sql.Identifier(control_role)))
+            cur.execute(sql.SQL("REVOKE ALL ON undogate.row_changes FROM {}").format(sql.Identifier(control_role)))
+            cur.execute(sql.SQL("REVOKE ALL ON undogate.undo_operations FROM {}").format(sql.Identifier(control_role)))
+            cur.execute(sql.SQL("REVOKE EXECUTE ON FUNCTION undogate.claim_checkpoint(UUID) FROM {}").format(sql.Identifier(control_role)))
+            cur.execute(sql.SQL("REVOKE EXECUTE ON FUNCTION undogate.finish_checkpoint(UUID, INTEGER) FROM {}").format(sql.Identifier(control_role)))
+            cur.execute(sql.SQL("REVOKE USAGE, SELECT ON ALL SEQUENCES IN SCHEMA undogate FROM {}").format(sql.Identifier(control_role)))
             cur.execute("SELECT undogate.grant_access(%s, %s)", (control_role, agent_role))
             
         conn.commit()

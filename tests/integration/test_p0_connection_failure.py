@@ -197,13 +197,14 @@ def test_p0_commit_network_loss_after_commit(dsn, control_dsn, runtime_dsn, setu
     import psycopg
     original_exit = psycopg.Transaction.__exit__
     
-    call_count = 0
+    runtime_commit_count = 0
     def mocked_exit(self, exc_type, exc_val, exc_tb):
-        nonlocal call_count
-        call_count += 1
+        nonlocal runtime_commit_count
         original_exit(self, exc_type, exc_val, exc_tb)
-        if call_count == 2:
-            raise psycopg.OperationalError("Simulated network loss after commit")
+        if exc_type is None and self.connection and "mcp_agent" in self.connection.info.user:
+            runtime_commit_count += 1
+            if runtime_commit_count == 1:
+                raise psycopg.OperationalError("Simulated network loss after commit")
         
     monkeypatch.setattr(psycopg.Transaction, "__exit__", mocked_exit)
     

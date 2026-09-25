@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS undogate.row_changes (
     seq           BIGINT NOT NULL,
     table_schema  TEXT NOT NULL,
     table_name    TEXT NOT NULL,
+    table_oid     OID,
     op            CHAR(1) NOT NULL, -- 'I', 'U', 'D'
     pk            JSONB,
     old_row       JSONB,
@@ -60,3 +61,10 @@ CREATE TABLE IF NOT EXISTS undogate.undo_operations (
     undo_checkpoint_id   BIGINT NOT NULL UNIQUE REFERENCES undogate.checkpoints(id),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='undogate' AND table_name='row_changes' AND column_name='table_oid') THEN
+        ALTER TABLE undogate.row_changes ADD COLUMN table_oid OID;
+    END IF;
+END $$;

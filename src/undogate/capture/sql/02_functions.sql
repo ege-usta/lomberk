@@ -170,9 +170,14 @@ BEGIN
     v_seq := current_setting('undogate.seq', true)::BIGINT + 1;
     PERFORM set_config('undogate.seq', v_seq::text, true);
 
-    SELECT pk_column INTO v_pk 
-    FROM undogate.registered_tables 
-    WHERE schema_name = TG_TABLE_SCHEMA AND table_name = TG_TABLE_NAME;
+    SELECT a.attname INTO v_pk
+    FROM pg_index i
+    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+    WHERE i.indrelid = TG_RELID AND i.indisprimary;
+    
+    IF v_pk IS NULL THEN
+        RAISE EXCEPTION 'Undogate Security Violation: Table %.% has no primary key.', TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    END IF;
 
     IF TG_OP = 'DELETE' THEN
         v_old := row_to_json(OLD);
@@ -264,10 +269,10 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.register_table TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.lock_table_for_undo TO %I', p_control_role);
     
-    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.execute_undo_dml TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.execute_undo TO %I', p_control_role);
     
 
-    EXECUTE format('GRANT SELECT, UPDATE ON undogate.checkpoints TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT ON undogate.checkpoints TO %I', p_control_role);
     EXECUTE format('GRANT SELECT ON undogate.row_changes TO %I', p_control_role);
     EXECUTE format('GRANT INSERT ON undogate.undo_operations TO %I', p_control_role);
     EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA undogate TO %I', p_control_role);
@@ -338,54 +343,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
-CREATE OR REPLACE FUNCTION undogate.execute_undo_dml(
-    p_schema TEXT,
-    p_table TEXT,
-    p_op CHAR(1),
-    p_pk_col TEXT,
-    p_pk_val TEXT,
-    p_old_row JSONB,
-    p_new_row JSONB
-) RETURNS VOID AS $$
-DECLARE
-    v_full_table TEXT := quote_ident(p_schema) || '.' || quote_ident(p_table);
-    v_curr JSONB;
-    v_set_clauses TEXT;
-    v_key TEXT;
-BEGIN
-    IF p_op = 'I' THEN
-        EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', v_full_table, p_pk_col, p_pk_val) INTO v_curr;
-        IF v_curr IS NULL THEN
-            RAISE EXCEPTION 'Conflict: Row % missing in %', p_pk_val, v_full_table;
-        END IF;
-        IF (v_curr::jsonb - p_pk_col) != (p_new_row::jsonb - p_pk_col) THEN
-            -- we compare everything except PK in case of formatting diffs, but actually let's compare exactly
-            IF v_curr::jsonb != p_new_row::jsonb THEN
-                RAISE EXCEPTION 'Conflict: Row % in % has been modified', p_pk_val, v_full_table;
-            END IF;
-        END IF;
-        EXECUTE format('DELETE FROM %s WHERE %I = %L', v_full_table, p_pk_col, p_pk_val);
-        
-    ELSIF p_op = 'U' THEN
-        EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', v_full_table, p_pk_col, p_pk_val) INTO v_curr;
-        IF v_curr IS NULL THEN
-            RAISE EXCEPTION 'Conflict: Row % missing in %', p_pk_val, v_full_table;
-        END IF;
-        IF v_curr::jsonb != p_new_row::jsonb THEN
-            RAISE EXCEPTION 'Conflict: Row % in % has been modified', p_pk_val, v_full_table;
-        END IF;
-        
-        SELECT string_agg(quote_ident(key) || ' = (SELECT "' || key || '" FROM jsonb_populate_record(null::' || v_full_table || ', $1::jsonb))', ', ') 
-        INTO v_set_clauses
-        FROM jsonb_object_keys(p_old_row) AS key;
-        
-        EXECUTE format('UPDATE %s SET %s WHERE %I = %L', v_full_table, v_set_clauses, p_pk_col, p_pk_val) USING p_old_row;
 
-    ELSIF p_op = 'D' THEN
-        EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', v_full_table, v_full_table) USING p_old_row;
-    END IF;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 CREATE OR REPLACE FUNCTION undogate.lock_table_for_undo(
     p_schema TEXT,
@@ -395,3 +353,198 @@ BEGIN
     EXECUTE format('LOCK TABLE %I.%I IN SHARE ROW EXCLUSIVE MODE NOWAIT', p_schema, p_table);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+CREATE OR REPLACE FUNCTION undogate.execute_undo(
+    p_public_id TEXT,
+    p_agent_label TEXT
+) RETURNS JSONB AS $$
+DECLARE
+    v_cp_id BIGINT;
+    v_status TEXT;
+    v_undo_cp_id BIGINT;
+    v_undo_public_id TEXT;
+    v_token UUID;
+    v_change RECORD;
+    v_full_table TEXT;
+    v_curr JSONB;
+    v_set_clauses TEXT;
+    v_affected INT := 0;
+    v_seq_val BIGINT;
+BEGIN
+    -- 1. Fetch and lock original checkpoint
+    SELECT id, status INTO v_cp_id, v_status
+    FROM undogate.checkpoints
+    WHERE public_id = p_public_id
+    FOR UPDATE NOWAIT;
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Checkpoint not found: %', p_public_id;
+    END IF;
+    
+    IF v_status = 'undone' THEN
+        RAISE EXCEPTION 'Checkpoint already undone: %', p_public_id;
+    END IF;
+    IF v_status != 'applied' THEN
+        RAISE EXCEPTION 'Cannot undo checkpoint in state: %', v_status;
+    END IF;
+
+    -- 2. Lock affected tables in deterministic order (by table_oid)
+    -- Also validate schema (unsupported constructs)
+    FOR v_change IN 
+        SELECT DISTINCT table_schema, table_name, table_oid 
+        FROM undogate.row_changes 
+        WHERE checkpoint_id = v_cp_id 
+        ORDER BY table_oid
+    LOOP
+        EXECUTE format('LOCK TABLE %I.%I IN SHARE ROW EXCLUSIVE MODE NOWAIT', v_change.table_schema, v_change.table_name);
+        
+        -- Validate table identity (OID match)
+        IF v_change.table_oid IS NOT NULL THEN
+            IF v_change.table_oid != (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass::oid THEN
+                RAISE EXCEPTION 'Table identity drifted for %.%', v_change.table_schema, v_change.table_name;
+            END IF;
+        END IF;
+
+        -- Check unsupported schemas
+
+        IF EXISTS (
+            SELECT 1 FROM pg_inherits 
+            WHERE inhrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass 
+               OR inhparent = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass
+        ) THEN
+            RAISE EXCEPTION 'Unsupported schema: Table inheritance is not allowed on %', v_change.table_name;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint 
+            WHERE conrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass 
+            AND contype = 'f'
+        ) THEN
+            RAISE EXCEPTION 'Unsupported schema: Foreign keys not allowed on %', v_change.table_name;
+        END IF;
+        
+        -- Check triggers: exactly ONE trigger allowed, and it MUST be undogate_capture, and ENABLED.
+        IF EXISTS (
+            SELECT 1 FROM pg_trigger 
+            WHERE tgrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass
+            AND tgname != 'undogate_capture' AND tgisinternal = false
+        ) THEN
+            RAISE EXCEPTION 'Unsupported schema: Triggers not allowed on %', v_change.table_name;
+        END IF;
+        
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_trigger 
+            WHERE tgrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass
+            AND tgname = 'undogate_capture' AND tgenabled = 'O'
+        ) THEN
+            RAISE EXCEPTION 'Capture trigger missing or disabled on %', v_change.table_name;
+        END IF;
+        
+        IF EXISTS (
+            SELECT 1 FROM pg_rewrite 
+            WHERE ev_class = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass 
+            AND rulename != '_RETURN'
+        ) THEN
+            RAISE EXCEPTION 'Unsupported schema: Rules not allowed on %', v_change.table_name;
+        END IF;
+    END LOOP;
+
+    -- 3. Create new checkpoint for the undo operation
+    SELECT gen_random_uuid() INTO v_token;
+    v_undo_public_id := 'undo_' || replace(gen_random_uuid()::text, '-', '');
+    
+    INSERT INTO undogate.checkpoints (public_id, sql_text, classification, decision, agent_label, status, capability_token, exec_txid)
+    VALUES (v_undo_public_id, 'UNDO ' || p_public_id, 'WRITE_UNDO', 'ALLOW', p_agent_label, 'executing', v_token, txid_current())
+    RETURNING id INTO v_undo_cp_id;
+
+    -- Set GUCs so trigger logs it
+    PERFORM set_config('undogate.checkpoint_id', v_undo_cp_id::text, true);
+    PERFORM set_config('undogate.capability_token', v_token::text, true);
+    PERFORM set_config('undogate.seq', '1', true);
+    
+    v_seq_val := 1;
+
+    -- 4. Apply reverse DML in LIFO order
+    FOR v_change IN 
+        SELECT table_schema, table_name, op, pk, old_row, new_row 
+        FROM undogate.row_changes 
+        WHERE checkpoint_id = v_cp_id 
+        ORDER BY seq DESC
+    LOOP
+        PERFORM set_config('undogate.seq', v_seq_val::text, true);
+        v_seq_val := v_seq_val + 1;
+        
+        v_full_table := quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name);
+        
+        IF v_change.op = 'I' THEN
+            EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', 
+                v_full_table, 
+                (SELECT key FROM jsonb_each(v_change.pk) LIMIT 1), 
+                (SELECT value#>>'{}' FROM jsonb_each(v_change.pk) LIMIT 1)) INTO v_curr;
+            
+            IF v_curr IS NULL THEN
+                RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
+            END IF;
+            
+            -- Full new_row comparison
+            IF v_curr::jsonb != v_change.new_row::jsonb THEN
+                RAISE EXCEPTION 'Conflict: Row % in % has been modified', v_change.pk, v_full_table;
+            END IF;
+            
+            EXECUTE format('DELETE FROM %s WHERE %I = %L', 
+                v_full_table, 
+                (SELECT key FROM jsonb_each(v_change.pk) LIMIT 1), 
+                (SELECT value#>>'{}' FROM jsonb_each(v_change.pk) LIMIT 1));
+                
+        ELSIF v_change.op = 'U' THEN
+            EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', 
+                v_full_table, 
+                (SELECT key FROM jsonb_each(v_change.pk) LIMIT 1), 
+                (SELECT value#>>'{}' FROM jsonb_each(v_change.pk) LIMIT 1)) INTO v_curr;
+                
+            IF v_curr IS NULL THEN
+                RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
+            END IF;
+            IF v_curr::jsonb != v_change.new_row::jsonb THEN
+                RAISE EXCEPTION 'Conflict: Row % in % has been modified', v_change.pk, v_full_table;
+            END IF;
+            
+            SELECT string_agg(quote_ident(key) || ' = (SELECT (' || quote_literal(value#>>'{}') || ')::text)', ', ') 
+            -- Using text cast is simple but might fail types. 
+            -- Safest: USING parameter, but jsonb_populate_record is better.
+            -- User request: "SELECT %I FROM jsonb_populate_record(null::%s, $1::jsonb)"
+            INTO v_set_clauses
+            FROM jsonb_each(v_change.old_row);
+            
+            SELECT string_agg(quote_ident(key) || ' = (SELECT ' || quote_ident(key) || ' FROM jsonb_populate_record(null::' || v_full_table || ', $1::jsonb))', ', ') 
+            INTO v_set_clauses
+            FROM jsonb_object_keys(v_change.old_row) AS key;
+            
+            EXECUTE format('UPDATE %s SET %s WHERE %I = %L', 
+                v_full_table, 
+                v_set_clauses, 
+                (SELECT key FROM jsonb_each(v_change.pk) LIMIT 1), 
+                (SELECT value#>>'{}' FROM jsonb_each(v_change.pk) LIMIT 1)) USING v_change.old_row;
+
+        ELSIF v_change.op = 'D' THEN
+            EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', v_full_table, v_full_table) USING v_change.old_row;
+        ELSE
+            RAISE EXCEPTION 'Unknown operation: %', v_change.op;
+        END IF;
+        
+        v_affected := v_affected + 1;
+    END LOOP;
+
+    -- 5. Mark old checkpoint undone, new checkpoint applied
+    UPDATE undogate.checkpoints SET status = 'undone' WHERE id = v_cp_id;
+    UPDATE undogate.checkpoints SET status = 'applied' WHERE id = v_undo_cp_id;
+    
+    INSERT INTO undogate.undo_operations (source_checkpoint_id, undo_checkpoint_id)
+    VALUES (v_cp_id, v_undo_cp_id);
+
+    RETURN jsonb_build_object(
+        'status', 'applied',
+        'public_id', v_undo_public_id,
+        'rows_affected', v_affected
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;

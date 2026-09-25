@@ -111,6 +111,8 @@ def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
             
         # Step 3: Admin approves
         approve_resp = client.post(f"/v1/checkpoints/{token}/approve", headers={"X-API-Key": "admin"})
+        print(approve_resp.json())
+        print(approve_resp.json())
         assert approve_resp.status_code == 200
         assert approve_resp.json()["status"] == "approved"
         assert approve_resp.json()["rows_affected"] == 1
