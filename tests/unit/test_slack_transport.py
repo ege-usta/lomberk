@@ -289,7 +289,7 @@ async def test_slack_transport_connect_cancelled_cleanup(mock_adapter, mock_clie
     client.close.assert_called_once()
 
 @pytest.mark.asyncio
-async def test_slack_transport_double_cancellation_ownership(mock_adapter, mock_client_factory):
+async def test_slack_transport_cleanup_ownership_and_drain(mock_adapter, mock_client_factory):
     # This test verifies that if connect is cancelled, it spawns a cleanup task.
     # If the shield is cancelled (double cancellation), the cleanup task survives
     # and is correctly drained by disconnect().
@@ -344,3 +344,42 @@ async def test_slack_transport_double_cancellation_ownership(mock_adapter, mock_
     # Cleanup task should be gone
     assert len(transport._cleanup_tasks) == 0
 
+
+@pytest.mark.asyncio
+async def test_slack_transport_true_double_cancellation(mock_adapter, mock_client_factory):
+    close_started = asyncio.Event()
+    
+    def hanging_factory(token):
+        c = mock_client_factory(token)
+        async def hang():
+            await asyncio.sleep(1.0)
+        c.connect.side_effect = hang
+        
+        async def slow_close():
+            close_started.set()
+            await asyncio.sleep(5.0) # Unending close
+        c.close = slow_close
+        return c
+        
+    transport = SlackTransport("app-token", mock_adapter, hanging_factory, enabled=True)
+    
+    t = asyncio.create_task(transport.connect())
+    await asyncio.sleep(0.01) # start connect
+    
+    t.cancel() # 1st cancel
+    await close_started.wait() # wait for inner close to begin
+    
+    dt = asyncio.create_task(transport.disconnect())
+    await asyncio.sleep(0.01) # start disconnect drain
+    
+    # Now cancel the disconnect itself (2nd cancel)
+    dt.cancel()
+    
+    with pytest.raises(asyncio.CancelledError):
+        await dt
+        
+    # the cleanup task should STILL be tracked despite double cancel
+    assert len(transport._cleanup_tasks) == 1
+    # manually cancel it to keep test fast
+    for task in transport._cleanup_tasks:
+        task.cancel()

@@ -72,8 +72,8 @@ class SlackTransport:
                                 try:
                                     async with asyncio.timeout(3.0):
                                         await client_to_close.close()
-                                except BaseException:
-                                    pass
+                                except BaseException as ce:
+                                    logger.error(f"Cleanup close failed: {type(ce).__name__}")
                             ctask = asyncio.create_task(_safe_close())
                             self._cleanup_tasks.add(ctask)
                             ctask.add_done_callback(self._cleanup_tasks.discard)

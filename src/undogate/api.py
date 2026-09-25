@@ -83,12 +83,12 @@ async def lifespan(app: FastAPI):
                 raise ValueError("Startup Refusal: config.slack.team_allowlist is missing or empty.")
                 
             slack_update_cb = getattr(app.state, "slack_update_callback", None)
-            if not slack_update_cb:
-                raise ValueError("Startup Refusal: slack_update_callback dependency missing. Live notifications cannot function.")
+            if not slack_update_cb or not callable(slack_update_cb):
+                raise ValueError("Startup Refusal: slack_update_callback dependency missing or not callable.")
                 
             slack_resolver = getattr(app.state, "slack_target_resolver", None)
-            if not slack_resolver:
-                raise ValueError("Startup Refusal: slack_target_resolver dependency missing. Cannot bind Slack actions to targets.")
+            if not slack_resolver or not callable(slack_resolver):
+                raise ValueError("Startup Refusal: slack_target_resolver dependency missing or not callable.")
                 
             try:
                 from undogate.slack import SlackInteractionAdapter
@@ -98,6 +98,9 @@ async def lifespan(app: FastAPI):
                 import asyncio
                 
                 # Capture fixed references to avoid None during shutdown
+                _db_workers = set()
+                app.state._db_workers = _db_workers  # expose for testing
+                
                 def make_callbacks(executor, policy, resolver, updater):
                     async def resolve_cb(team, channel, ts):
                         return await resolver(team, channel, ts)
@@ -105,8 +108,14 @@ async def lifespan(app: FastAPI):
                     async def status_cb(pid):
                         return await asyncio.to_thread(executor.check_status, pid)
                         
+                    async def _run_tracked(func, *args):
+                        t = asyncio.create_task(asyncio.to_thread(func, *args))
+                        _db_workers.add(t)
+                        t.add_done_callback(_db_workers.discard)
+                        return await asyncio.shield(t)
+                        
                     async def approve_cb(pid):
-                        res = await asyncio.to_thread(executor.execute_pending, pid)
+                        res = await _run_tracked(executor.execute_pending, pid)
                         return {"status": res.status}
                         
                     async def reject_cb(pid):
@@ -116,7 +125,7 @@ async def lifespan(app: FastAPI):
                                 with conn.cursor() as cur:
                                     cur.execute("SELECT undogate.reject_checkpoint(%s)", (pid,))
                                     conn.commit()
-                        await asyncio.to_thread(_do_reject)
+                        await _run_tracked(_do_reject)
                         return {"status": "denied"}
                         
                     async def update_cb(channel, ts, msg):
@@ -164,6 +173,13 @@ async def lifespan(app: FastAPI):
         if _slack_transport_instance:
             await _slack_transport_instance.disconnect()
             _slack_transport_instance = None
+            
+        _db_workers = getattr(app.state, "_db_workers", set())
+        if _db_workers:
+            logger.info(f"Draining {len(_db_workers)} outstanding DB workers...")
+            done, pending = await asyncio.wait(_db_workers, timeout=5.0)
+            if pending:
+                logger.error(f"Shutdown timeout: {len(pending)} DB workers remain outstanding/unknown.")
             
         _executor_instance = None
         _policy_engine_instance = None

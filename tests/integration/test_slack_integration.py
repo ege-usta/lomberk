@@ -163,6 +163,16 @@ async def test_api_lifespan_slack_transport_disabled(setup_db, auth_and_config, 
     async with undogate.api.lifespan(app):
         assert getattr(undogate.api, "_slack_transport_instance", None) is None
 
+@pytest.fixture(autouse=True)
+def clean_app_state():
+    import undogate.api
+    app = undogate.api.app
+    # Save original state if we want, but these are set per test
+    yield
+    for attr in ["slack_target_resolver", "slack_update_callback", "slack_client_factory", "_db_workers"]:
+        if hasattr(app.state, attr):
+            delattr(app.state, attr)
+
 @pytest.mark.asyncio
 async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_and_config, monkeypatch):
     import undogate.api
@@ -207,28 +217,88 @@ async def test_api_lifespan_slack_transport_successful_fake(setup_db, auth_and_c
     original_config.slack.team_allowlist = ["T1"]
     monkeypatch.setattr(undogate.api, "load_config", lambda: original_config)
     
-    app.state.slack_target_resolver = lambda t, c, ts: "cp_test"
+    from unittest.mock import AsyncMock, MagicMock
     
-    update_called = False
+    resolver_calls = []
+    async def mock_resolver(t, c, ts):
+        resolver_calls.append((t, c, ts))
+        if c == "C_MISMATCH": return "cp_other"
+        return "cp_test"
+    app.state.slack_target_resolver = mock_resolver
+    
+    update_calls = []
     async def mock_update(c, ts, m):
-        nonlocal update_called
-        update_called = True
-        
+        update_calls.append((c, ts, m))
     app.state.slack_update_callback = mock_update
     
     def fake_factory(token):
-        from unittest.mock import MagicMock, AsyncMock
         m = MagicMock()
         m.connect = AsyncMock()
+        m.close = AsyncMock()
         m.socket_mode_request_listeners = []
         return m
         
     app.state.slack_client_factory = fake_factory
     
+    # Mock executor to observe business calls
+    approve_called = False
+    async def mock_approve(pid):
+        nonlocal approve_called
+        approve_called = True
+        return MagicMock(status="applied")
+    
     async with undogate.api.lifespan(app):
         adapter = undogate.api._slack_transport_instance.business_adapter
-        await adapter.slack_update_callback("C1", "123", "msg")
-        assert update_called
+        
+        # Override the bound callback for this test to avoid real DB execution
+        # (Alternatively, we could let it hit the real DB if setup_db provides one)
+        # We'll just override the adapter's approve_callback to intercept it.
+        adapter.approve_callback = mock_approve
+        
+        # We also need to override status_callback so it doesn't query the real DB
+        # if we aren't creating the checkpoint.
+        adapter.status_callback = AsyncMock(return_value="applied")
+        
+        payload_match = {
+            "team": {"id": "T1"}, "user": {"id": "U1"},
+            "container": {"channel_id": "C1", "message_ts": "123"},
+            "actions": [{"action_id": "approve_button", "value": "cp_test"}]
+        }
+        
+        await adapter.handle_interaction(payload_match)
+        # Wait for internal processing to finish
+        import time
+        for _ in range(50):
+            if len(adapter._active_tasks) == 0: break
+            await asyncio.sleep(0.01)
+            
+        assert resolver_calls == [("T1", "C1", "123")]
+        assert approve_called is True
+        adapter.status_callback.assert_called_once_with("cp_test")
+        assert len(update_calls) == 1
+        assert update_calls[0][0] == "C1"
+        assert "successfully applied" in update_calls[0][2]
+        
+        # Test Mismatch Scenario
+        resolver_calls.clear()
+        update_calls.clear()
+        approve_called = False
+        adapter.status_callback.reset_mock()
+        
+        payload_mismatch = {
+            "team": {"id": "T1"}, "user": {"id": "U1"},
+            "container": {"channel_id": "C_MISMATCH", "message_ts": "999"},
+            "actions": [{"action_id": "approve_button", "value": "cp_test"}]
+        }
+        await adapter.handle_interaction(payload_mismatch)
+        for _ in range(50):
+            if len(adapter._active_tasks) == 0: break
+            await asyncio.sleep(0.01)
+            
+        assert resolver_calls == [("T1", "C_MISMATCH", "999")]
+        assert approve_called is False  # Mutation did not happen
+        adapter.status_callback.assert_not_called()
+        assert len(update_calls) == 0  # No UI update on mismatch
 
 @pytest.mark.asyncio
 async def test_api_lifespan_slack_transport_exception_cleanup(setup_db, auth_and_config, monkeypatch):
@@ -251,6 +321,11 @@ async def test_api_lifespan_slack_transport_exception_cleanup(setup_db, auth_and
         raise Exception("Failed to connect fake client")
         
     app.state.slack_client_factory = failing_factory
+    
+    from unittest.mock import AsyncMock
+    async def dummy_cb(*args, **kwargs): pass
+    app.state.slack_update_callback = dummy_cb
+    app.state.slack_target_resolver = dummy_cb
     
     async with undogate.api.lifespan(app):
         assert getattr(undogate.api, "_slack_transport_instance") is not None
