@@ -132,7 +132,7 @@ def execute_query(
             operation_id=req.operation_id
         )
         
-        if exec_res.status == "failed" and "Conflict: operation_id" in exec_res.message:
+        if exec_res.status == "failed" and exec_res.error_code == "conflict":
             raise HTTPException(status_code=409, detail=exec_res.message)
             
         results.append({
@@ -142,6 +142,8 @@ def execute_query(
             "status": exec_res.status,
             "message": exec_res.message,
             "checkpoint_id": exec_res.public_id,
+            "operation_id": exec_res.operation_id,
+            "error_code": exec_res.error_code,
             "rows_affected": exec_res.rows_affected,
             "data": exec_res.data
         })
@@ -192,7 +194,7 @@ def approve_checkpoint(
             return {"status": "denied", "message": res.message}
         elif res.status == "unknown":
             from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=502, content={"status": "unknown", "message": res.message, "public_id": res.public_id})
+            return JSONResponse(status_code=502, content={"status": "unknown", "message": res.message, "public_id": res.public_id, "operation_id": res.operation_id})
         elif res.status == "failed":
             raise HTTPException(status_code=400, detail=res.message)
         else:

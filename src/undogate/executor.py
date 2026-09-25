@@ -13,10 +13,12 @@ from undogate.models import PolicyDecision, StatementEvaluation
 class ExecutionResult(BaseModel):
     checkpoint_id: int | None = None
     public_id: str | None = None
+    operation_id: str | None = None
     rows_affected: int = 0
     data: list[dict] | None = None
     status: str
     message: str
+    error_code: str | None = None
 
 class UndogateExecutor:
 
@@ -27,8 +29,8 @@ class UndogateExecutor:
             existing = check_cur.fetchone()
             if existing:
                 if existing[4] != sql_to_execute:
-                    return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], status="failed", message=f"Conflict: operation_id {operation_id} was already used with a different SQL payload.")
-                return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], status="approval_required" if existing[2] == "pending" else existing[2], rows_affected=existing[3] or 0, message="Idempotent replay")
+                    return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], operation_id=operation_id, status="failed", error_code="conflict", message=f"Conflict: operation_id {operation_id} was already used with a different SQL payload.")
+                return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], operation_id=operation_id, status="approval_required" if existing[2] == "pending" else existing[2], rows_affected=existing[3] or 0, message="Idempotent replay")
         raise RuntimeError(f"UniqueViolation occurred but no existing record found for {principal}:{operation_id}")
 
     def execute_undo(self, public_id: str, agent_label: str = "UNDOGATE_SYSTEM") -> ExecutionResult:
@@ -57,24 +59,24 @@ class UndogateExecutor:
                 except psycopg.errors.RaiseException as e:
                     error_msg = str(e)
                     if "Checkpoint not found" in error_msg or "Cannot undo checkpoint in state" in error_msg:
-                        return ExecutionResult(status="denied", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
+                        return ExecutionResult(operation_id=operation_id, status="denied", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
                     elif "already undone" in error_msg:
                         return ExecutionResult(status="already_undone", message="Checkpoint already undone.", public_id=public_id, rows_affected=0)
                     elif "Unsupported schema" in error_msg or "identity drifted" in error_msg or "missing, disabled" in error_msg:
-                        return ExecutionResult(status="failed", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
+                        return ExecutionResult(operation_id=operation_id, status="failed", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
                     elif "Conflict" in error_msg:
                         return ExecutionResult(status="conflict", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
                     else:
-                        return ExecutionResult(status="failed", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
+                        return ExecutionResult(operation_id=operation_id, status="failed", message=error_msg.split('\n')[0], public_id=public_id, rows_affected=0)
                 except psycopg.OperationalError as e:
                     raise e
                 except psycopg.Error as e:
                     # Other postgres errors (foreign key violation, check constraint violation, etc)
                     if e.sqlstate and e.sqlstate.startswith('08'):
                         raise psycopg.OperationalError(str(e)) # Let it bubble up for outcome_unknown
-                    return ExecutionResult(status="failed", message=str(e).split('\n')[0], public_id=public_id, rows_affected=0)
+                    return ExecutionResult(operation_id=operation_id, status="failed", message=str(e).split('\n')[0], public_id=public_id, rows_affected=0)
         except psycopg.OperationalError as e:
-            return ExecutionResult(status="unknown", message=str(e), public_id=public_id)
+            return ExecutionResult(operation_id=operation_id, status="unknown", message=str(e), public_id=public_id)
 
     def _mask_and_sanitize_rows(self, columns, rows):
         import re
@@ -131,10 +133,10 @@ class UndogateExecutor:
         
         safe, reason = AISentinel()._ast_firewall(eval_result.statement.sql)
         if not safe:
-            return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
+            return ExecutionResult(operation_id=operation_id, status="denied", message=f"Hard Gate Denied: {reason}")
             
         if eval_result.decision == PolicyDecision.DENY:
-            return ExecutionResult(status="denied", message=eval_result.reason)
+            return ExecutionResult(operation_id=operation_id, status="denied", message=eval_result.reason)
             
         if eval_result.decision == PolicyDecision.REQUIRE_APPROVAL:
             import psycopg
@@ -147,7 +149,7 @@ class UndogateExecutor:
                     principal=principal,
                     operation_id=operation_id
                 )
-                return ExecutionResult(checkpoint_id=-1, public_id=public_id, status="approval_required", message="Policy requires explicit approval.")
+                return ExecutionResult(checkpoint_id=-1, public_id=public_id, operation_id=operation_id, status="approval_required", message="Policy requires explicit approval.")
             except psycopg.errors.UniqueViolation as e:
                 if e.diag.constraint_name == 'idx_checkpoints_idempotency':
                     return self._resolve_duplicate(principal, operation_id, eval_result.statement.sql)
@@ -180,7 +182,7 @@ class UndogateExecutor:
                 error_msg = str(e)
                 
             if error_msg:
-                return ExecutionResult(status="failed", message=error_msg)
+                return ExecutionResult(operation_id=operation_id, status="failed", message=error_msg)
             return ExecutionResult(status="applied", message="Success", data=fetched_data)
             
         return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, principal, operation_id)
@@ -338,8 +340,8 @@ class UndogateExecutor:
 
         except psycopg.OperationalError as e:
             if operation_id:
-                return ExecutionResult(status="unknown", message="Network lost during checkpoint creation. Retry with same operation_id.")
-            return ExecutionResult(status="failed", message=f"Pre-execution connection error: {e}")
+                return ExecutionResult(operation_id=operation_id, status="unknown", message="Network lost during checkpoint creation. Retry with same operation_id.")
+            return ExecutionResult(operation_id=operation_id, status="failed", message=f"Pre-execution connection error: {e}")
     def execute_pending(self, public_id: str):
         import psycopg
         try:
@@ -350,17 +352,17 @@ class UndogateExecutor:
                     cur.execute("SELECT id, sql_text, status FROM undogate.get_pending_checkpoint(%s)", (public_id,))
                     row = cur.fetchone()
                     if not row:
-                        return ExecutionResult(status="failed", message="Token not found.")
+                        return ExecutionResult(operation_id=operation_id, status="failed", message="Token not found.")
                     cp_id, sql_to_execute, status = row
                     if status != "pending":
-                        return ExecutionResult(status="failed", message=f"Checkpoint status is {status}, not pending.")
+                        return ExecutionResult(operation_id=operation_id, status="failed", message=f"Checkpoint status is {status}, not pending.")
 
                     from undogate.sentinel import AISentinel
                     safe, reason = AISentinel()._ast_firewall(sql_to_execute)
                     if not safe:
                         cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
                         # Transaction context manager will commit
-                        return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
+                        return ExecutionResult(operation_id=operation_id, status="denied", message=f"Hard Gate Denied: {reason}")
 
                     cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                     exec_token = cur.fetchone()[0]
@@ -369,7 +371,7 @@ class UndogateExecutor:
             return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
 
         except psycopg.OperationalError as e:
-            return ExecutionResult(status="unknown", message=str(e))
+            return ExecutionResult(operation_id=operation_id, status="unknown", message=str(e))
     def check_status(self, public_id: str) -> str:
         import psycopg
         try:

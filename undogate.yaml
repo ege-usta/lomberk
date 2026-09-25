@@ -1,3 +1,2 @@
-version: 1
 protected_tables:
-  - public.users
+  - public.pilot_users
