@@ -96,7 +96,7 @@ def test_api_approve_outcome_unknown(client, control_dsn, runtime_dsn, monkeypat
     
     # We create a pending checkpoint first
     with psycopg.connect(control_dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO test_api VALUES(99, ''val'')', 'WRITE_DML', 'test')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO test_api VALUES(99, ''val'')', 'WRITE_DML', 'test', 'system', gen_random_uuid()::text)")
         row = cur.fetchone()
         assert row is not None
         cp_id, pub_id = row[0], row[1]
@@ -119,4 +119,4 @@ def test_api_approve_outcome_unknown(client, control_dsn, runtime_dsn, monkeypat
     # Should get 502 with outcome_unknown
     print(api_res.text)
     assert api_res.status_code == 502
-    assert api_res.json()["status"] == "outcome_unknown"
+    assert api_res.json()["status"] == "unknown"

@@ -125,7 +125,12 @@ def execute_query(
         eval_result = policy_engine.evaluate(stmt)
         # Note: the hard gate evaluation is done inside executor.execute()
         # It will return 'denied' if AST fails
-        exec_res = executor.execute(eval_result, req.agent_label)
+        exec_res = executor.execute(
+            eval_result, 
+            agent_label=req.agent_label,
+            principal="api_user",
+            operation_id=req.operation_id
+        )
         
         results.append({
             "sql": stmt.sql,
@@ -167,7 +172,7 @@ def check_checkpoint_status(
         raise
     except Exception as e:
         from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=502, content={"status": "outcome_unknown", "message": "Database unreachable"})
+        return JSONResponse(status_code=502, content={"status": "unknown", "message": "Database unreachable"})
 
 @app.post("/v1/checkpoints/{public_id}/approve")
 
@@ -182,9 +187,9 @@ def approve_checkpoint(
             return {"status": "approved", "rows_affected": res.rows_affected}
         elif res.status == "denied":
             return {"status": "denied", "message": res.message}
-        elif res.status == "outcome_unknown":
+        elif res.status == "unknown":
             from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=502, content={"status": "outcome_unknown", "message": res.message, "public_id": res.public_id})
+            return JSONResponse(status_code=502, content={"status": "unknown", "message": res.message, "public_id": res.public_id})
         elif res.status == "failed":
             raise HTTPException(status_code=400, detail=res.message)
         else:

@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION undogate.begin_checkpoint(
     p_sql_text TEXT,
     p_classification TEXT,
     p_agent_label TEXT,
+    p_principal TEXT,
     p_operation_id TEXT DEFAULT NULL,
     OUT o_cp_id BIGINT,
     OUT o_public_id TEXT
@@ -13,9 +14,9 @@ BEGIN
     v_public_id := 'cp_' || replace(gen_random_uuid()::text, '-', '');
     
     INSERT INTO undogate.checkpoints (
-        public_id, sql_text, classification, agent_label, status, decision, operation_id
+        public_id, sql_text, classification, agent_label, principal, status, decision, operation_id
     ) VALUES (
-        v_public_id, p_sql_text, p_classification, p_agent_label, 'pending', 'REQUIRE_APPROVAL', p_operation_id
+        v_public_id, p_sql_text, p_classification, p_agent_label, p_principal, 'pending', 'REQUIRE_APPROVAL', p_operation_id
     ) RETURNING id INTO v_id;
     
     o_cp_id := v_id;

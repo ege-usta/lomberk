@@ -136,7 +136,7 @@ def test_p0_commit_network_loss(dsn, control_dsn, runtime_dsn, setup_db, monkeyp
     
     res = executor.execute(eval_result, agent_label="test")
     
-    assert res.status == "outcome_unknown"
+    assert res.status == "unknown"
     assert "Network failure" in res.message
     
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
@@ -167,7 +167,7 @@ def test_p0_status_check(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
     # to simulate another backend actively running it.
     
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'test')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'test', 'system', 'system')")
         row = cur.fetchone()
         cp_id, pub_id = row[0], row[1]
         
@@ -217,7 +217,7 @@ def test_p0_commit_network_loss_after_commit(dsn, control_dsn, runtime_dsn, setu
     res = executor.execute(eval_result, agent_label="test")
     # Even though execution technically completed on DB side, 
     # psycopg raised OperationalError which means executor sees it as outcome_unknown!
-    assert res.status == "outcome_unknown"
+    assert res.status == "unknown"
     
     # We can check the true status with check_status which will return 'applied'
     # since it actually committed!

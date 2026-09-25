@@ -36,7 +36,10 @@ app = MCPServer("undogate")
 
 
 @app.tool()
-def execute_sql(sql: str = Field(description="The SQL statement to execute on the PostgreSQL database.")) -> str:
+def execute_sql(
+    sql: str = Field(description="The SQL statement to execute on the PostgreSQL database."),
+    operation_id: str | None = Field(default=None, description="Optional idempotency key (client-generated UUID). Retries with the same operation_id are safely idempotent.")
+) -> str:
     """Executes a SQL statement with Undogate protection."""
     try:
         try:
@@ -56,7 +59,12 @@ def execute_sql(sql: str = Field(description="The SQL statement to execute on th
         results = []
         for stmt in statements:
             eval_result = policy_engine.evaluate(stmt)
-            res = executor.execute(eval_result, agent_label="mcp_agent")
+            res = executor.execute(
+                eval_result, 
+                agent_label="mcp_agent", 
+                principal="mcp_agent", 
+                operation_id=operation_id
+            )
             
             if res.status == "applied":
                 msg = f"Success. Checkpoint: {res.public_id}. Rows affected: {res.rows_affected}."

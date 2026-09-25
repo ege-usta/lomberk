@@ -84,3 +84,13 @@ BEGIN
         CREATE UNIQUE INDEX idx_checkpoints_idempotency ON undogate.checkpoints (agent_label, operation_id) WHERE operation_id IS NOT NULL;
     END IF;
 END $$;
+
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='undogate' AND table_name='checkpoints' AND column_name='principal') THEN
+        ALTER TABLE undogate.checkpoints ADD COLUMN principal TEXT NOT NULL DEFAULT 'system';
+        DROP INDEX IF EXISTS undogate.idx_checkpoints_idempotency;
+        CREATE UNIQUE INDEX idx_checkpoints_idempotency ON undogate.checkpoints (principal, operation_id) WHERE operation_id IS NOT NULL;
+    END IF;
+END $$;

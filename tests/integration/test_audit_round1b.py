@@ -216,7 +216,7 @@ def test_p0_forged_context_rejected(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         cp_id = cur.fetchone()[0]
         
     with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -230,7 +230,7 @@ def test_p0_approval_claim_fail_rejected(dsn, runtime_dsn, setup_db):
     
     # Control plane creates a pending checkpoint
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         row = cur.fetchone()
         cp_id = row[0]
         public_id = row[1]
@@ -251,7 +251,7 @@ def test_p0_capability_spoofing(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         public_id = cur.fetchone()[1]
         cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
         token = cur.fetchone()[0]
@@ -267,7 +267,7 @@ def test_p0_token_stealing_different_backend(dsn, runtime_dsn, setup_db):
     import pytest
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO public.users(data) VALUES (''x'')', 'WRITE_DML', 'mcp_agent')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO public.users(data) VALUES (''x'')', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         row = cur.fetchone()
         cp_id = row[0]
         public_id = row[1]
@@ -303,7 +303,7 @@ def test_p0_valid_claim_dml_finish(dsn, runtime_dsn, setup_db):
     import pytest
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO public.users(data) VALUES (''valid'')', 'WRITE_DML', 'mcp_agent')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO public.users(data) VALUES (''valid'')', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         row = cur.fetchone()
         cp_id = row[0]
         public_id = row[1]

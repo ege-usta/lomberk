@@ -184,7 +184,7 @@ def test_undo_commit_loss(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
 
     # Undo should hit exception
     res_undo = executor.execute_undo(res.public_id)
-    assert res_undo.status == "outcome_unknown", res_undo.message
+    assert res_undo.status == "unknown", res_undo.message
     
     # Check the real status
     monkeypatch.setattr(psycopg.Transaction, "__exit__", original_exit)
