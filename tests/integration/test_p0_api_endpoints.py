@@ -115,6 +115,8 @@ def test_api_approve_outcome_unknown(client, control_dsn, runtime_dsn, monkeypat
     # Hit the approve endpoint
     api_res = client.post(f"/v1/checkpoints/{pub_id}/approve", json={"decision": "ALLOW"}, headers={"X-API-Key": "test-admin-key"})
     
+    monkeypatch.undo()
     # Should get 502 with outcome_unknown
+    print(api_res.text)
     assert api_res.status_code == 502
     assert api_res.json()["status"] == "outcome_unknown"

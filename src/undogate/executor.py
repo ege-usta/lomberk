@@ -376,57 +376,64 @@ class UndogateExecutor:
 
     def _execute_internal(self, sql_to_execute: str, classification: str, decision: str, agent_label: str):
         import psycopg
+        try:
         
-        with psycopg.connect(self.dsn, autocommit=False) as conn:
-            with conn.transaction(), conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s)",
-                    (sql_to_execute, classification, agent_label)
-                )
-                row = cur.fetchone()
-                cp_id = row[0]
-                public_id = row[1]
+            with psycopg.connect(self.dsn, autocommit=False) as conn:
+                with conn.transaction(), conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s)",
+                        (sql_to_execute, classification, agent_label)
+                    )
+                    row = cur.fetchone()
+                    cp_id = row[0]
+                    public_id = row[1]
                 
-                cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
-                exec_token = cur.fetchone()[0]
-                # Transaction context manager will commit
+                    cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                    exec_token = cur.fetchone()[0]
+                    # Transaction context manager will commit
 
-        return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
+            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
 
+        except psycopg.OperationalError:
+            return ExecutionResult(status="outcome_unknown", message="Network failure.")
     def execute_pending(self, public_id: str):
         import psycopg
+        try:
         
         
-        with psycopg.connect(self.dsn, autocommit=False) as conn:
-            with conn.transaction(), conn.cursor() as cur:
-                cur.execute("SELECT id, sql_text, status FROM undogate.get_pending_checkpoint(%s)", (public_id,))
-                row = cur.fetchone()
-                if not row:
-                    return ExecutionResult(status="failed", message="Token not found.")
-                cp_id, sql_to_execute, status = row
-                if status != "pending":
-                    return ExecutionResult(status="failed", message=f"Checkpoint status is {status}, not pending.")
+            with psycopg.connect(self.dsn, autocommit=False) as conn:
+                with conn.transaction(), conn.cursor() as cur:
+                    cur.execute("SELECT id, sql_text, status FROM undogate.get_pending_checkpoint(%s)", (public_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return ExecutionResult(status="failed", message="Token not found.")
+                    cp_id, sql_to_execute, status = row
+                    if status != "pending":
+                        return ExecutionResult(status="failed", message=f"Checkpoint status is {status}, not pending.")
 
-                from undogate.sentinel import AISentinel
-                safe, reason = AISentinel()._ast_firewall(sql_to_execute)
-                if not safe:
-                    cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+                    from undogate.sentinel import AISentinel
+                    safe, reason = AISentinel()._ast_firewall(sql_to_execute)
+                    if not safe:
+                        cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+                        # Transaction context manager will commit
+                        return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
+
+                    cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                    exec_token = cur.fetchone()[0]
                     # Transaction context manager will commit
-                    return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
 
-                cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
-                exec_token = cur.fetchone()[0]
-                # Transaction context manager will commit
+            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
 
-        return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
-
+        except psycopg.OperationalError as e:
+            return ExecutionResult(status="outcome_unknown", message=str(e))
     def check_status(self, public_id: str) -> str:
         import psycopg
         try:
             with psycopg.connect(self.dsn, autocommit=True) as conn:
-                with conn.transaction(), conn.cursor() as cur:
+                with conn.cursor() as cur:
                     cur.execute("SELECT undogate.check_checkpoint_status(%s)", (public_id,))
                     return cur.fetchone()[0]
-        except psycopg.OperationalError:
+        except psycopg.OperationalError as e:
+            print("check_status Error:", repr(e))
             return "outcome_unknown"
 
