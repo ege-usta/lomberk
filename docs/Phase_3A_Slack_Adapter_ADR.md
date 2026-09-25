@@ -54,3 +54,10 @@ This ADR defines the architectural constraints and operational flow for a single
 **Justification:**
 - Avoids exposing internal tools to inbound internet traffic. 
 - The offline design will currently simulate the JSON payloads passed by Socket Mode, without relying on live WebSocket code.
+
+## 7. Phase 3B: Transport Boundary & Lifespan Encapsulation
+**Decision:** The raw SDK SocketMode client is encapsulated in `SlackTransport`, which sits explicitly outside the business logic.
+**Mechanism:**
+- **Zero Business Logic in Transport:** The transport merely filters for `interactive`/`block_actions`, enforces a short-lived deduplication (TTL cache based on `envelope_id`), sends a fast Socket Mode ACK, and drops the payload into the business adapter task boundary.
+- **ACK Semantics:** Sending an ACK back to Slack via the transport is *only* a protocol requirement. It does not mean the DB mutation succeeded, nor does it guarantee durability. If the server crashes after the ACK, the payload is lost from memory.
+- **Lifecycle Bound to FastAPI:** The Transport is started and gracefully drained using the FastAPI `@asynccontextmanager lifespan`. A `_stopping` event gracefully rejects new payloads at the HTTP layer, giving active tasks a bounded `timeout` window to flush to PostgreSQL.
