@@ -41,7 +41,6 @@ def setup_db(dsn):
 @pytest.fixture(scope="module")
 def client(control_dsn, runtime_dsn, setup_db):
     import os
-    import fastapi
     os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
     os.environ["UNDOGATE_ADMIN_DSN"] = control_dsn
     os.environ["UNDOGATE_API_KEY"] = "test-api-key"
@@ -49,29 +48,22 @@ def client(control_dsn, runtime_dsn, setup_db):
     
     executor = UndogateExecutor(control_dsn, runtime_dsn)
     
-    from undogate.api import verify_admin_key
-    def override_admin_key(x_admin_key: str = fastapi.Header(None)):
-        if x_admin_key != "test-admin-key":
-            raise fastapi.HTTPException(status_code=403, detail="Unauthorized")
-        return x_admin_key
-        
     app.dependency_overrides[get_executor] = lambda: executor
-    app.dependency_overrides[verify_admin_key] = override_admin_key
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
 
 def test_api_unauthorized(client):
     res = client.get("/v1/checkpoints/pending")
-    assert res.status_code == 403
+    assert res.status_code == 401
 
 def test_api_list_pending(client):
-    res = client.get("/v1/checkpoints/pending", headers={"X-Admin-Key": "test-admin-key"})
+    res = client.get("/v1/checkpoints/pending", headers={"X-API-Key": "test-admin-key"})
     assert res.status_code == 200
     assert isinstance(res.json(), list)
 
 def test_api_status_not_found(client):
-    res = client.get("/v1/checkpoints/cp_invalid/status", headers={"X-Admin-Key": "test-admin-key"})
+    res = client.get("/v1/checkpoints/cp_invalid/status", headers={"X-API-Key": "test-admin-key"})
     assert res.status_code == 404
 
 def test_api_status_applied(client, control_dsn, runtime_dsn):
@@ -93,7 +85,36 @@ def test_api_status_applied(client, control_dsn, runtime_dsn):
     finally:
         undogate.sentinel.AISentinel._ast_firewall = original_firewall
     
-    api_res = client.get(f"/v1/checkpoints/{res.public_id}/status", headers={"X-Admin-Key": "test-admin-key"})
+    api_res = client.get(f"/v1/checkpoints/{res.public_id}/status", headers={"X-API-Key": "test-admin-key"})
     assert api_res.status_code == 200
     assert api_res.json()["status"] == "applied"
     
+
+def test_api_approve_outcome_unknown(client, control_dsn, runtime_dsn, monkeypatch):
+    import psycopg
+    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    
+    # We create a pending checkpoint first
+    with psycopg.connect(control_dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO test_api VALUES(99, ''val'')', 'WRITE_DML', 'test')")
+        row = cur.fetchone()
+        assert row is not None
+        cp_id, pub_id = row[0], row[1]
+    
+    original_exit = psycopg.Transaction.__exit__
+    def mocked_exit(self, exc_type, exc_val, exc_tb):
+        original_exit(self, exc_type, exc_val, exc_tb)
+        raise psycopg.OperationalError("Simulated network loss after commit")
+    
+    monkeypatch.setattr(psycopg.Transaction, "__exit__", mocked_exit)
+    
+    # Also patch AST
+    import undogate.sentinel
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    
+    # Hit the approve endpoint
+    api_res = client.post(f"/v1/checkpoints/{pub_id}/approve", json={"decision": "ALLOW"}, headers={"X-API-Key": "test-admin-key"})
+    
+    # Should get 502 with outcome_unknown
+    assert api_res.status_code == 502
+    assert api_res.json()["status"] == "outcome_unknown"

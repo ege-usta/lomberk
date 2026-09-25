@@ -69,25 +69,50 @@ def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypa
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = UndogateExecutor(control_dsn, runtime_dsn)
     
-    # DML that fails after partial execution (e.g. division by zero in multi-row insert)
-    # This proves atomicity (first row is rolled back when second row fails)
-    sql = "INSERT INTO public.test_fail (id, val) VALUES (2, 'fail'), (3, (1/0)::text);"
+    # We create a temporary trigger that throws an error when id = 3.
+    # This guarantees execution starts, the first row (id=2) is written (and captured), 
+    # but the transaction fails on id=3.
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE OR REPLACE FUNCTION public.fail_on_3() RETURNS TRIGGER AS $$
+            BEGIN
+                IF NEW.id = 3 THEN
+                    RAISE EXCEPTION 'Simulated error on id 3';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            CREATE TRIGGER fail_on_3_trigger BEFORE INSERT ON public.test_fail FOR EACH ROW EXECUTE FUNCTION public.fail_on_3();
+        """)
+        
+    sql = "INSERT INTO public.test_fail (id, val) VALUES (2, 'fail'), (3, 'error');"
+    from undogate.models import ClassifiedStatement, StatementClass
+    from undogate.policy import StatementEvaluation, PolicyDecision
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
     
     res = executor.execute(eval_result, agent_label="test")
     assert res.status == "failed"
-    assert "division by zero" in res.message
+    assert "Simulated error on id 3" in res.message
     
     # Data is not inserted
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM public.test_fail WHERE id IN (2, 3)")
+        assert cur.fetchone()[0] == 0
+        
+        # Verify NO capture record was left behind for id=2 either!
+        # Because we rollback the entire transaction!
+        cur.execute("SELECT COUNT(*) FROM undogate.row_changes WHERE pk->>'id' = '2'")
         assert cur.fetchone()[0] == 0
     
     # Ledger must say failed
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (res.public_id,))
         assert cur.fetchone()[0] == 'failed'
+        
+        # Cleanup
+        cur.execute("DROP TRIGGER fail_on_3_trigger ON public.test_fail")
+        cur.execute("DROP FUNCTION public.fail_on_3()")
 
 def test_p0_commit_network_loss(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
 
@@ -198,7 +223,15 @@ def test_p0_commit_network_loss_after_commit(dsn, control_dsn, runtime_dsn, setu
         cur.execute("SELECT COUNT(*) FROM public.test_fail WHERE id = 4")
         assert cur.fetchone()[0] == 1
         
-        # Verify capture record exists
-        cur.execute("SELECT COUNT(*) FROM undogate.row_changes WHERE table_schema = 'public' AND table_name = 'test_fail'")
-        # Might be more than 1 depending on other tests, just assert > 0 for this test or fetch by transaction id if we had it.
-        assert cur.fetchone()[0] > 0
+        # Verify exact capture record exists for this operation
+        # We need the checkpoint_id. We can get it from public_id.
+        cur.execute("SELECT id FROM undogate.checkpoints WHERE public_id = %s", (res.public_id,))
+        cp_id = cur.fetchone()[0]
+        
+        cur.execute("SELECT op, pk, old_row, new_row FROM undogate.row_changes WHERE checkpoint_id = %s", (cp_id,))
+        changes = cur.fetchall()
+        assert len(changes) == 1
+        assert changes[0][0] == 'I'
+        assert changes[0][1] == {'id': '4'}
+        assert changes[0][2] is None
+        assert changes[0][3] == {'id': 4, 'val': 'commit_loss_after'}
