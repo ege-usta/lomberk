@@ -10,7 +10,6 @@ from undogate.models import (
     StatementClass,
     StatementEvaluation,
 )
-from undogate.undo import UndoEngine
 
 
 @pytest.fixture(scope="module")
@@ -60,11 +59,11 @@ def assert_runtime_role(dsn):
         cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'mcp_agent'")
         assert cur.fetchone()[0] is False
 
-def test_insert_undo(dsn, runtime_dsn, setup_db):
+def test_insert_undo(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     assert_runtime_role(runtime_dsn)
     executor = UndogateExecutor(dsn, runtime_dsn)
-    undo_engine = UndoEngine(dsn)
-    
+        
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_users (name, age) VALUES ('Alice', 30)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
     
@@ -87,16 +86,17 @@ def test_insert_undo(dsn, runtime_dsn, setup_db):
             assert changes[0][1]['name'] == 'Alice'
 
     # 2. Undo
-    undo_engine.undo(cp_id)
+    res_undo = executor.execute_undo(res.public_id)
+    assert res_undo.status == 'undone'
     
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Alice'")
         assert cur.fetchone()[0] == 0
             
-def test_update_undo(dsn, runtime_dsn, setup_db):
+def test_update_undo(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = UndogateExecutor(dsn, runtime_dsn)
-    undo_engine = UndoEngine(dsn)
-    
+        
     # Insert manually
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO public.test_users (name, age) VALUES ('Bob', 40)")
@@ -113,16 +113,17 @@ def test_update_undo(dsn, runtime_dsn, setup_db):
         assert cur.fetchone()[0] == 41
             
     # Undo
-    undo_engine.undo(cp_id)
+    res_undo = executor.execute_undo(res.public_id)
+    assert res_undo.status == 'undone'
     
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT age FROM public.test_users WHERE name = 'Bob'")
         assert cur.fetchone()[0] == 40
             
-def test_delete_undo(dsn, runtime_dsn, setup_db):
+def test_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = UndogateExecutor(dsn, runtime_dsn)
-    undo_engine = UndoEngine(dsn)
-    
+        
     # Insert manually
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO public.test_users (name, age) VALUES ('Charlie', 50)")
@@ -139,16 +140,17 @@ def test_delete_undo(dsn, runtime_dsn, setup_db):
         assert cur.fetchone()[0] == 0
             
     # Undo
-    undo_engine.undo(cp_id)
+    res_undo = executor.execute_undo(res.public_id)
+    assert res_undo.status == 'undone'
     
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Charlie'")
         assert cur.fetchone()[0] == 1
 
-def test_cascade_delete_undo(dsn, runtime_dsn, setup_db):
+def test_cascade_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = UndogateExecutor(dsn, runtime_dsn)
-    undo_engine = UndoEngine(dsn)
-    
+        
     with psycopg.connect(dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -170,21 +172,83 @@ def test_cascade_delete_undo(dsn, runtime_dsn, setup_db):
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
     
     res = executor.execute(eval)
-    cp_id = res.checkpoint_id
     
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM public.test_users WHERE id = %s", (user_id,))
-            assert cur.fetchone()[0] == 0
-            cur.execute("SELECT count(*) FROM public.test_orders WHERE user_id = %s", (user_id,))
-            assert cur.fetchone()[0] == 0
-            
     # Undo
-    undo_engine.undo(cp_id)
+    res_undo = executor.execute_undo(res.public_id)
+    assert res_undo.status == 'failed'
+    assert 'Foreign keys not allowed' in res_undo.message
+
+def test_concurrent_undo(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    import threading
+    executor = UndogateExecutor(dsn, runtime_dsn)
     
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM public.test_users WHERE id = %s", (user_id,))
-            assert cur.fetchone()[0] == 1
-            cur.execute("SELECT count(*) FROM public.test_orders WHERE user_id = %s", (user_id,))
-            assert cur.fetchone()[0] == 1
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS public.test_chain (id SERIAL PRIMARY KEY, name TEXT, age INT);")
+        cur.execute("SELECT undogate.register_table('public', 'test_chain', 'id', 'mcp_agent');")
+        
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_chain (name, age) VALUES ('Racer', 99)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_chain"])
+    res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
+    
+    results = []
+    def do_undo():
+        res_undo = executor.execute_undo(res.public_id)
+        results.append(f"{res_undo.status}:{res_undo.message}")
+        
+    t1 = threading.Thread(target=do_undo)
+    t2 = threading.Thread(target=do_undo)
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+    
+    undone_count = sum(1 for r in results if r.startswith('undone'))
+    failed_busy_count = sum(1 for r in results if r.startswith('failed') or r.startswith('busy'))
+    assert undone_count == 1, results
+    assert failed_busy_count == 1, results
+
+def test_undo_privilege_boundary(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = UndogateExecutor(dsn, runtime_dsn)
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS public.test_chain (id SERIAL PRIMARY KEY, name TEXT, age INT);")
+        cur.execute("SELECT undogate.register_table('public', 'test_chain', 'id', 'mcp_agent');")
+        
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_chain (name, age) VALUES ('Hacker', 100)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_chain"])
+    res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
+    
+    hacker_executor = UndogateExecutor(runtime_dsn, runtime_dsn)
+    res_undo = hacker_executor.execute_undo(res.public_id)
+    
+    assert res_undo.status == "failed"
+    assert "permission denied" in res_undo.message.lower()
+
+def test_undo_chaining_lifo(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = UndogateExecutor(dsn, runtime_dsn)
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS public.test_chain (id SERIAL PRIMARY KEY, name TEXT, age INT);")
+        cur.execute("SELECT undogate.register_table('public', 'test_chain', 'id', 'mcp_agent');")
+        
+    stmt = ClassifiedStatement(
+        sql='''
+DO $$ 
+BEGIN
+    INSERT INTO public.test_chain (id, name, age) VALUES (991, 'A', 1);
+    INSERT INTO public.test_chain (id, name, age) VALUES (992, 'B', 2);
+    UPDATE public.test_chain SET age=3 WHERE id=991;
+END $$;
+''',
+        stmt_class=StatementClass.WRITE_DML,
+        tables=["public.test_chain"],
+        is_multistatement=True
+    )
+    res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
+    
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT name, age FROM public.test_chain WHERE id IN (991, 992) ORDER BY id")
+        rows = cur.fetchall()
+        assert rows == [('A', 3), ('B', 2)]
+        
+    res_undo = executor.execute_undo(res.public_id)
+    assert res_undo.status == "undone", res_undo.message

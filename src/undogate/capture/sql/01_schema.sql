@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS undogate.row_changes (
     op            CHAR(1) NOT NULL, -- 'I', 'U', 'D'
     pk            JSONB,
     old_row       JSONB,
-    new_row       JSONB
+    new_row       JSONB,
+    schema_snapshot JSONB
 );
 
 CREATE TABLE IF NOT EXISTS undogate.registered_tables (

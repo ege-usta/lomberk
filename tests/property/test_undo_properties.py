@@ -12,7 +12,6 @@ from undogate.models import (
     StatementClass,
     StatementEvaluation,
 )
-from undogate.undo import UndoEngine
 
 
 @pytest.fixture(scope="module")
@@ -66,7 +65,7 @@ def get_checksum(dsn):
 )
 def test_undo_property(dsn, runtime_dsn, setup_db, ops):
     executor = UndogateExecutor(dsn, runtime_dsn)
-    undo_engine = UndoEngine(dsn)
+    
     
     # 1. Capture initial state
     initial_checksum = get_checksum(dsn)
@@ -95,7 +94,8 @@ def test_undo_property(dsn, runtime_dsn, setup_db, ops):
     cp_id = res.checkpoint_id
     
     # 3. Undo
-    undo_engine.undo(cp_id)
+    res_undo = executor.execute_undo(res.public_id)
+    assert res_undo.status == 'undone'
     
     # 4. Verify checksum matches
     final_checksum = get_checksum(dsn)

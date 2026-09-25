@@ -123,6 +123,7 @@ DECLARE
     v_old JSONB := NULL;
     v_new JSONB := NULL;
     v_caller TEXT;
+    v_schema_snapshot JSONB;
 BEGIN
     v_caller := session_user;
     v_cp_id_text := current_setting('undogate.checkpoint_id', true);
@@ -183,6 +184,11 @@ BEGIN
         RAISE EXCEPTION 'Undogate Security Violation: Composite primary keys are not supported (%.%).', TG_TABLE_SCHEMA, TG_TABLE_NAME;
     END IF;
 
+    SELECT jsonb_object_agg(attname, jsonb_build_object('typoid', atttypid, 'typmod', atttypmod, 'notnull', attnotnull))
+    INTO v_schema_snapshot
+    FROM pg_attribute
+    WHERE attrelid = TG_RELID AND attnum > 0 AND NOT attisdropped;
+
     IF TG_OP = 'DELETE' THEN
         v_old := row_to_json(OLD);
     ELSIF TG_OP = 'UPDATE' THEN
@@ -197,10 +203,10 @@ BEGIN
 
     INSERT INTO undogate.row_changes (
         checkpoint_id, table_schema, table_name, table_oid, op, pk,
-        old_row, new_row, seq
+        old_row, new_row, schema_snapshot, seq
     ) VALUES (
         v_cp_id, TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_RELID, substr(TG_OP, 1, 1), jsonb_build_object(v_pk, COALESCE(v_old->>v_pk, v_new->>v_pk)),
-        v_old, v_new, v_seq
+        v_old, v_new, v_schema_snapshot, v_seq
     );
 
     IF TG_OP = 'DELETE' THEN
@@ -485,7 +491,7 @@ BEGIN
 
     -- 4. Apply reverse DML in LIFO order
     FOR v_change IN 
-        SELECT table_schema, table_name, table_oid, op, pk, old_row, new_row 
+        SELECT table_schema, table_name, table_oid, op, pk, old_row, new_row, schema_snapshot
         FROM undogate.row_changes 
         WHERE checkpoint_id = v_cp_id 
         ORDER BY seq DESC
@@ -512,12 +518,24 @@ BEGIN
                 RAISE EXCEPTION 'Security Violation: PK identity drifted for % (expected %, got %)', v_full_table, array_to_string(ARRAY(SELECT jsonb_object_keys(v_change.pk)), ','), v_live_pk;
             END IF;
             
+            IF v_change.schema_snapshot IS NULL THEN
+                RAISE EXCEPTION 'Unsupported: Missing schema snapshot for %', v_full_table;
+            END IF;
+            
             IF EXISTS (
-                SELECT 1 FROM jsonb_object_keys(COALESCE(v_change.old_row, '{}'::jsonb) || COALESCE(v_change.new_row, '{}'::jsonb)) k
-                LEFT JOIN pg_attribute a ON a.attrelid = v_change.table_oid AND a.attname = k AND NOT a.attisdropped AND a.attnum > 0
-                WHERE a.attname IS NULL
+                SELECT 1
+                FROM jsonb_each(v_change.schema_snapshot) AS captured(colname, colmeta)
+                LEFT JOIN pg_attribute live_attr 
+                  ON live_attr.attrelid = v_change.table_oid 
+                 AND live_attr.attname = captured.colname 
+                 AND NOT live_attr.attisdropped 
+                 AND live_attr.attnum > 0
+                WHERE live_attr.attname IS NULL
+                   OR live_attr.atttypid != (captured.colmeta->>'typoid')::oid
+                   OR live_attr.atttypmod != (captured.colmeta->>'typmod')::integer
+                   OR live_attr.attnotnull != (captured.colmeta->>'notnull')::boolean
             ) THEN
-                RAISE EXCEPTION 'Security Violation: Schema drift detected (dropped columns) for %', v_full_table;
+                RAISE EXCEPTION 'Security Violation: Schema drift detected (type/nullability change or dropped column) for %', v_full_table;
             END IF;
         END;
         

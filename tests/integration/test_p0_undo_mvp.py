@@ -267,3 +267,23 @@ def test_undo_generated_column(control_dsn, runtime_dsn, dsn, setup_db, monkeypa
     undo = executor.execute_undo(res_ins.public_id)
     assert undo.status == "failed"
     assert "Generated/Identity columns not allowed" in undo.message
+
+def test_undo_schema_drift_alter_type(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE public.test_alter_type (id INT PRIMARY KEY, val NUMERIC(10,2));")
+        cur.execute("SELECT undogate.register_table('public', 'test_alter_type', 'id', 'mcp_agent');")
+        
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_alter_type VALUES (1, 10.50);", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+    res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
+    
+    stmt2 = ClassifiedStatement(sql="DELETE FROM public.test_alter_type WHERE id = 1;", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+    res_del = executor.execute(StatementEvaluation(statement=stmt2, decision=PolicyDecision.ALLOW, reason=""))
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE public.test_alter_type ALTER COLUMN val TYPE NUMERIC(5,0);")
+        
+    undo_del = executor.execute_undo(res_del.public_id)
+    assert undo_del.status == "failed"
+    assert "Schema drift detected" in undo_del.message

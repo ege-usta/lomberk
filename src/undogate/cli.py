@@ -11,7 +11,6 @@ from undogate.config import load_config
 from undogate.executor import UndogateExecutor
 from undogate.policy import PolicyEngine
 from undogate.sql.classify import classify_sql
-from undogate.undo import UndoEngine
 
 app = typer.Typer(help="Undogate: Ctrl+Z for AI agents", no_args_is_help=True)
 console = Console()
@@ -98,12 +97,12 @@ def undo(token: str):
                 raise typer.Exit(1)
             cp_id = row[0]
             
-    engine = UndoEngine(dsn)
-    success = engine.undo(cp_id)
-    if success:
-        console.print(f"[green]Successfully undid checkpoint {token}.[/green]")
+    executor = UndogateExecutor(control_dsn=dsn, runtime_dsn=dsn)
+    res = executor.execute_undo(token)
+    if res.status == "applied":
+        console.print(f"[green]Successfully undid checkpoint {token}. Rows affected: {res.rows_affected}[/green]")
     else:
-        console.print(f"[red]Failed to undo {token}.[/red]")
+        console.print(f"[red]Failed to undo {token}: {res.message}[/red]")
 
 @app.command()
 def serve():
