@@ -215,3 +215,55 @@ def test_undo_pk_drift_same_oid(control_dsn, runtime_dsn, dsn, setup_db, monkeyp
     res_undo = executor.execute_undo(res_ins.public_id)
     assert res_undo.status == "failed"
     assert "has no primary key" in res_undo.message or "Security Violation" in res_undo.message
+
+def test_undo_schema_drift_dropped_column(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE public.test_drop_col (id INT PRIMARY KEY, val TEXT, secret TEXT);")
+        cur.execute("SELECT undogate.register_table('public', 'test_drop_col', 'id', 'mcp_agent');")
+        
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_drop_col VALUES (1, 'val', 'sec');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+    res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
+    
+    stmt2 = ClassifiedStatement(sql="DELETE FROM public.test_drop_col WHERE id = 1;", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+    res_del = executor.execute(StatementEvaluation(statement=stmt2, decision=PolicyDecision.ALLOW, reason=""))
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE public.test_drop_col DROP COLUMN secret;")
+        
+    undo_del = executor.execute_undo(res_del.public_id)
+    assert undo_del.status == "failed"
+    assert "Schema drift" in undo_del.message
+
+def test_undo_when_false_trigger(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE public.test_when (id INT PRIMARY KEY, val TEXT);")
+        cur.execute("SELECT undogate.register_table('public', 'test_when', 'id', 'mcp_agent');")
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_when VALUES (1, 'val');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+    res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        # Replace trigger with WHEN false
+        cur.execute("DROP TRIGGER undogate_capture ON public.test_when;")
+        cur.execute("CREATE TRIGGER undogate_capture AFTER INSERT OR UPDATE OR DELETE ON public.test_when FOR EACH ROW WHEN (false) EXECUTE FUNCTION undogate.capture_row_change();")
+        
+    undo = executor.execute_undo(res_ins.public_id)
+    assert undo.status == "failed"
+    assert "Capture trigger missing" in undo.message
+
+def test_undo_generated_column(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE public.test_gen (id INT PRIMARY KEY, val TEXT, gen TEXT GENERATED ALWAYS AS (val) STORED);")
+        cur.execute("SELECT undogate.register_table('public', 'test_gen', 'id', 'mcp_agent');")
+        
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_gen (id, val) VALUES (1, 'val');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+    res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
+    
+    undo = executor.execute_undo(res_ins.public_id)
+    assert undo.status == "failed"
+    assert "Generated/Identity columns not allowed" in undo.message

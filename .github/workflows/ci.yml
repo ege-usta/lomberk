@@ -22,12 +22,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5.1.0
         with:
-          python-version-file: "pyproject.toml"
+          python-version: "3.12"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v2.2.0
         with:
-          version: "0.4.10"
+          version: "0.11.18"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
@@ -40,7 +40,7 @@ jobs:
           # We use testcontainers to spin up fresh ephemeral databases for integration tests.
           PYTHONPATH: src
         run: |
-          uv run pytest tests/ \
+          uv run --no-sync pytest tests/ \
             -v \
             --tb=short \
             --junitxml=test-results/junit.xml \

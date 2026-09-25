@@ -445,6 +445,7 @@ BEGIN
             AND tgname = 'undogate_capture' AND tgenabled = 'O'
             AND tgtype = 29 AND tgattr = '' 
             AND tgfoid = 'undogate.capture_row_change'::regproc
+            AND tgqual IS NULL
         ) THEN
             RAISE EXCEPTION 'Capture trigger missing or disabled on %', v_change.table_name;
         END IF;
@@ -455,6 +456,15 @@ BEGIN
             AND rulename != '_RETURN'
         ) THEN
             RAISE EXCEPTION 'Unsupported schema: Rules not allowed on %', v_change.table_name;
+        END IF;
+        
+        IF EXISTS (
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid = v_change.table_oid
+            AND (attgenerated != '' OR attidentity != '')
+            AND NOT attisdropped
+        ) THEN
+            RAISE EXCEPTION 'Unsupported schema: Generated/Identity columns not allowed on %', v_change.table_name;
         END IF;
     END LOOP;
 
@@ -501,6 +511,14 @@ BEGIN
             IF NOT (v_change.pk ? v_live_pk) THEN
                 RAISE EXCEPTION 'Security Violation: PK identity drifted for % (expected %, got %)', v_full_table, array_to_string(ARRAY(SELECT jsonb_object_keys(v_change.pk)), ','), v_live_pk;
             END IF;
+            
+            IF EXISTS (
+                SELECT 1 FROM jsonb_object_keys(COALESCE(v_change.old_row, '{}'::jsonb) || COALESCE(v_change.new_row, '{}'::jsonb)) k
+                LEFT JOIN pg_attribute a ON a.attrelid = v_change.table_oid AND a.attname = k AND NOT a.attisdropped AND a.attnum > 0
+                WHERE a.attname IS NULL
+            ) THEN
+                RAISE EXCEPTION 'Security Violation: Schema drift detected (dropped columns) for %', v_full_table;
+            END IF;
         END;
         
         IF v_change.op = 'I' THEN
@@ -514,7 +532,7 @@ BEGIN
             END IF;
             
             -- Full new_row comparison
-            IF v_curr::jsonb != v_change.new_row::jsonb THEN
+            IF v_curr::jsonb IS DISTINCT FROM v_change.new_row::jsonb THEN
                 RAISE EXCEPTION 'Conflict: Row % in % has been modified', v_change.pk, v_full_table;
             END IF;
             
@@ -532,7 +550,7 @@ BEGIN
             IF v_curr IS NULL THEN
                 RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
             END IF;
-            IF v_curr::jsonb != v_change.new_row::jsonb THEN
+            IF v_curr::jsonb IS DISTINCT FROM v_change.new_row::jsonb THEN
                 RAISE EXCEPTION 'Conflict: Row % in % has been modified', v_change.pk, v_full_table;
             END IF;
             
