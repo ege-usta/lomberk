@@ -69,3 +69,10 @@ BEGIN
         ALTER TABLE undogate.row_changes ADD COLUMN table_oid OID;
     END IF;
 END $$;
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='undogate' AND table_name='row_changes' AND column_name='schema_snapshot') THEN
+        ALTER TABLE undogate.row_changes ADD COLUMN schema_snapshot JSONB;
+    END IF;
+END $$;

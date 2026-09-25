@@ -100,3 +100,51 @@ async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
                 cur.execute("SELECT data FROM public.users WHERE id = 1")
                 assert cur.fetchone()[0] == 'mcp_test2'
+
+from typer.testing import CliRunner
+from undogate.cli import app
+from undogate.executor import UndogateExecutor
+from undogate.policy import PolicyDecision
+from undogate.sql.classify import ClassifiedStatement, StatementClass
+from undogate.models import StatementEvaluation
+import os
+
+runner = CliRunner()
+
+def test_cli_undo_success(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    os.environ["UNDOGATE_ADMIN_DSN"] = dsn
+    os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
+    
+    executor = UndogateExecutor(dsn, runtime_dsn)
+    stmt = ClassifiedStatement(sql="INSERT INTO public.users (data) VALUES ('CLI User')", stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
+    res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
+    
+    result = runner.invoke(app, ["undo", res.public_id])
+    assert result.exit_code == 0
+    assert "Successfully undid checkpoint" in result.stdout
+
+def test_cli_undo_already_undone(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    os.environ["UNDOGATE_ADMIN_DSN"] = dsn
+    os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
+    
+    executor = UndogateExecutor(dsn, runtime_dsn)
+    stmt = ClassifiedStatement(sql="INSERT INTO public.users (data) VALUES ('CLI User 2')", stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
+    res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
+    
+    # Undo once
+    executor.execute_undo(res.public_id)
+    
+    # Try via CLI again
+    result = runner.invoke(app, ["undo", res.public_id])
+    assert result.exit_code == 1
+    assert "already undone" in result.stdout
+
+def test_cli_undo_unknown_token(dsn, runtime_dsn, setup_db):
+    os.environ["UNDOGATE_ADMIN_DSN"] = dsn
+    os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
+    
+    result = runner.invoke(app, ["undo", "cp_invalid123"])
+    assert result.exit_code == 1
+    assert "not found" in result.stdout

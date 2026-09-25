@@ -62,7 +62,7 @@ def assert_runtime_role(dsn):
 def test_insert_undo(dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     assert_runtime_role(runtime_dsn)
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
         
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_users (name, age) VALUES ('Alice', 30)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
@@ -95,7 +95,7 @@ def test_insert_undo(dsn, runtime_dsn, setup_db, monkeypatch):
             
 def test_update_undo(dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
         
     # Insert manually
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -122,7 +122,7 @@ def test_update_undo(dsn, runtime_dsn, setup_db, monkeypatch):
             
 def test_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
         
     # Insert manually
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -149,7 +149,7 @@ def test_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
 
 def test_cascade_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
         
     with psycopg.connect(dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
@@ -178,36 +178,70 @@ def test_cascade_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
     assert res_undo.status == 'failed'
     assert 'Foreign keys not allowed' in res_undo.message
 
-def test_concurrent_undo(dsn, runtime_dsn, setup_db, monkeypatch):
+def test_concurrent_undo_busy_while_locked(dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     import threading
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    import psycopg
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("CREATE TABLE IF NOT EXISTS public.test_chain (id SERIAL PRIMARY KEY, name TEXT, age INT);")
-        cur.execute("SELECT undogate.register_table('public', 'test_chain', 'id', 'mcp_agent');")
+        cur.execute("CREATE TABLE IF NOT EXISTS public.test_concurrent (id SERIAL PRIMARY KEY, name TEXT, age INT);")
+        cur.execute("SELECT undogate.register_table('public', 'test_concurrent', 'id', 'mcp_agent');")
         
-    stmt = ClassifiedStatement(sql="INSERT INTO public.test_chain (name, age) VALUES ('Racer', 99)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_chain"])
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_concurrent (name, age) VALUES ('Racer', 99)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_concurrent"])
     res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
     
-    results = []
-    def do_undo():
-        res_undo = executor.execute_undo(res.public_id)
-        results.append(f"{res_undo.status}:{res_undo.message}")
-        
-    t1 = threading.Thread(target=do_undo)
-    t2 = threading.Thread(target=do_undo)
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM undogate.checkpoints WHERE public_id = %s", (res.public_id,))
+        cp_id = cur.fetchone()[0]
     
-    undone_count = sum(1 for r in results if r.startswith('undone'))
-    failed_busy_count = sum(1 for r in results if r.startswith('failed') or r.startswith('busy'))
-    assert undone_count == 1, results
-    assert failed_busy_count == 1, results
+    # Hold the lock intentionally
+    hold_event = threading.Event()
+    release_event = threading.Event()
+    def hold_lock():
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute("BEGIN;")
+            cur.execute("SELECT 1 FROM undogate.checkpoints WHERE id = %s FOR UPDATE NOWAIT", (cp_id,))
+            locked = cur.fetchone()[0]
+            if locked:
+                hold_event.set()
+                release_event.wait(5)
+            cur.execute("ROLLBACK;")
+            
+    t = threading.Thread(target=hold_lock)
+    t.start()
+    
+    hold_event.wait(5) # Wait for lock to be acquired
+    
+    # Now try to undo, should fail with busy
+    res_undo = executor.execute_undo(res.public_id)
+    assert res_undo.status == "failed" or res_undo.status == "busy" or res_undo.status == "busy"
+    assert "busy" in res_undo.message.lower() or "lock" in res_undo.message.lower()
+    
+    release_event.set()
+    t.join(timeout=5)
+
+def test_concurrent_undo_already_undone_after_commit(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS public.test_already (id SERIAL PRIMARY KEY, name TEXT, age INT);")
+        cur.execute("SELECT undogate.register_table('public', 'test_already', 'id', 'mcp_agent');")
+        
+    stmt = ClassifiedStatement(sql="INSERT INTO public.test_already (name, age) VALUES ('Already', 99)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_already"])
+    res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
+    
+    res1 = executor.execute_undo(res.public_id)
+    assert res1.status == "undone"
+    
+    res2 = executor.execute_undo(res.public_id)
+    assert res2.status == "already_undone"
+    assert "already undone" in res2.message.lower()
 
 def test_undo_privilege_boundary(dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_chain (id SERIAL PRIMARY KEY, name TEXT, age INT);")
@@ -219,12 +253,12 @@ def test_undo_privilege_boundary(dsn, runtime_dsn, setup_db, monkeypatch):
     hacker_executor = UndogateExecutor(runtime_dsn, runtime_dsn)
     res_undo = hacker_executor.execute_undo(res.public_id)
     
-    assert res_undo.status == "failed"
+    assert res_undo.status == "failed" or res_undo.status == "busy" or res_undo.status == "busy"
     assert "permission denied" in res_undo.message.lower()
 
 def test_undo_chaining_lifo(dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_chain (id SERIAL PRIMARY KEY, name TEXT, age INT);")

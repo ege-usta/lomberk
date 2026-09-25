@@ -81,28 +81,33 @@ def reject(token: str):
             else:
                 console.print(f"[red]Token {token} not found.[/red]")
 
+def get_dsns():
+    config = load_config()
+    control = os.environ.get(config.database.admin_dsn_env)
+    runtime = os.environ.get(config.database.agent_dsn_env)
+    
+    if not control:
+        console.print(f"[red]Error: Admin DSN env var '{config.database.admin_dsn_env}' not set.[/red]")
+        raise typer.Exit(1)
+        
+    if not runtime:
+        runtime = control
+        
+    return control, runtime
+
 @app.command()
 def undo(token: str):
     """Undo an applied SQL statement."""
-    dsn = get_admin_dsn()
-    import psycopg
-    
-    # Need to get internal ID from public token
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM undogate.checkpoints WHERE public_id = %s", (token,))
-            row = cur.fetchone()
-            if not row:
-                console.print(f"[red]Token {token} not found.[/red]")
-                raise typer.Exit(1)
-            cp_id = row[0]
+    control, runtime = get_dsns()
             
-    executor = UndogateExecutor(control_dsn=dsn, runtime_dsn=dsn)
+    executor = UndogateExecutor(control, runtime)
     res = executor.execute_undo(token)
-    if res.status == "applied":
+    
+    if res.status == "undone":
         console.print(f"[green]Successfully undid checkpoint {token}. Rows affected: {res.rows_affected}[/green]")
     else:
         console.print(f"[red]Failed to undo {token}: {res.message}[/red]")
+        raise typer.Exit(1)
 
 @app.command()
 def serve():

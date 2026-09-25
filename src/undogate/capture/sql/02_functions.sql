@@ -522,21 +522,18 @@ BEGIN
                 RAISE EXCEPTION 'Unsupported: Missing schema snapshot for %', v_full_table;
             END IF;
             
-            IF EXISTS (
-                SELECT 1
-                FROM jsonb_each(v_change.schema_snapshot) AS captured(colname, colmeta)
-                LEFT JOIN pg_attribute live_attr 
-                  ON live_attr.attrelid = v_change.table_oid 
-                 AND live_attr.attname = captured.colname 
-                 AND NOT live_attr.attisdropped 
-                 AND live_attr.attnum > 0
-                WHERE live_attr.attname IS NULL
-                   OR live_attr.atttypid != (captured.colmeta->>'typoid')::oid
-                   OR live_attr.atttypmod != (captured.colmeta->>'typmod')::integer
-                   OR live_attr.attnotnull != (captured.colmeta->>'notnull')::boolean
-            ) THEN
-                RAISE EXCEPTION 'Security Violation: Schema drift detected (type/nullability change or dropped column) for %', v_full_table;
-            END IF;
+            DECLARE
+                v_live_snapshot JSONB;
+            BEGIN
+                SELECT jsonb_object_agg(attname, jsonb_build_object('typoid', atttypid, 'typmod', atttypmod, 'notnull', attnotnull))
+                INTO v_live_snapshot
+                FROM pg_attribute
+                WHERE attrelid = v_change.table_oid AND attnum > 0 AND NOT attisdropped;
+                
+                IF v_change.schema_snapshot != v_live_snapshot THEN
+                    RAISE EXCEPTION 'Security Violation: Schema drift detected (type/nullability change, dropped, or added column) for %', v_full_table;
+                END IF;
+            END;
         END;
         
         IF v_change.op = 'I' THEN
