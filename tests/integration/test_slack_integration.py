@@ -193,15 +193,23 @@ async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_
     original_config.slack.team_allowlist = ["T1"]
     
     # 2. Missing update callback
-    app.state.slack_target_resolver = lambda t, c, ts: "cp_test"
-    with pytest.raises(ValueError, match="slack_update_callback dependency missing"):
+    async def fake_resolver(t, c, ts): return "cp_test"
+    app.state.slack_target_resolver = fake_resolver
+    with pytest.raises(ValueError, match="slack_update_callback dependency missing or not an async function"):
         async with undogate.api.lifespan(app):
             pass
             
     # 3. Missing resolver
     del app.state.slack_target_resolver
-    app.state.slack_update_callback = lambda c, ts, m: None
-    with pytest.raises(ValueError, match="slack_target_resolver dependency missing"):
+    async def fake_update(c, ts, m): pass
+    app.state.slack_update_callback = fake_update
+    with pytest.raises(ValueError, match="slack_target_resolver dependency missing or not an async function"):
+        async with undogate.api.lifespan(app):
+            pass
+            
+    # 4. Sync function bypass prevention
+    app.state.slack_target_resolver = lambda t, c, ts: "cp_test"
+    with pytest.raises(ValueError, match="slack_target_resolver dependency missing or not an async function"):
         async with undogate.api.lifespan(app):
             pass
 
@@ -431,4 +439,135 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
             if time.time() - start_wait > 1.0:
                 pytest.fail("Thread was killed upon task cancellation!")
             await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, monkeypatch, caplog):
+    # Test worker completion within budget and exceeding budget on lifespan exit
+    import undogate.api
+    import logging
+    monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
+    monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake")
+    
+    original_config = undogate.config.load_config()
+    original_config.slack.admin_allowlist = ["U1"]
+    original_config.slack.team_allowlist = ["T1"]
+    monkeypatch.setattr(undogate.api, "load_config", lambda: original_config)
+    
+    from unittest.mock import AsyncMock, MagicMock
+    app.state.slack_target_resolver = AsyncMock(return_value="cp_test")
+    app.state.slack_update_callback = AsyncMock()
+    app.state.slack_client_factory = lambda token: MagicMock(connect=AsyncMock(), close=AsyncMock(), socket_mode_request_listeners=[])
+    
+    # Variant 1: Finishes within budget
+    with caplog.at_level(logging.INFO, logger="undogate.api"):
+        async with undogate.api.lifespan(app):
+            # inject a fake worker
+            async def fake_worker(): await asyncio.sleep(0.05)
+            t = asyncio.create_task(fake_worker())
+            app.state._db_workers.add(t)
+            t.add_done_callback(app.state._db_workers.discard)
+            
+        assert "Draining 1 outstanding DB workers" in caplog.text
+        assert "Shutdown timeout" not in caplog.text
+        assert len(app.state._db_workers) == 0
+
+    caplog.clear()
+    
+    # Variant 2: Exceeds budget
+    with caplog.at_level(logging.INFO, logger="undogate.api"):
+        async with undogate.api.lifespan(app):
+            # inject a fake worker
+            async def slow_worker(): await asyncio.sleep(6.0) # > 5s
+            t = asyncio.create_task(slow_worker())
+            app.state._db_workers.add(t)
+            t.add_done_callback(app.state._db_workers.discard)
+            
+            # mock wait to be faster in test
+            original_wait = asyncio.wait
+            async def fast_wait(ws, timeout=5.0):
+                return await original_wait(ws, timeout=0.1)
+            monkeypatch.setattr(asyncio, "wait", fast_wait)
+            
+        assert "Draining 1 outstanding DB workers" in caplog.text
+        assert "Shutdown timeout: 1 DB workers remain outstanding/unknown." in caplog.text
+        
+        # Cleanup
+        t.cancel()
+        try: await t
+        except asyncio.CancelledError: pass
+
+@pytest.mark.asyncio
+async def test_api_worker_tracking_capacity_and_exception(setup_db, auth_and_config, monkeypatch, caplog):
+    # Test strict worker capacity (max 50) and detached exception logging
+    import undogate.api
+    import logging
+    monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
+    monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake")
+    
+    original_config = undogate.config.load_config()
+    original_config.slack.admin_allowlist = ["U1"]
+    original_config.slack.team_allowlist = ["T1"]
+    monkeypatch.setattr(undogate.api, "load_config", lambda: original_config)
+    
+    from unittest.mock import AsyncMock, MagicMock
+    app.state.slack_target_resolver = AsyncMock(return_value="cp_test")
+    app.state.slack_update_callback = AsyncMock()
+    app.state.slack_client_factory = lambda token: MagicMock(connect=AsyncMock(), close=AsyncMock(), socket_mode_request_listeners=[])
+    
+    async with undogate.api.lifespan(app):
+        # Fill capacity manually (max 50)
+        import threading
+        release_event = threading.Event()
+        
+        def hanging_execute(*args):
+            release_event.wait()
+            raise ValueError("Test detached exception")
+            
+        monkeypatch.setattr(undogate.api._executor_instance, "execute_pending", hanging_execute)
+        
+        adapter = undogate.api._slack_transport_instance.business_adapter
+        
+        # Start 50 workers
+        tasks = []
+        for i in range(50):
+            t = asyncio.create_task(adapter.approve_callback(f"cp_{i}"))
+            tasks.append(t)
+            
+        # Give them a moment to start
+        await asyncio.sleep(0.05)
+        
+        # Now capacity is full. Next one should fail with TaskCapacityExceededError
+        with pytest.raises(Exception, match="DB worker capacity exceeded"):
+            await adapter.approve_callback("cp_50")
+            
+        # Same for status_cb
+        with pytest.raises(Exception, match="DB worker capacity exceeded"):
+            await adapter.status_callback("cp_50")
+            
+        # Caller cancel does NOT free capacity instantly
+        for t in tasks:
+            t.cancel()
+            
+        # Let cancel propagate
+        await asyncio.sleep(0.05)
+        
+        # Capacity is STILL full because workers are stuck on release_event
+        with pytest.raises(Exception, match="DB worker capacity exceeded"):
+            await adapter.approve_callback("cp_50")
+            
+        # Release workers
+        release_event.set()
+        await asyncio.sleep(0.05)
+        
+        # Capacity is now freed. Next one works
+        with pytest.raises(Exception):
+            # because execute_pending will raise ValueError, but it won't be CapacityExceeded
+            # Wait, execute_pending raises ValueError ("Test detached exception"), but we run_in_executor
+            await adapter.approve_callback("cp_50")
+            
+        # Verify detached exception logging
+        assert "Background DB worker failed: ValueError" in caplog.text
 

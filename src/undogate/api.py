@@ -1,5 +1,9 @@
 import os
 import sys
+import asyncio
+import inspect
+import logging
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Security
 from fastapi.security import APIKeyHeader
@@ -83,12 +87,12 @@ async def lifespan(app: FastAPI):
                 raise ValueError("Startup Refusal: config.slack.team_allowlist is missing or empty.")
                 
             slack_update_cb = getattr(app.state, "slack_update_callback", None)
-            if not slack_update_cb or not callable(slack_update_cb):
-                raise ValueError("Startup Refusal: slack_update_callback dependency missing or not callable.")
+            if not slack_update_cb or not inspect.iscoroutinefunction(slack_update_cb):
+                raise ValueError("Startup Refusal: slack_update_callback dependency missing or not an async function.")
                 
             slack_resolver = getattr(app.state, "slack_target_resolver", None)
-            if not slack_resolver or not callable(slack_resolver):
-                raise ValueError("Startup Refusal: slack_target_resolver dependency missing or not callable.")
+            if not slack_resolver or not inspect.iscoroutinefunction(slack_resolver):
+                raise ValueError("Startup Refusal: slack_target_resolver dependency missing or not an async function.")
                 
             try:
                 from undogate.slack import SlackInteractionAdapter
@@ -100,19 +104,31 @@ async def lifespan(app: FastAPI):
                 # Capture fixed references to avoid None during shutdown
                 _db_workers = set()
                 app.state._db_workers = _db_workers  # expose for testing
+                app.state._shutdown_event = asyncio.Event()
                 
                 def make_callbacks(executor, policy, resolver, updater):
                     async def resolve_cb(team, channel, ts):
                         return await resolver(team, channel, ts)
                     
-                    async def status_cb(pid):
-                        return await asyncio.to_thread(executor.check_status, pid)
-                        
                     async def _run_tracked(func, *args):
+                        if app.state._shutdown_event.is_set():
+                            from undogate.slack import TaskCapacityExceededError
+                            raise TaskCapacityExceededError("Server is shutting down. Rejecting new DB workers.")
+                        if len(_db_workers) >= 50:
+                            from undogate.slack import TaskCapacityExceededError
+                            raise TaskCapacityExceededError("DB worker capacity exceeded. Server is busy.")
+                        
                         t = asyncio.create_task(asyncio.to_thread(func, *args))
                         _db_workers.add(t)
-                        t.add_done_callback(_db_workers.discard)
+                        def _done_cb(fut):
+                            _db_workers.discard(fut)
+                            if not fut.cancelled() and fut.exception():
+                                logger.error(f"Background DB worker failed: {type(fut.exception()).__name__}")
+                        t.add_done_callback(_done_cb)
                         return await asyncio.shield(t)
+                    
+                    async def status_cb(pid):
+                        return await _run_tracked(executor.check_status, pid)
                         
                     async def approve_cb(pid):
                         res = await _run_tracked(executor.execute_pending, pid)
@@ -170,6 +186,9 @@ async def lifespan(app: FastAPI):
 
         yield
     finally:
+        if getattr(app.state, "_shutdown_event", None):
+            app.state._shutdown_event.set()
+
         if _slack_transport_instance:
             await _slack_transport_instance.disconnect()
             _slack_transport_instance = None
