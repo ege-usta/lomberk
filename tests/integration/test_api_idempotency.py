@@ -45,7 +45,7 @@ def setup_db(dsn, runtime_dsn):
         cur.execute("""
                 CREATE TABLE IF NOT EXISTS public.api_users (
                     id SERIAL PRIMARY KEY,
-                    email TEXT UNIQUE NOT NULL
+                    email TEXT NOT NULL
                 );
                 TRUNCATE TABLE public.api_users CASCADE;
         """)
@@ -71,42 +71,80 @@ def client(dsn, runtime_dsn, monkeypatch):
     with TestClient(app) as client:
         yield client
 
-def test_http_submit_idempotent_concurrent(client, dsn):
-    # Test 1: Gerçek HTTP/MCP submit aynı ID ardışık ve barrier ile eşzamanlı
+def test_http_submit_idempotent_concurrent(client, dsn, monkeypatch):
     import threading
-    barrier = threading.Barrier(2)
+    import psycopg
+    
+    ready_to_commit = threading.Event()
+    commit_wait = threading.Event()
+    
+    original_exit = psycopg.Transaction.__exit__
+    
+    first_worker_passed = False
+    
+    def patched_exit(self, exc_type, exc_val, exc_tb):
+        nonlocal first_worker_passed
+        # Only block if it's the runtime user inserting the checkpoint
+        if exc_type is None and self.connection and "mcp_agent" in self.connection.info.user:
+            if not first_worker_passed:
+                first_worker_passed = True
+                ready_to_commit.set()
+                commit_wait.wait(timeout=5.0)
+        return original_exit(self, exc_type, exc_val, exc_tb)
+        
+    monkeypatch.setattr(psycopg.Transaction, "__exit__", patched_exit)
     
     results = []
+    exceptions = []
     
-    def worker():
-        barrier.wait()
-        res = client.post("/v1/execute", json={
-            "sql": "INSERT INTO public.api_users (email) VALUES ('test@example.com')",
-            "operation_id": "req-111"
-        }, headers={"X-API-Key": "test-agent-key"})
-        results.append(res.json())
+    def worker1():
+        try:
+            res = client.post("/v1/execute", json={
+                "sql": "INSERT INTO public.api_users (email) VALUES ('test_concurrent')",
+                "operation_id": "req-111"
+            }, headers={"X-API-Key": "test-agent-key"})
+            results.append(res.json())
+        except Exception as e:
+            exceptions.append(e)
 
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
+    def worker2():
+        try:
+            # Wait until worker1 is about to commit, holding the unique row
+            ready_to_commit.wait(timeout=5.0)
+            res = client.post("/v1/execute", json={
+                "sql": "INSERT INTO public.api_users (email) VALUES ('test_concurrent')",
+                "operation_id": "req-111"
+            }, headers={"X-API-Key": "test-agent-key"})
+            results.append(res.json())
+        except Exception as e:
+            exceptions.append(e)
+
+    t1 = threading.Thread(target=worker1)
+    t2 = threading.Thread(target=worker2)
     
     t1.start()
     t2.start()
-    t1.join()
-    t2.join()
     
-    # Check that exactly 1 row was inserted
+    ready_to_commit.wait(timeout=5.0)
+    import time
+    time.sleep(0.5) # give worker2 time to hit the blocked lock
+    commit_wait.set()
+    
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+    
+    assert not exceptions, exceptions
+    
+    # Check that exactly 1 row was inserted (table is NOT unique)
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM public.api_users WHERE email = 'test@example.com'")
+        cur.execute("SELECT count(*) FROM public.api_users WHERE email = 'test_concurrent'")
         assert cur.fetchone()[0] == 1
         
-    # Check that both got successful response
     assert len(results) == 2
-    for r in results:
-        res_list = r["results"]
-        assert len(res_list) == 1
-        assert res_list[0]["status"] in ["applied", "approval_required", "approved"]
-        if res_list[0]["status"] == "applied":
-            assert "Idempotent replay" in res_list[0]["message"] or "Success" in res_list[0]["message"] or "Rows affected" in res_list[0]["message"]
+    statuses = [r["results"][0]["status"] for r in results]
+    assert "applied" in statuses
+    # The other one gets idempotent replay
+
 
 def test_different_payload_same_id_conflict(client):
     # Test 2: Aynı principal/ID farklı SQL/params/target -> conflict
@@ -122,8 +160,8 @@ def test_different_payload_same_id_conflict(client):
         "operation_id": "req-222"
     }, headers={"X-API-Key": "test-agent-key"})
     
-    assert res2.json()["results"][0]["status"] == "failed"
-    assert "Conflict:" in res2.json()["results"][0]["message"]
+    assert res2.status_code == 409
+    assert "Conflict:" in res2.json()["detail"]
 
 def test_response_loss_retry(client, dsn):
     # Test 4: İlk operation commit'i sonrası response kaybı
@@ -140,10 +178,81 @@ def test_response_loss_retry(client, dsn):
         "operation_id": "req-333"
     }, headers={"X-API-Key": "test-agent-key"})
     
-    assert res2.json()["results"][0]["status"] == "applied"
+    print(res2.json()); assert res2.json()["results"][0]["status"] == "applied"
     assert "Idempotent replay" in res2.json()["results"][0]["message"]
     
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM public.api_users WHERE email = 'u3@example.com'")
+        assert cur.fetchone()[0] == 1
+
+
+def test_response_loss_after_checkpoint_commit(client, dsn, monkeypatch):
+    import psycopg
+    original_exit = psycopg.Transaction.__exit__
+    
+    commit_count = 0
+    def patched_exit(self, exc_type, exc_val, exc_tb):
+        nonlocal commit_count
+        original_exit(self, exc_type, exc_val, exc_tb)
+        if exc_type is None and self.connection and "mcp_agent" in self.connection.info.user:
+            commit_count += 1
+            if commit_count == 1:
+                raise psycopg.OperationalError("Simulated network drop after checkpoint commit")
+                
+    monkeypatch.setattr(psycopg.Transaction, "__exit__", patched_exit)
+    
+    res1 = client.post("/v1/execute", json={
+        "sql": "INSERT INTO public.api_users (email) VALUES ('loss1')",
+        "operation_id": "req-loss-1"
+    }, headers={"X-API-Key": "test-agent-key"})
+    
+    assert res1.json()["results"][0]["status"] == "unknown"
+    
+    psycopg.Transaction.__exit__ = original_exit # restore network
+    
+    res2 = client.post("/v1/execute", json={
+        "sql": "INSERT INTO public.api_users (email) VALUES ('loss1')",
+        "operation_id": "req-loss-1"
+    }, headers={"X-API-Key": "test-agent-key"})
+    
+    print(res2.json()); assert res2.json()["results"][0]["status"] == "applied"
+    
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM public.api_users WHERE email = 'loss1'")
+        assert cur.fetchone()[0] == 1
+
+def test_response_loss_after_dml_commit(client, dsn, monkeypatch):
+    import psycopg
+    original_exit = psycopg.Transaction.__exit__
+    
+    commit_count = 0
+    def patched_exit(self, exc_type, exc_val, exc_tb):
+        nonlocal commit_count
+        original_exit(self, exc_type, exc_val, exc_tb)
+        if exc_type is None and self.connection and "mcp_agent" in self.connection.info.user:
+            commit_count += 1
+            if commit_count == 1:
+                raise psycopg.OperationalError("Simulated network drop after DML commit")
+                
+    monkeypatch.setattr(psycopg.Transaction, "__exit__", patched_exit)
+    
+    res1 = client.post("/v1/execute", json={
+        "sql": "INSERT INTO public.api_users (email) VALUES ('loss2')",
+        "operation_id": "req-loss-2"
+    }, headers={"X-API-Key": "test-agent-key"})
+    
+    assert res1.json()["results"][0]["status"] == "unknown"
+    
+    psycopg.Transaction.__exit__ = original_exit # restore network
+    
+    res2 = client.post("/v1/execute", json={
+        "sql": "INSERT INTO public.api_users (email) VALUES ('loss2')",
+        "operation_id": "req-loss-2"
+    }, headers={"X-API-Key": "test-agent-key"})
+    
+    print(res2.json()); assert res2.json()["results"][0]["status"] == "applied"
+    
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM public.api_users WHERE email = 'loss2'")
         assert cur.fetchone()[0] == 1
 

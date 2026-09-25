@@ -132,6 +132,9 @@ def execute_query(
             operation_id=req.operation_id
         )
         
+        if exec_res.status == "failed" and "Conflict: operation_id" in exec_res.message:
+            raise HTTPException(status_code=409, detail=exec_res.message)
+            
         results.append({
             "sql": stmt.sql,
             "classification": stmt.stmt_class.value,

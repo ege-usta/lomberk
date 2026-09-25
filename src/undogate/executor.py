@@ -20,6 +20,17 @@ class ExecutionResult(BaseModel):
 
 class UndogateExecutor:
 
+    def _resolve_duplicate(self, principal: str, operation_id: str, sql_to_execute: str):
+        import psycopg
+        with psycopg.connect(self.dsn) as check_conn, check_conn.cursor() as check_cur:
+            check_cur.execute("SELECT id, public_id, status, rows_affected, sql_text FROM undogate.checkpoints WHERE principal = %s AND operation_id = %s", (principal, operation_id))
+            existing = check_cur.fetchone()
+            if existing:
+                if existing[4] != sql_to_execute:
+                    return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], status="failed", message=f"Conflict: operation_id {operation_id} was already used with a different SQL payload.")
+                return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], status="approval_required" if existing[2] == "pending" else existing[2], rows_affected=existing[3] or 0, message="Idempotent replay")
+        raise RuntimeError(f"UniqueViolation occurred but no existing record found for {principal}:{operation_id}")
+
     def execute_undo(self, public_id: str, agent_label: str = "UNDOGATE_SYSTEM") -> ExecutionResult:
         import psycopg
         import json
@@ -138,14 +149,8 @@ class UndogateExecutor:
                 )
                 return ExecutionResult(checkpoint_id=-1, public_id=public_id, status="approval_required", message="Policy requires explicit approval.")
             except psycopg.errors.UniqueViolation as e:
-                if "idx_checkpoints_idempotency" in str(e):
-                    with psycopg.connect(self.dsn) as conn, conn.cursor() as cur:
-                        cur.execute("SELECT id, public_id, status, rows_affected, sql_text FROM undogate.checkpoints WHERE principal = %s AND operation_id = %s", (principal, operation_id))
-                        row = cur.fetchone()
-                        if row:
-                            if row[4] != eval_result.statement.sql:
-                                raise ValueError(f"Conflict: operation_id {operation_id} was already used with a different SQL payload.")
-                            return ExecutionResult(checkpoint_id=row[0], public_id=row[1], status="approval_required" if row[2] == "pending" else row[2], rows_affected=row[3] or 0, message="Idempotent replay")
+                if e.diag.constraint_name == 'idx_checkpoints_idempotency':
+                    return self._resolve_duplicate(principal, operation_id, eval_result.statement.sql)
                 raise
             
         # READ ONLY PATH
@@ -326,13 +331,7 @@ class UndogateExecutor:
                         exec_token = cur.fetchone()[0]
                 except psycopg.errors.UniqueViolation as e:
                     if e.diag.constraint_name == 'idx_checkpoints_idempotency':
-                        with psycopg.connect(self.dsn) as check_conn, check_conn.cursor() as check_cur:
-                            check_cur.execute("SELECT id, public_id, status, rows_affected, sql_text FROM undogate.checkpoints WHERE principal = %s AND operation_id = %s", (principal, operation_id))
-                            existing = check_cur.fetchone()
-                            if existing:
-                                if existing[4] != sql_to_execute:
-                                    return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], status="failed", message=f"Conflict: operation_id {operation_id} was already used with a different SQL payload.")
-                                return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], status="approval_required" if existing[2] == "pending" else existing[2], rows_affected=existing[3] or 0, message="Idempotent replay")
+                        return self._resolve_duplicate(principal, operation_id, sql_to_execute)
                     raise
 
             return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
@@ -341,7 +340,6 @@ class UndogateExecutor:
             if operation_id:
                 return ExecutionResult(status="unknown", message="Network lost during checkpoint creation. Retry with same operation_id.")
             return ExecutionResult(status="failed", message=f"Pre-execution connection error: {e}")
-            return ExecutionResult(status="unknown", message="Network failure.")
     def execute_pending(self, public_id: str):
         import psycopg
         try:
