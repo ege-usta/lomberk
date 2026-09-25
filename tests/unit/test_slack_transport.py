@@ -244,3 +244,46 @@ async def test_inflight_evicted_on_ttl(mock_adapter, mock_client_factory, monkey
     await t2
     
     assert mock_adapter.handle_interaction.call_count == 1
+
+@pytest.mark.asyncio
+async def test_slack_transport_connect_timeout_cleanup(mock_adapter, mock_client_factory):
+    def hanging_factory(token):
+        c = mock_client_factory(token)
+        async def hang():
+            await asyncio.sleep(1.0)
+        c.connect.side_effect = hang
+        return c
+        
+    transport = SlackTransport("app-token", mock_adapter, hanging_factory, enabled=True)
+    transport.connect_timeout = 0.05
+    
+    with pytest.raises(TimeoutError):
+        await transport.connect()
+        
+    assert transport.client is None
+
+@pytest.mark.asyncio
+async def test_slack_transport_connect_cancelled_cleanup(mock_adapter, mock_client_factory):
+    def hanging_factory(token):
+        c = mock_client_factory(token)
+        async def hang():
+            await asyncio.sleep(1.0)
+        c.connect.side_effect = hang
+        # We need to capture the client to assert it's closed
+        hanging_factory.last_client = c
+        return c
+        
+    transport = SlackTransport("app-token", mock_adapter, hanging_factory, enabled=True)
+    
+    t = asyncio.create_task(transport.connect())
+    await asyncio.sleep(0.05)
+    t.cancel()
+    
+    with pytest.raises(asyncio.CancelledError):
+        await t
+        
+    # Verify cleanup happened despite CancelledError
+    assert transport.client is None
+    # Verify close was called
+    client = hanging_factory.last_client
+    client.close.assert_called_once()

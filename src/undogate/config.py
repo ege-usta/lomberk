@@ -18,6 +18,10 @@ class AgentConfig(BaseModel):
     allow_self_undo: bool = True
     approval_timeout_minutes: int = 30
 
+class SlackConfig(BaseModel):
+    admin_allowlist: list[str] = Field(default_factory=list)
+    team_allowlist: list[str] = Field(default_factory=list)
+
 class UndogateConfig(BaseModel):
     version: int = 1
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -25,6 +29,7 @@ class UndogateConfig(BaseModel):
     protected_tables: list[str] = Field(default_factory=list)
     deny_patterns: list[str] = Field(default_factory=list)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    slack: SlackConfig = Field(default_factory=SlackConfig)
 
 def load_config(path: str = "undogate.yaml") -> UndogateConfig:
     if not os.path.exists(path):

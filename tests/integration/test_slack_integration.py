@@ -151,21 +151,45 @@ async def test_slack_adapter_db_concurrency_and_auth(setup_db, auth_and_config, 
             assert cur.fetchone()[0] == 2
 
 
-@pytest.mark.asyncio
-async def test_api_lifespan_slack_transport(setup_db, auth_and_config):
-    import undogate.api
-    import os
-    
-    if "UNDOGATE_SLACK_APP_TOKEN" in os.environ:
-        del os.environ["UNDOGATE_SLACK_APP_TOKEN"]
-        
-    async with undogate.api.lifespan(app):
-        assert undogate.api._slack_transport_instance is None
 
 @pytest.mark.asyncio
-async def test_api_lifespan_slack_transport_exception_cleanup(monkeypatch, setup_db, auth_and_config):
+async def test_api_lifespan_slack_transport_disabled(setup_db, auth_and_config, monkeypatch):
     import undogate.api
+    # Even if token is present, it shouldn't connect if NOT enabled
     monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake_token")
+    monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake_token")
+    monkeypatch.delenv("UNDOGATE_SLACK_ENABLED", raising=False)
+    
+    async with undogate.api.lifespan(app):
+        assert getattr(undogate.api, "_slack_transport_instance", None) is None
+
+@pytest.mark.asyncio
+async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_and_config, monkeypatch):
+    import undogate.api
+    monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
+    monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake")
+    
+    # config.slack is missing by default in tests
+    with pytest.raises(ValueError, match="config.slack.admin_allowlist is missing"):
+        async with undogate.api.lifespan(app):
+            pass
+
+@pytest.mark.asyncio
+async def test_api_lifespan_slack_transport_exception_cleanup(setup_db, auth_and_config, monkeypatch):
+    import undogate.api
+    from undogate.config import load_config
+    
+    monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
+    monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake")
+    
+    import undogate.api
+    original_config = load_config()
+    original_config.slack.admin_allowlist = ["U123"]
+    monkeypatch.setattr(undogate.api, "load_config", lambda: original_config)
+    
+
     
     def failing_factory(token):
         raise Exception("Failed to connect fake client")
@@ -177,3 +201,68 @@ async def test_api_lifespan_slack_transport_exception_cleanup(monkeypatch, setup
         assert undogate.api._slack_transport_instance.client is None
         
     del app.state.slack_client_factory
+
+@pytest.mark.asyncio
+async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monkeypatch):
+    import undogate.api
+    monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
+    monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake")
+    
+    original_config = undogate.config.load_config()
+    original_config.slack.admin_allowlist = ["U_ADMIN"]
+    original_config.slack.team_allowlist = ["T1"]
+    monkeypatch.setattr(undogate.api, "load_config", lambda: original_config)
+    
+    from unittest.mock import AsyncMock, MagicMock
+    def mock_factory(token):
+        m = MagicMock()
+        m.connect = AsyncMock()
+        m.socket_mode_request_listeners = []
+        return m
+    app.state.slack_client_factory = mock_factory
+    
+    async with undogate.api.lifespan(app):
+        adapter = undogate.api._slack_transport_instance.business_adapter
+        
+        # Test that cancelling the adapter doesn't kill the thread abruptly
+        thread_finished = asyncio.Event()
+        
+        # Mock executor to sleep so we can cancel it
+        import time
+        def slow_execute(*args):
+            time.sleep(0.1)
+            thread_finished.set()
+            return MagicMock(status="applied")
+            
+        monkeypatch.setattr(undogate.api._executor_instance, "execute_pending", slow_execute)
+        
+        # Submit task
+        async def resolve_target(*args):
+            return "cp_mock"
+        adapter.target_resolver = resolve_target
+        
+        payload = {
+            "team": {"id": "T1"}, "user": {"id": "U_ADMIN"},
+            "container": {"channel_id": "C1", "message_ts": "123"},
+            "actions": [{"action_id": "approve_button", "value": "cp_mock"}]
+        }
+        
+        # Dispatch
+        t = asyncio.create_task(adapter.handle_interaction(payload))
+        await asyncio.sleep(0.02) # Let the thread start
+        
+        # Now trigger shutdown which cancels active tasks
+        await adapter.shutdown()
+        
+        # The task should be done (cancelled)
+        assert t.done()
+        
+        # BUT the thread should still finish successfully in the background
+        # We wait for it
+        try:
+            async with asyncio.timeout(1.0):
+                await thread_finished.wait()
+        except asyncio.TimeoutError:
+            pytest.fail("Thread was killed upon task cancellation!")
+

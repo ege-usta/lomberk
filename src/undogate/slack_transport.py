@@ -48,7 +48,9 @@ class SlackTransport:
             return
 
         try:
-            async with asyncio.timeout(10.0):
+            # We use a custom timeout if tests inject one, otherwise 10.0s
+            timeout_val = getattr(self, "connect_timeout", 10.0)
+            async with asyncio.timeout(timeout_val):
                 async with self._connect_lock:
                     if self.client or self._shutdown_event.is_set():
                         return
@@ -58,18 +60,26 @@ class SlackTransport:
                         self.client = self.client_factory(self.app_token)
                         self.client.socket_mode_request_listeners.append(self._process_request)
                         await self.client.connect()
-                    except Exception as e:
-                        logger.error(f"Failed to connect Slack Transport: {e}")
-                        if self.client:
+                    except BaseException as e:
+                        # Catch CancelledError, TimeoutError, Exception
+                        logger.error(f"Failed or cancelled during Slack Transport connect: {type(e).__name__}")
+                        client_to_close = self.client
+                        self.client = None
+                        if client_to_close:
                             try:
-                                async with asyncio.timeout(3.0):
-                                    await self.client.close()
-                            except Exception:
+                                # Run the close inside a shielded task so it doesn't get aborted by the same CancelledError
+                                async def _safe_close():
+                                    try:
+                                        async with asyncio.timeout(3.0):
+                                            await client_to_close.close()
+                                    except BaseException:
+                                        pass
+                                await asyncio.shield(_safe_close())
+                            except BaseException:
                                 pass
-                            self.client = None
                         raise
         except asyncio.TimeoutError:
-            logger.error("Timeout waiting for Slack transport connect lock.")
+            logger.error("Timeout waiting for Slack transport connect.")
             raise
 
     async def _process_request(self, client: SocketModeClient, req: SocketModeRequest):

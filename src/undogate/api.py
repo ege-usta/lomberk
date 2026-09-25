@@ -69,40 +69,63 @@ async def lifespan(app: FastAPI):
         _policy_engine_instance = PolicyEngine(config)
         
         # Production Slack Transport Wiring
-        app_token = os.environ.get("UNDOGATE_SLACK_APP_TOKEN")
-        if app_token:
+        slack_enabled = os.environ.get("UNDOGATE_SLACK_ENABLED", "").lower() == "true"
+        if slack_enabled:
+            app_token = os.environ.get("UNDOGATE_SLACK_APP_TOKEN")
+            bot_token = os.environ.get("UNDOGATE_SLACK_BOT_TOKEN")
+            
+            if not app_token or not bot_token:
+                raise ValueError("Startup Refusal: UNDOGATE_SLACK_APP_TOKEN and UNDOGATE_SLACK_BOT_TOKEN are required when Slack is enabled.")
+                
+            if not hasattr(config, "slack") or not config.slack.admin_allowlist:
+                raise ValueError("Startup Refusal: config.slack.admin_allowlist is missing or empty.")
+                
+            if not hasattr(_policy_engine_instance, "resolve_slack_target"):
+                raise ValueError("Startup Refusal: PolicyEngine lacks resolve_slack_target implementation.")
+                
             try:
                 from undogate.slack import SlackInteractionAdapter
                 from undogate.slack_transport import SlackTransport
                 from slack_sdk.socket_mode.aiohttp import SocketModeClient
                 from slack_sdk.web.async_client import AsyncWebClient
+                import asyncio
                 
-                async def resolve_cb(team, channel, ts):
-                    if hasattr(_policy_engine_instance, "resolve_slack_target"):
-                        return await _policy_engine_instance.resolve_slack_target(team, channel, ts)
-                    return None
+                # Capture fixed references to avoid None during shutdown
+                def make_callbacks(executor, policy):
+                    async def resolve_cb(team, channel, ts):
+                        return await policy.resolve_slack_target(team, channel, ts)
+                    
+                    async def status_cb(pid):
+                        return await asyncio.to_thread(executor.check_status, pid)
+                        
+                    async def approve_cb(pid):
+                        res = await asyncio.to_thread(executor.execute_pending, pid)
+                        return {"status": res.status}
+                        
+                    async def reject_cb(pid):
+                        def _do_reject():
+                            import psycopg
+                            with psycopg.connect(executor.dsn) as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("SELECT undogate.reject_checkpoint(%s)", (pid,))
+                                    conn.commit()
+                        await asyncio.to_thread(_do_reject)
+                        return {"status": "denied"}
+                        
+                    async def update_cb(channel, ts, msg):
+                        # Overridden in tests if provided
+                        app_state = getattr(app.state, "slack_update_callback", None)
+                        if app_state:
+                            return await app_state(channel, ts, msg)
+                        raise NotImplementedError("Live Slack updates not configured")
+                        
+                    return resolve_cb, status_cb, approve_cb, reject_cb, update_cb
                 
-                async def status_cb(pid):
-                    return _executor_instance.check_status(pid)
-                    
-                async def approve_cb(pid):
-                    res = _executor_instance.execute_pending(pid)
-                    return {"status": res.status}
-                    
-                async def reject_cb(pid):
-                    import psycopg
-                    with psycopg.connect(_executor_instance.dsn) as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT undogate.reject_checkpoint(%s)", (pid,))
-                            conn.commit()
-                    return {"status": "denied"}
-                    
-                async def update_cb(channel, ts, msg):
-                    raise NotImplementedError("Live Slack updates not configured")
+                resolve_cb, status_cb, approve_cb, reject_cb, update_cb = make_callbacks(_executor_instance, _policy_engine_instance)
                 
                 adapter = SlackInteractionAdapter(
-                    admin_allowlist=set(getattr(config, "slack_admin_allowlist", [])),
-                    team_allowlist=set(getattr(config, "slack_team_allowlist", [])),
+                    admin_allowlist=set(config.slack.admin_allowlist),
+                    team_allowlist=set(config.slack.team_allowlist) if hasattr(config.slack, "team_allowlist") else set(),
                     target_resolver=resolve_cb,
                     approve_callback=approve_cb,
                     reject_callback=reject_cb,
@@ -111,10 +134,8 @@ async def lifespan(app: FastAPI):
                 )
                 
                 def client_factory(token: str):
-                    bot_token = os.environ.get("UNDOGATE_SLACK_BOT_TOKEN", "")
                     return SocketModeClient(app_token=token, web_client=AsyncWebClient(token=bot_token))
                 
-                # We optionally allow overriding the factory for tests without hardcoding mocks in prod
                 factory_override = getattr(app.state, "slack_client_factory", None)
                 
                 _slack_transport_instance = SlackTransport(
@@ -127,6 +148,9 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 import logging
                 logging.getLogger("undogate.api").error(f"Failed to start Slack transport: {e}")
+                # We don't crash the server if connect fails, but we don't swallow validation errors
+                # Wait! The user says "Eksik dependency => bağlantı öncesi ret. Startup hatasının API'yi açık bırakması seçilecekse Slack readiness... log yazmak başarılı başlangıç değildir."
+                # The ValueError checks happen BEFORE the try/except! So validation fails fast.
         else:
             _slack_transport_instance = None
 

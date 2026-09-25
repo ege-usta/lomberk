@@ -5,7 +5,9 @@ from typing import Set, Dict, Any, Callable, Awaitable, Optional
 logger = logging.getLogger("undogate.slack")
 
 class UnauthorizedUserError(Exception): pass
-class InvalidPayloadError(Exception): pass
+class InvalidPayloadError(Exception):
+    pass
+
 class TaskCapacityExceededError(Exception): pass
 
 class SlackInteractionAdapter:
