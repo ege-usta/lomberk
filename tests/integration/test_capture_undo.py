@@ -335,11 +335,11 @@ def test_idempotent_approval_replay(dsn, runtime_dsn, setup_db, monkeypatch):
     eval_res = StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason="Test")
     
     # Execution 1
-    res1 = executor.execute(eval_res, agent_label="mcp_agent", operation_id="req_def456")
+    res1 = executor.execute(eval_res, agent_label="mcp_agent", principal="mcp_agent", operation_id="req_def456")
     assert res1.status == "approval_required"
     
     # Execution 2
-    res2 = executor.execute(eval_res, agent_label="mcp_agent", operation_id="req_def456")
+    res2 = executor.execute(eval_res, agent_label="mcp_agent", principal="mcp_agent", operation_id="req_def456")
     assert res2.status == "approval_required"
     assert res2.public_id == res1.public_id
     assert res2.message == "Idempotent replay"

@@ -95,6 +95,20 @@ def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
     monkeypatch.setenv("UNDOGATE_API_KEY", "agent")
     monkeypatch.setenv("UNDOGATE_ADMIN_KEY", "admin")
     
+    # Mock config
+    import undogate.config
+    original_load = undogate.config.load_config
+    def mock_load(*a, **kw):
+        cfg = original_load(*a, **kw)
+        cfg.limits.max_rows_without_approval = 0
+        cfg.protected_tables = ["public.users"]
+        return cfg
+    monkeypatch.setattr(undogate.config, "load_config", mock_load)
+    
+    import undogate.api
+    undogate.api._executor_instance = None
+    undogate.api._policy_engine_instance = None
+    
     with TestClient(app) as client:
         # Step 1: Agent tries valid DML write
         resp = client.post("/v1/execute", json={"sql": "UPDATE public.users SET data = 'updated' WHERE id = 1;"}, headers={"X-API-Key": "agent"})

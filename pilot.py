@@ -19,6 +19,9 @@ def assert_eq(actual, expected, msg):
         logger.error(f"ASSERTION FAILED: {msg} (Expected: {expected}, Got: {actual})")
         sys.exit(1)
 
+class HTTPConflict(Exception):
+    pass
+
 def run_pilot():
     logger.info("Starting local pilot...")
     
@@ -41,40 +44,38 @@ def run_pilot():
             cur.execute("CREATE TABLE public.pilot_unprotected (id SERIAL PRIMARY KEY, email TEXT NOT NULL)")
             cur.execute("GRANT ALL ON SCHEMA public TO mcp_agent")
             cur.execute("GRANT ALL ON ALL TABLES IN SCHEMA public TO mcp_agent")
-            cur.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO mcp_agent")
+            cur.execute("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO mcp_agent")
             cur.execute("SELECT undogate.register_table('public', 'pilot_users', 'id', 'mcp_agent')")
             cur.execute("SELECT undogate.register_table('public', 'pilot_unprotected', 'id', 'mcp_agent')")
-
-        os.environ["UNDOGATE_ADMIN_DSN"] = dsn.replace('test:test', 'undogate_control:secret')
+            
         os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
         os.environ["UNDOGATE_API_KEY"] = "agent-key"
         os.environ["UNDOGATE_ADMIN_KEY"] = "admin-key"
         
-        if "OPENAI_API_KEY" in os.environ:
-            del os.environ["OPENAI_API_KEY"]
-            
-        import undogate.api
-        undogate.api._executor_instance = None
-        undogate.api._policy_engine_instance = None
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(dsn)
+        admin_dsn = urlunparse((parsed.scheme, f"undogate_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+        os.environ["UNDOGATE_ADMIN_DSN"] = admin_dsn
         
         with TestClient(app) as client:
-            def execute_sql(sql: str, op_id: str, use_auth=True):
+            def execute_sql(sql, op_id, use_auth=True):
                 headers = {"X-API-Key": "agent-key"} if use_auth else {}
                 
-                def submit():
+                def submit(timeout: float):
+                    if timeout < 0.001:
+                        raise TransientError("Transport connection timeout")
                     res = client.post("/v1/execute", json={"sql": sql, "operation_id": op_id}, headers=headers)
+                    if res.status_code == 401:
+                        raise ValueError("Unauthorized")
                     if res.status_code == 409:
-                        class HTTPConflict(Exception):
-                            pass
-                        raise HTTPConflict(res.json()["detail"])
-                    if res.status_code == 401 or res.status_code == 403:
-                        raise ValueError(f"Unauthorized: {res.status_code}")
-                    if res.status_code == 502 or res.status_code == 500: # We use 500 to mock network drop from testclient sometimes
+                        raise HTTPConflict()
+                    if res.status_code == 502 or res.status_code == 500:
                         raise TransientError("Network Error")
                     return res.json()
-                
-                def status_fn(pub_id):
-                    # Admin key for status polling
+                    
+                def status_fn(pub_id: str, timeout: float):
+                    if timeout < 0.001:
+                        raise TransientError("Transport connection timeout")
                     s_res = client.get(f"/v1/checkpoints/{pub_id}/status", headers={"X-API-Key": "admin-key"})
                     if s_res.status_code == 502 or s_res.status_code == 500:
                         raise TransientError("Network Error")
@@ -85,14 +86,14 @@ def run_pilot():
             logger.info("--- SCENARIO 1: Approval Required & Recovery ---")
             op1 = str(uuid.uuid4())
             res1 = execute_sql("INSERT INTO public.pilot_users (email) VALUES ('a@a.com'), ('b@b.com')", op1)
-            assert_eq(res1["results"][0]["status"], "approval_required", "S1 status should be approval_required")
-            pub_id1 = res1["results"][0]["checkpoint_id"]
+            assert_eq(res1.status, "approval_required", "S1 status should be approval_required")
+            pub_id1 = res1.resume_id
             
-            res_appr = client.post(f"/v1/checkpoints/{pub_id1}/approve", headers={"X-API-Key": "admin-key"})
+            res_appr = client.post(f"/v1/checkpoints/{pub_id1}/approve", headers={"X-API-Key": "admin-key"}, json={"decision": "ALLOW"})
             assert_eq(res_appr.json()["status"], "approved", "S1 admin approve should be approved")
             
             res1_retry = execute_sql("INSERT INTO public.pilot_users (email) VALUES ('a@a.com'), ('b@b.com')", op1)
-            assert_eq(res1_retry["results"][0]["status"], "applied", "S1 retry should be applied")
+            assert_eq(res1_retry.status, "applied", "S1 retry should be applied")
             
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM public.pilot_users")
@@ -114,19 +115,22 @@ def run_pilot():
             op2 = str(uuid.uuid4())
             
             try:
-                execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('c@c.com')", op2)
+                res_first = execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('c@c.com')", op2)
+                
+                pub_id2 = res_first.resume_id
             except TransientError:
-                pass # First attempt fails, but recovery loops! Wait!
+                pass
                 
             psycopg.Transaction.__exit__ = original_exit
             
-            # Since execute_sql wraps recovery, it will naturally loop until timeout, or until the network is restored.
-            # So we restore it above (simulating network coming back), and let's just make sure it recovers:
+            with psycopg.connect(dsn) as check_conn, check_conn.cursor() as check_cur:
+                check_cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pub_id2,))
+                
             res2 = execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('c@c.com')", op2)
-            assert_eq(res2["results"][0]["status"], "applied", "S2 recovered status should be applied")
+            assert_eq(res2.status, "applied", "S2 recovered status should be applied")
 
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-                pub_id2 = res2["results"][0]["checkpoint_id"]
+                pub_id2 = res2.resume_id
                 cur.execute("SELECT count(*) FROM undogate.row_changes WHERE checkpoint_id = (SELECT id FROM undogate.checkpoints WHERE public_id = %s)", (pub_id2,))
                 c = cur.fetchone()[0]
                 assert_eq(c, 1, "S2 only 1 capture mutation happened")
@@ -150,10 +154,10 @@ def run_pilot():
                 
             psycopg.Transaction.__exit__ = original_exit
             res3 = execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('d@d.com')", op3)
-            assert_eq(res3["results"][0]["status"], "approved", "S3 recovered CP status should be approved, NOT applied")
+            assert_eq(res3.status, "approved", "S3 recovered CP status should be approved, NOT applied")
 
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-                pub_id3 = res3["results"][0]["checkpoint_id"]
+                pub_id3 = res3.resume_id
                 cur.execute("SELECT count(*) FROM undogate.row_changes WHERE checkpoint_id = (SELECT id FROM undogate.checkpoints WHERE public_id = %s)", (pub_id3,))
                 c = cur.fetchone()[0]
                 assert_eq(c, 0, "S3 ZERO additional iş mutations happened")
@@ -177,7 +181,8 @@ def run_pilot():
                     sys.exit(1)
 
             logger.info("--- SCENARIO 6: Explicit Undo via CLI (Public Interface) ---")
-            pub_id_undo = res2['results'][0]['checkpoint_id']
+            pub_id_undo = res2.resume_id
+            os.environ["UNDOGATE_ADMIN_DSN"] = admin_dsn
             runner = CliRunner()
             
             res_cli = runner.invoke(cli_app, ["undo", pub_id_undo])
@@ -202,11 +207,11 @@ def run_pilot():
                 sys.exit(1)
 
             logger.info("--- SCENARIO 7: DB Unreachable & Budget Exhaustion ---")
-            def failing_submit():
+            def failing_submit(t):
                 raise TransientError("DB Unreachable")
             
             try:
-                execute_with_recovery("op_unreach", failing_submit, lambda x: "unknown", timeout_seconds=1.0, base_delay=0.1, max_delay=0.2)
+                execute_with_recovery("op_unreach", failing_submit, lambda x, t: "unknown", timeout_seconds=1.0, base_delay=0.1, max_delay=0.2)
                 logger.error("S7 Should have exhausted budget")
                 sys.exit(1)
             except RecoveryBudgetExhausted as e:

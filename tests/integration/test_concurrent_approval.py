@@ -72,7 +72,7 @@ def test_concurrent_approval(dsn, runtime_dsn, setup_db):
     failures = [r for r in results if r.status == "failed"]
     
     assert len(successes) == 1
-    assert len(failures) == 4
+    print([r.status for r in results]); assert len(failures) == 4
     for f in failures:
         assert "not pending" in f.message or "Token not found" in f.message
         
