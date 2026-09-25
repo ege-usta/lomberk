@@ -68,36 +68,67 @@ async def lifespan(app: FastAPI):
         _executor_instance = UndogateExecutor(admin_dsn, dsn)
         _policy_engine_instance = PolicyEngine(config)
         
-        # Initialize slack transport (disabled by default)
-        try:
-            from undogate.slack import SlackInteractionAdapter
-            from undogate.slack_transport import SlackTransport
-            
-            async def mock_resolve(team, channel, ts): return None
-            async def mock_approve(pid): return {"status": "error"}
-            async def mock_reject(pid): return {"status": "error"}
-            async def mock_status(pid): return "unknown"
-            async def mock_update(channel, ts, msg): pass
-            
-            adapter = SlackInteractionAdapter(
-                admin_allowlist={"U_ADMIN"},
-                team_allowlist={"T_TEAM"},
-                target_resolver=mock_resolve,
-                approve_callback=mock_approve,
-                reject_callback=mock_reject,
-                status_callback=mock_status,
-                slack_update_callback=mock_update
-            )
-            _slack_transport_instance = SlackTransport(
-                app_token="fake_token",
-                web_client=None,
-                business_adapter=adapter,
-                enabled=False
-            )
-            await _slack_transport_instance.connect()
-        except Exception as e:
-            import logging
-            logging.getLogger("undogate.api").error(f"Failed to start Slack transport: {e}")
+        # Production Slack Transport Wiring
+        app_token = os.environ.get("UNDOGATE_SLACK_APP_TOKEN")
+        if app_token:
+            try:
+                from undogate.slack import SlackInteractionAdapter
+                from undogate.slack_transport import SlackTransport
+                from slack_sdk.socket_mode.aiohttp import SocketModeClient
+                from slack_sdk.web.async_client import AsyncWebClient
+                
+                async def resolve_cb(team, channel, ts):
+                    if hasattr(_policy_engine_instance, "resolve_slack_target"):
+                        return await _policy_engine_instance.resolve_slack_target(team, channel, ts)
+                    return None
+                
+                async def status_cb(pid):
+                    return _executor_instance.check_status(pid)
+                    
+                async def approve_cb(pid):
+                    res = _executor_instance.execute_pending(pid)
+                    return {"status": res.status}
+                    
+                async def reject_cb(pid):
+                    import psycopg
+                    with psycopg.connect(_executor_instance.dsn) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT undogate.reject_checkpoint(%s)", (pid,))
+                            conn.commit()
+                    return {"status": "denied"}
+                    
+                async def update_cb(channel, ts, msg):
+                    raise NotImplementedError("Live Slack updates not configured")
+                
+                adapter = SlackInteractionAdapter(
+                    admin_allowlist=set(getattr(config, "slack_admin_allowlist", [])),
+                    team_allowlist=set(getattr(config, "slack_team_allowlist", [])),
+                    target_resolver=resolve_cb,
+                    approve_callback=approve_cb,
+                    reject_callback=reject_cb,
+                    status_callback=status_cb,
+                    slack_update_callback=update_cb
+                )
+                
+                def client_factory(token: str):
+                    bot_token = os.environ.get("UNDOGATE_SLACK_BOT_TOKEN", "")
+                    return SocketModeClient(app_token=token, web_client=AsyncWebClient(token=bot_token))
+                
+                # We optionally allow overriding the factory for tests without hardcoding mocks in prod
+                factory_override = getattr(app.state, "slack_client_factory", None)
+                
+                _slack_transport_instance = SlackTransport(
+                    app_token=app_token,
+                    business_adapter=adapter,
+                    client_factory=factory_override or client_factory,
+                    enabled=True
+                )
+                await _slack_transport_instance.connect()
+            except Exception as e:
+                import logging
+                logging.getLogger("undogate.api").error(f"Failed to start Slack transport: {e}")
+        else:
+            _slack_transport_instance = None
 
         yield
     finally:
