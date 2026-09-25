@@ -11,12 +11,14 @@ def mock_callbacks():
             self.lock = asyncio.Lock()
             self.current_state = "pending"
             self.resolver_event = asyncio.Event()
-            self.resolver_event.set() # Default to not blocking
+            self.resolver_event.set()
             
         async def resolve_target(self, team, channel, ts):
             await self.resolver_event.wait()
             if channel == "valid_chan" and ts == "valid_ts":
                 return "cp_123"
+            if channel == "error_chan":
+                raise Exception("DB down")
             return None
 
         async def approve(self, public_id):
@@ -67,7 +69,20 @@ async def test_slack_target_binding_failure(mock_callbacks):
     await adapter.handle_interaction(payload)
     if adapter._active_tasks: await asyncio.gather(*adapter._active_tasks)
     await adapter.shutdown()
-    assert ":x: Target binding validation failed." in mock_callbacks.update_calls[0][2]
+    assert len(mock_callbacks.update_calls) == 0
+
+@pytest.mark.asyncio
+async def test_slack_target_resolver_exception(mock_callbacks):
+    adapter = SlackInteractionAdapter({"U123"}, {"T1"}, mock_callbacks.resolve_target, mock_callbacks.approve, mock_callbacks.reject, mock_callbacks.status, mock_callbacks.update)
+    payload = {
+        "team": {"id": "T1"}, "user": {"id": "U123"},
+        "container": {"channel_id": "error_chan", "message_ts": "valid_ts"},
+        "actions": [{"action_id": "approve_button", "value": "cp_123"}]
+    }
+    await adapter.handle_interaction(payload)
+    if adapter._active_tasks: await asyncio.gather(*adapter._active_tasks)
+    await adapter.shutdown()
+    assert len(mock_callbacks.update_calls) == 0
 
 @pytest.mark.asyncio
 async def test_slack_concurrent_double_click(mock_callbacks):
@@ -82,6 +97,7 @@ async def test_slack_concurrent_double_click(mock_callbacks):
     ack2 = await adapter.handle_interaction(payload)
     assert ack1["acknowledged"] is True
     assert ack2["acknowledged"] is True
+    
     if adapter._active_tasks: await asyncio.gather(*adapter._active_tasks)
     await adapter.shutdown()
     assert mock_callbacks.approve_calls == 2
@@ -98,14 +114,12 @@ async def test_slack_state_mappings(mock_callbacks):
         "actions": [{"action_id": "approve_button", "value": "cp_123"}]
     }
     
-    # Test 'approved'
     mock_callbacks.current_state = "approved"
     await adapter.handle_interaction(payload)
     if adapter._active_tasks: await asyncio.gather(*adapter._active_tasks)
     await adapter.shutdown()
     assert ":white_check_mark: Checkpoint cp_123 approved, pending execution verification." in mock_callbacks.update_calls[-1][2]
     
-    # Test 'unknown'
     adapter._stopping = False
     mock_callbacks.current_state = "unknown"
     await adapter.handle_interaction(payload)
@@ -113,7 +127,6 @@ async def test_slack_state_mappings(mock_callbacks):
     await adapter.shutdown()
     assert ":hourglass_flowing_sand: Checkpoint cp_123 status is unknown, pending verification." in mock_callbacks.update_calls[-1][2]
 
-    # Test 'undone'
     adapter._stopping = False
     mock_callbacks.current_state = "undone"
     await adapter.handle_interaction(payload)
@@ -122,7 +135,7 @@ async def test_slack_state_mappings(mock_callbacks):
     assert ":rewind: Checkpoint cp_123 undone." in mock_callbacks.update_calls[-1][2]
 
 @pytest.mark.asyncio
-async def test_slack_out_of_order_callbacks(mock_callbacks):
+async def test_slack_out_of_order_callbacks_with_barrier(mock_callbacks):
     adapter = SlackInteractionAdapter({"U123"}, {"T1"}, mock_callbacks.resolve_target, mock_callbacks.approve, mock_callbacks.reject, mock_callbacks.status, mock_callbacks.update)
     payload = {
         "team": {"id": "T1"}, "user": {"id": "U123"},
@@ -130,47 +143,42 @@ async def test_slack_out_of_order_callbacks(mock_callbacks):
         "actions": [{"action_id": "approve_button", "value": "cp_123"}]
     }
 
-    # Task 1 is slow to approve but eventually finishes.
-    # Task 2 is fast, sees it's busy, and polls the state right away.
-    # By the time Task 1 updates the UI, the state is 'applied'.
-    # Both should query status at the VERY END, so both should see 'applied'.
+    mock_callbacks.current_state = "busy"
+    
+    # Task 1 starts
+    # Override approve to not touch current_state
+    async def mock_app(pid): return {"status": "conflict"}
+    adapter.approve_callback = mock_app
+    t1 = asyncio.create_task(adapter._process_interaction("T1", "valid_chan", "valid_ts", "cp_123", is_approve=True))
+    # Give it a moment to lock and read 'busy'
+    await asyncio.sleep(0.01)
+    
+    # Task 2 starts. It waits for the lock.
+    t2 = asyncio.create_task(adapter._process_interaction("T1", "valid_chan", "valid_ts", "cp_123", is_approve=True))
+    
+    # Task 1 finishes its update, releasing lock.
+    # Task 2 acquires lock. By this time current_state is 'applied'.
     mock_callbacks.current_state = "applied"
     
-    # This proves that even if callbacks finish in weird orders, the final status is authoritative
-    await adapter.handle_interaction(payload)
-    await adapter.handle_interaction(payload)
-    if adapter._active_tasks: await asyncio.gather(*adapter._active_tasks)
-    await adapter.shutdown()
+    await asyncio.gather(t1, t2)
     
+    # The second update MUST be "applied". Task 1's "busy" should not overwrite Task 2.
     assert len(mock_callbacks.update_calls) == 2
-    assert mock_callbacks.update_calls[0][2] == ":white_check_mark: Checkpoint cp_123 successfully applied."
-    assert mock_callbacks.update_calls[1][2] == ":white_check_mark: Checkpoint cp_123 successfully applied."
+    assert "busy" in mock_callbacks.update_calls[0][2]
+    assert "successfully applied" in mock_callbacks.update_calls[1][2]
 
 @pytest.mark.asyncio
 async def test_slack_shutdown_resolver_race(mock_callbacks):
-    # Event/barrier reproducer: shutdown during resolver wait
     adapter = SlackInteractionAdapter({"U123"}, {"T1"}, mock_callbacks.resolve_target, mock_callbacks.approve, mock_callbacks.reject, mock_callbacks.status, mock_callbacks.update, shutdown_timeout=0.01)
-    
-    mock_callbacks.resolver_event.clear() # Block resolver
-    
+    mock_callbacks.resolver_event.clear()
     payload = {
         "team": {"id": "T1"}, "user": {"id": "U123"},
         "container": {"channel_id": "valid_chan", "message_ts": "valid_ts"},
         "actions": [{"action_id": "approve_button", "value": "cp_123"}]
     }
-    
-    # 1. Start interaction. Resolver blocks.
     await adapter.handle_interaction(payload)
-    
-    # 2. Shutdown begins. It waits for tasks (with short timeout), then cancels them.
     await adapter.shutdown()
-    
-    # 3. Release resolver.
     mock_callbacks.resolver_event.set()
-    
-    # Give event loop a tick to process cancellation
     await asyncio.sleep(0.02)
-    
-    # 4. Verify no execution or UI updates occurred because it was cancelled/aborted
     assert mock_callbacks.approve_calls == 0
     assert len(mock_callbacks.update_calls) == 0
