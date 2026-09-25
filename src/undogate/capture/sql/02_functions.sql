@@ -258,8 +258,20 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.approve_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.reject_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.fail_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.claim_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.finish_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.get_pending_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.register_table TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.lock_table_for_undo TO %I', p_control_role);
+    
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.execute_undo_dml TO %I', p_control_role);
+    
+
+    EXECUTE format('GRANT SELECT, UPDATE ON undogate.checkpoints TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT ON undogate.row_changes TO %I', p_control_role);
+    EXECUTE format('GRANT INSERT ON undogate.undo_operations TO %I', p_control_role);
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA undogate TO %I', p_control_role);
+    
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.list_pending_checkpoints TO %I', p_control_role);
     
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.check_checkpoint_status TO %I', p_control_role);
@@ -270,15 +282,15 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.finish_checkpoint TO %I', p_agent_role);
     
     -- Ensure separation of duties
-    EXECUTE format('REVOKE EXECUTE ON FUNCTION undogate.claim_checkpoint FROM %I', p_control_role);
-    EXECUTE format('REVOKE EXECUTE ON FUNCTION undogate.finish_checkpoint FROM %I', p_control_role);
+    
+    
     
     EXECUTE format('REVOKE EXECUTE ON FUNCTION undogate.begin_checkpoint FROM %I', p_agent_role);
     EXECUTE format('REVOKE EXECUTE ON FUNCTION undogate.approve_checkpoint FROM %I', p_agent_role);
     
     -- Legacy cleanup
     EXECUTE format('REVOKE ALL ON undogate.checkpoints FROM %I', p_agent_role);
-    EXECUTE format('REVOKE ALL ON undogate.checkpoints FROM %I', p_control_role);
+    
     
     EXECUTE format('GRANT SELECT ON undogate.registered_tables TO %I', p_agent_role);
     EXECUTE format('GRANT SELECT ON undogate.registered_tables TO %I', p_control_role);
@@ -323,5 +335,63 @@ BEGIN
     SELECT c.id, c.public_id, c.sql_text, c.agent_label, c.created_at
     FROM undogate.checkpoints c
     WHERE c.status = 'pending';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION undogate.execute_undo_dml(
+    p_schema TEXT,
+    p_table TEXT,
+    p_op CHAR(1),
+    p_pk_col TEXT,
+    p_pk_val TEXT,
+    p_old_row JSONB,
+    p_new_row JSONB
+) RETURNS VOID AS $$
+DECLARE
+    v_full_table TEXT := quote_ident(p_schema) || '.' || quote_ident(p_table);
+    v_curr JSONB;
+    v_set_clauses TEXT;
+    v_key TEXT;
+BEGIN
+    IF p_op = 'I' THEN
+        EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', v_full_table, p_pk_col, p_pk_val) INTO v_curr;
+        IF v_curr IS NULL THEN
+            RAISE EXCEPTION 'Conflict: Row % missing in %', p_pk_val, v_full_table;
+        END IF;
+        IF (v_curr::jsonb - p_pk_col) != (p_new_row::jsonb - p_pk_col) THEN
+            -- we compare everything except PK in case of formatting diffs, but actually let's compare exactly
+            IF v_curr::jsonb != p_new_row::jsonb THEN
+                RAISE EXCEPTION 'Conflict: Row % in % has been modified', p_pk_val, v_full_table;
+            END IF;
+        END IF;
+        EXECUTE format('DELETE FROM %s WHERE %I = %L', v_full_table, p_pk_col, p_pk_val);
+        
+    ELSIF p_op = 'U' THEN
+        EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', v_full_table, p_pk_col, p_pk_val) INTO v_curr;
+        IF v_curr IS NULL THEN
+            RAISE EXCEPTION 'Conflict: Row % missing in %', p_pk_val, v_full_table;
+        END IF;
+        IF v_curr::jsonb != p_new_row::jsonb THEN
+            RAISE EXCEPTION 'Conflict: Row % in % has been modified', p_pk_val, v_full_table;
+        END IF;
+        
+        SELECT string_agg(quote_ident(key) || ' = (SELECT "' || key || '" FROM jsonb_populate_record(null::' || v_full_table || ', $1::jsonb))', ', ') 
+        INTO v_set_clauses
+        FROM jsonb_object_keys(p_old_row) AS key;
+        
+        EXECUTE format('UPDATE %s SET %s WHERE %I = %L', v_full_table, v_set_clauses, p_pk_col, p_pk_val) USING p_old_row;
+
+    ELSIF p_op = 'D' THEN
+        EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', v_full_table, v_full_table) USING p_old_row;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION undogate.lock_table_for_undo(
+    p_schema TEXT,
+    p_table TEXT
+) RETURNS VOID AS $$
+BEGIN
+    EXECUTE format('LOCK TABLE %I.%I IN SHARE ROW EXCLUSIVE MODE NOWAIT', p_schema, p_table);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;

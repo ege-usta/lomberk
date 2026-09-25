@@ -20,6 +20,131 @@ class ExecutionResult(BaseModel):
 
 class UndogateExecutor:
 
+    def execute_undo(self, public_id: str, agent_label: str = "UNDOGATE_SYSTEM") -> ExecutionResult:
+        import psycopg
+        import json
+        
+        # We must use control_dsn, but executor uses whatever self.dsn is. 
+        # API should initialize UndogateExecutor with control_dsn for this.
+        
+        try:
+            with psycopg.connect(self.dsn, autocommit=False) as conn:
+                with conn.transaction(), conn.cursor() as cur:
+                    # 1. Lock the source checkpoint
+                    try:
+                        cur.execute("SELECT id, status, sql_text FROM undogate.checkpoints WHERE public_id = %s FOR UPDATE NOWAIT", (public_id,))
+                    except psycopg.errors.LockNotAvailable:
+                        return ExecutionResult(status="busy", message="Checkpoint is busy.", public_id=public_id, rows_affected=0)
+                        
+                    row = cur.fetchone()
+                    if not row:
+                        return ExecutionResult(status="denied", message="Checkpoint not found.", public_id=public_id, rows_affected=0)
+                    
+                    cp_id, status, sql_text = row
+                    
+                    if status == "undone":
+                        return ExecutionResult(status="already_undone", message="Checkpoint already undone.", public_id=public_id, rows_affected=0)
+                    
+                    if status != "applied":
+                        return ExecutionResult(status="denied", message=f"Cannot undo checkpoint in state: {status}", public_id=public_id, rows_affected=0)
+                        
+                    # Fetch changes in LIFO order
+                    cur.execute("SELECT id, table_schema, table_name, op, pk, old_row, new_row FROM undogate.row_changes WHERE checkpoint_id = %s ORDER BY seq DESC", (cp_id,))
+                    changes = cur.fetchall()
+                    
+                    if not changes:
+                        # Nothing to undo
+                        pass
+                        
+                    tables_involved = set()
+                    for c in changes:
+                        tables_involved.add((c[1], c[2]))
+                        
+                    # Validate tables (no FKs, no extra triggers, no rules)
+                    for schema, table in tables_involved:
+                        # Lock table against DDL
+                        try:
+                            cur.execute("SELECT undogate.lock_table_for_undo(%s, %s)", (schema, table))
+                        except psycopg.errors.LockNotAvailable:
+                            return ExecutionResult(status="busy", message=f"Table {schema}.{table} is locked by another transaction.", public_id=public_id, rows_affected=0)
+                            
+                        # Check FKs
+                        cur.execute("""
+                            SELECT COUNT(*) FROM pg_constraint c
+                            JOIN pg_class t1 ON c.conrelid = t1.oid
+                            JOIN pg_namespace n1 ON t1.relnamespace = n1.oid
+                            LEFT JOIN pg_class t2 ON c.confrelid = t2.oid
+                            LEFT JOIN pg_namespace n2 ON t2.relnamespace = n2.oid
+                            WHERE contype = 'f' AND (
+                                (n1.nspname = %s AND t1.relname = %s) OR 
+                                (n2.nspname = %s AND t2.relname = %s)
+                            )
+                        """, (schema, table, schema, table))
+                        if cur.fetchone()[0] > 0:
+                            return ExecutionResult(status="failed", message=f"Table {schema}.{table} has foreign keys, which is unsupported for undo.", public_id=public_id, rows_affected=0)
+                            
+                        # Check Triggers
+                        cur.execute("""
+                            SELECT COUNT(*) FROM pg_trigger t
+                            JOIN pg_class c ON t.tgrelid = c.oid
+                            JOIN pg_namespace n ON c.relnamespace = n.oid
+                            WHERE n.nspname = %s AND c.relname = %s AND t.tgisinternal = false AND t.tgname != 'undogate_capture'
+                        """, (schema, table))
+                        if cur.fetchone()[0] > 0:
+                            return ExecutionResult(status="failed", message=f"Table {schema}.{table} has unsupported application triggers.", public_id=public_id, rows_affected=0)
+                            
+                        # Check Rules
+                        cur.execute("""
+                            SELECT COUNT(*) FROM pg_rewrite r
+                            JOIN pg_class c ON r.ev_class = c.oid
+                            JOIN pg_namespace n ON c.relnamespace = n.oid
+                            WHERE n.nspname = %s AND c.relname = %s AND r.rulename != '_RETURN'
+                        """, (schema, table))
+                        if cur.fetchone()[0] > 0:
+                            return ExecutionResult(status="failed", message=f"Table {schema}.{table} has unsupported rules.", public_id=public_id, rows_affected=0)
+                            
+                    # Start undo context
+                    cur.execute("SELECT * FROM undogate.begin_checkpoint(%s, 'WRITE_DML', %s)", (f"UNDO {public_id}", agent_label))
+                    undo_cp_row = cur.fetchone()
+                    undo_cp_id, undo_public_id = undo_cp_row[0], undo_cp_row[1]
+                    
+                    cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (undo_public_id,))
+                    token = cur.fetchone()[0]
+                    
+                    cur.execute("SELECT undogate.claim_checkpoint(%s)", (token,))
+                    
+                    # Create undo_operation record
+                    cur.execute("INSERT INTO undogate.undo_operations (source_checkpoint_id, undo_checkpoint_id) VALUES (%s, %s)", (cp_id, undo_cp_id))
+                    
+                    # Apply reverse operations
+                    for c_id, schema, table, op, pk_json, old_row, new_row in changes:
+                        pk_col = list(pk_json.keys())[0]
+                        pk_val = str(pk_json[pk_col])
+                        
+                        try:
+                            cur.execute("SELECT undogate.execute_undo_dml(%s, %s, %s, %s, %s, %s, %s)", 
+                                (schema, table, op, pk_col, pk_val, json.dumps(old_row) if old_row else None, json.dumps(new_row) if new_row else None))
+                        except psycopg.errors.LockNotAvailable:
+                            return ExecutionResult(status="busy", message=f"Row {pk_val} in {schema}.{table} is locked.", public_id=public_id, rows_affected=0)
+                        except psycopg.errors.UniqueViolation:
+                            return ExecutionResult(status="failed", message=f"Row {pk_val} already exists in {schema}.{table}. Conflict.", public_id=public_id, rows_affected=0)
+                        except Exception as e:
+                            # Catch the raise exceptions from PL/pgSQL
+                            return ExecutionResult(status="failed", message=str(e), public_id=public_id, rows_affected=0)
+                            
+                    # Update status
+                    cur.execute("UPDATE undogate.checkpoints SET status = 'undone' WHERE id = %s", (cp_id,))
+                    cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (token, 1))
+                    
+                    # Transaction context manager will commit
+                    return ExecutionResult(status="undone", message="Undo successful.", public_id=public_id, rows_affected=1)
+                    
+        except psycopg.OperationalError:
+            return ExecutionResult(status="outcome_unknown", message="Network failure.", public_id=public_id, rows_affected=0)
+        except Exception as e:
+            # Revert everything implicitly since we're in a 'with conn:' context but we caught it
+            return ExecutionResult(status="failed", message=str(e), public_id=public_id, rows_affected=0)
+
     def _mask_and_sanitize_rows(self, columns, rows):
         import re
         def sanitize_payload(val_str: str) -> str:
@@ -53,7 +178,7 @@ class UndogateExecutor:
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str) -> str:
         import psycopg
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            with conn.cursor() as cur:
+            with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s)",
                     (sql, stmt_class, agent_label)
@@ -61,7 +186,7 @@ class UndogateExecutor:
                 row = cur.fetchone()
                 cp_id = row[0]
                 public_id = row[1]
-                conn.commit()
+                # Transaction context manager will commit
                 return public_id
 
 
@@ -97,7 +222,7 @@ class UndogateExecutor:
             try:
                 with psycopg.connect(self.runtime_dsn, autocommit=False) as conn:
                     with conn.transaction():
-                        with conn.cursor() as cur:
+                        with conn.transaction(), conn.cursor() as cur:
                             from undogate.sql.classify import check_sensitive_columns
                             import pglast
                             ast = pglast.parse_sql(eval_result.statement.sql)
@@ -253,7 +378,7 @@ class UndogateExecutor:
         import psycopg
         
         with psycopg.connect(self.dsn, autocommit=False) as conn:
-            with conn.cursor() as cur:
+            with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s)",
                     (sql_to_execute, classification, agent_label)
@@ -264,7 +389,7 @@ class UndogateExecutor:
                 
                 cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                 exec_token = cur.fetchone()[0]
-                conn.commit()
+                # Transaction context manager will commit
 
         return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
 
@@ -273,7 +398,7 @@ class UndogateExecutor:
         
         
         with psycopg.connect(self.dsn, autocommit=False) as conn:
-            with conn.cursor() as cur:
+            with conn.transaction(), conn.cursor() as cur:
                 cur.execute("SELECT id, sql_text, status FROM undogate.get_pending_checkpoint(%s)", (public_id,))
                 row = cur.fetchone()
                 if not row:
@@ -286,12 +411,12 @@ class UndogateExecutor:
                 safe, reason = AISentinel()._ast_firewall(sql_to_execute)
                 if not safe:
                     cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
-                    conn.commit()
+                    # Transaction context manager will commit
                     return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
 
                 cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                 exec_token = cur.fetchone()[0]
-                conn.commit()
+                # Transaction context manager will commit
 
         return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
 
@@ -299,7 +424,7 @@ class UndogateExecutor:
         import psycopg
         try:
             with psycopg.connect(self.dsn, autocommit=True) as conn:
-                with conn.cursor() as cur:
+                with conn.transaction(), conn.cursor() as cur:
                     cur.execute("SELECT undogate.check_checkpoint_status(%s)", (public_id,))
                     return cur.fetchone()[0]
         except psycopg.OperationalError:

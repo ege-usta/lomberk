@@ -53,3 +53,10 @@ BEGIN
         ALTER TABLE undogate.checkpoints ADD COLUMN exec_txid BIGINT;
     END IF;
 END $$;
+
+CREATE TABLE IF NOT EXISTS undogate.undo_operations (
+    id                   BIGSERIAL PRIMARY KEY,
+    source_checkpoint_id BIGINT NOT NULL UNIQUE REFERENCES undogate.checkpoints(id),
+    undo_checkpoint_id   BIGINT NOT NULL UNIQUE REFERENCES undogate.checkpoints(id),
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
