@@ -149,3 +149,39 @@ async def test_slack_adapter_db_concurrency_and_auth(setup_db, auth_and_config, 
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM public.users")
             assert cur.fetchone()[0] == 2
+
+@pytest.mark.asyncio
+async def test_api_lifespan_slack_transport(setup_db, auth_and_config):
+    # Test Disabled Mode: 0 connects, 0 Slack API calls
+    import undogate.api
+    undogate.api._slack_transport_instance = None
+    
+    async with undogate.api.lifespan(app):
+        # Starts successfully
+        assert undogate.api._slack_transport_instance is not None
+        assert undogate.api._slack_transport_instance.enabled is False
+        assert undogate.api._slack_transport_instance.client is None
+
+    # After lifespan ends, it's disconnected and cleaned up
+    assert undogate.api._slack_transport_instance is None
+
+@pytest.mark.asyncio
+async def test_api_lifespan_slack_transport_exception_cleanup(monkeypatch, setup_db, auth_and_config):
+    # Test startup exception handles gracefully
+    import undogate.api
+    
+    async def mock_connect():
+        raise Exception("Failed to connect")
+        
+    original_transport = undogate.slack_transport.SlackTransport
+    
+    class FailingTransport(original_transport):
+        async def connect(self):
+            await mock_connect()
+            
+    import undogate.slack_transport
+    monkeypatch.setattr(undogate.slack_transport, "SlackTransport", FailingTransport)
+    
+    # Should not crash the server startup, but log an error
+    async with undogate.api.lifespan(app):
+        pass # Yields fine

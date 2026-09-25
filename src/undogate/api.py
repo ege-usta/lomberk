@@ -14,7 +14,9 @@ from undogate.sentinel import AISentinel
 
 # Global references for lifespan
 _executor_instance = None
+_slack_transport_instance = None
 _policy_engine_instance = None
+_slack_transport_instance = None
 
 
 # Immutable runtime config
@@ -23,7 +25,7 @@ _ADMIN_KEY = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY
+    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _slack_transport_instance
     config = load_config()
     dsn = os.environ.get(config.database.agent_dsn_env)
     
@@ -65,9 +67,44 @@ async def lifespan(app: FastAPI):
             
         _executor_instance = UndogateExecutor(admin_dsn, dsn)
         _policy_engine_instance = PolicyEngine(config)
+        
+        # Initialize slack transport (disabled by default)
+        try:
+            from undogate.slack import SlackInteractionAdapter
+            from undogate.slack_transport import SlackTransport
+            
+            async def mock_resolve(team, channel, ts): return None
+            async def mock_approve(pid): return {"status": "error"}
+            async def mock_reject(pid): return {"status": "error"}
+            async def mock_status(pid): return "unknown"
+            async def mock_update(channel, ts, msg): pass
+            
+            adapter = SlackInteractionAdapter(
+                admin_allowlist={"U_ADMIN"},
+                team_allowlist={"T_TEAM"},
+                target_resolver=mock_resolve,
+                approve_callback=mock_approve,
+                reject_callback=mock_reject,
+                status_callback=mock_status,
+                slack_update_callback=mock_update
+            )
+            _slack_transport_instance = SlackTransport(
+                app_token="fake_token",
+                web_client=None,
+                business_adapter=adapter,
+                enabled=False
+            )
+            await _slack_transport_instance.connect()
+        except Exception as e:
+            import logging
+            logging.getLogger("undogate.api").error(f"Failed to start Slack transport: {e}")
+
         yield
     finally:
-        pass
+        if _slack_transport_instance:
+            await _slack_transport_instance.disconnect()
+            _slack_transport_instance = None
+            
         _executor_instance = None
         _policy_engine_instance = None
 
