@@ -160,3 +160,87 @@ async def test_slack_transport_dedup_eviction(mock_adapter, mock_client_factory)
     assert "e1" not in transport._processed_envelopes
     assert "e2" in transport._processed_envelopes
     assert "e3" in transport._processed_envelopes
+import pytest
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+from slack_sdk.socket_mode.request import SocketModeRequest
+from undogate.slack_transport import SlackTransport
+from undogate.slack import SlackInteractionAdapter
+
+@pytest.fixture
+def mock_adapter():
+    adapter = MagicMock(spec=SlackInteractionAdapter)
+    adapter.handle_interaction = AsyncMock()
+    return adapter
+
+@pytest.mark.asyncio
+async def test_dedup_capacity_overwritten(mock_adapter, mock_client_factory):
+    transport = SlackTransport("token", mock_adapter, mock_client_factory, enabled=True, max_dedup_size=1)
+    mock_client = mock_client_factory("token")
+    req_a = SocketModeRequest(type="interactive", envelope_id="A", payload={"type": "block_actions"})
+    
+    await transport._process_request(mock_client, req_a)
+    assert mock_adapter.handle_interaction.call_count == 1
+    
+    # Send A again immediately
+    await transport._process_request(mock_client, req_a)
+    assert mock_adapter.handle_interaction.call_count == 1
+
+@pytest.mark.asyncio
+async def test_inflight_evicted_on_capacity(mock_adapter, mock_client_factory):
+    transport = SlackTransport("token", mock_adapter, mock_client_factory, enabled=True, max_dedup_size=1)
+    mock_client = mock_client_factory("token")
+    
+    ev = asyncio.Event()
+    async def slow_handle(*a):
+        await ev.wait()
+    mock_adapter.handle_interaction.side_effect = slow_handle
+    
+    req_a = SocketModeRequest(type="interactive", envelope_id="A", payload={"type": "block_actions"})
+    t1 = asyncio.create_task(transport._process_request(mock_client, req_a))
+    await asyncio.sleep(0.01) # Let A become INFLIGHT
+    
+    req_b = SocketModeRequest(type="interactive", envelope_id="B", payload={"type": "block_actions"})
+    await transport._process_request(mock_client, req_b)
+    
+    ev.set()
+    await t1
+    
+    assert len(transport._processed_envelopes) <= 1
+    
+@pytest.mark.asyncio
+async def test_inflight_evicted_on_ttl(mock_adapter, mock_client_factory, monkeypatch):
+    import undogate.slack_transport
+    
+    transport = SlackTransport("token", mock_adapter, mock_client_factory, enabled=True, dedup_ttl_seconds=1)
+    mock_client = mock_client_factory("token")
+    
+    ev = asyncio.Event()
+    async def slow_handle(*a):
+        await ev.wait()
+    mock_adapter.handle_interaction.side_effect = slow_handle
+    
+    # Mock the time function specifically where it's used instead of loop.time
+    # Wait, the code uses `now = asyncio.get_event_loop().time()`.
+    # Let's just mock `asyncio.get_event_loop` to return a mock loop with a custom `time` method?
+    # Better: just set the internal dictionary timestamps manually for the test!
+    
+    req_a = SocketModeRequest(type="interactive", envelope_id="A", payload={"type": "block_actions"})
+    
+    t1 = asyncio.create_task(transport._process_request(mock_client, req_a))
+    await asyncio.sleep(0.01) # Let A become INFLIGHT
+    
+    # Manually adjust the timestamp of A to simulate time passing
+    transport._processed_envelopes["A"] = (0.0, "INFLIGHT")
+    
+    # Now send A again. The new request gets a real `now` (e.g. 1234567.89).
+    # Since 1234567.89 - 0.0 > 1 (ttl), A would be evicted IF the code didn't protect INFLIGHT.
+    
+    t2 = asyncio.create_task(transport._process_request(mock_client, req_a))
+    await asyncio.sleep(0.01)
+    
+    ev.set()
+    await t1
+    await t2
+    
+    assert mock_adapter.handle_interaction.call_count == 1

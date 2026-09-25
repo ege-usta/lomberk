@@ -61,3 +61,14 @@ This ADR defines the architectural constraints and operational flow for a single
 - **Zero Business Logic in Transport:** The transport merely filters for `interactive`/`block_actions`, enforces a short-lived deduplication (TTL cache based on `envelope_id`), sends a fast Socket Mode ACK, and drops the payload into the business adapter task boundary.
 - **ACK Semantics:** Sending an ACK back to Slack via the transport is *only* a protocol requirement. It does not mean the DB mutation succeeded, nor does it guarantee durability. If the server crashes after the ACK, the payload is lost from memory.
 - **Lifecycle Bound to FastAPI:** The Transport is started and gracefully drained using the FastAPI `@asynccontextmanager lifespan`. A `_stopping` event gracefully rejects new payloads at the HTTP layer, giving active tasks a bounded `timeout` window to flush to PostgreSQL.
+
+## 8. Admission, Dedup & Bounded Eviction
+**Decision:** The Socket Mode Transport enforces a state-machine (`INFLIGHT`, `ACCEPTED`) with a hard memory size limit (`max_dedup_size`).
+**Mechanism:**
+- Envelope IDs are recorded in an LRU memory map.
+- If an envelope arrives while another is `INFLIGHT`, it is immediately dropped as a concurrent duplicate.
+- **ACK vs Acceptance:** 
+  - If the Business logic rejects the payload (e.g., `TaskCapacityExceededError`), the envelope is *purged* from memory and **NOT ACKed**. This allows Slack to retry later when capacity frees up.
+  - If the Business logic accepts the payload, it marks it `ACCEPTED` and **then** attempts to ACK.
+  - If the ACK network call fails *after* acceptance, the business logic still runs. A later retry by Slack will hit the `ACCEPTED` state, and the transport will simply retry the ACK *without* duplicating the execution.
+- This creates strict bounded eviction and explicitly defines the process crash gap: if the process dies after `ACCEPTED` but before business commit, memory state is lost. Since it was ACKed (or ACK failed), Slack may or may not retry. DB idempotency remains the final line of defense against actual logical duplication.
