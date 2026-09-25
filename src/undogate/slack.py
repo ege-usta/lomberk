@@ -20,7 +20,8 @@ class SlackInteractionAdapter:
         team_allowlist: Set[str],
         target_resolver: Callable[[str, str, str], Awaitable[Optional[str]]],
         approve_callback: Callable[[str], Awaitable[Dict[str, Any]]], 
-        reject_callback: Callable[[str], Awaitable[Dict[str, Any]]], 
+        reject_callback: Callable[[str], Awaitable[Dict[str, Any]]],
+        status_callback: Callable[[str], Awaitable[str]], 
         slack_update_callback: Callable[[str, str, str], Awaitable[None]],
         max_concurrent_tasks: int = 100,
         shutdown_timeout: float = 5.0
@@ -30,6 +31,7 @@ class SlackInteractionAdapter:
         self.target_resolver = target_resolver
         self.approve_callback = approve_callback
         self.reject_callback = reject_callback
+        self.status_callback = status_callback
         self.slack_update_callback = slack_update_callback
         self.max_concurrent_tasks = max_concurrent_tasks
         self.shutdown_timeout = shutdown_timeout
@@ -92,12 +94,6 @@ class SlackInteractionAdapter:
         if action_id not in ("approve_button", "reject_button"):
             logger.warning(f"Unknown action_id: {action_id}")
             raise InvalidPayloadError(f"Unknown action: {action_id}")
-            
-        # Target Binding: Ensure the Slack channel/message strictly matches the expected public_id
-        expected_public_id = await self.target_resolver(team_id, channel_id, message_ts)
-        if not expected_public_id or expected_public_id != public_id:
-            logger.warning(f"Target binding failed: payload public_id {public_id} does not match bound target {expected_public_id}")
-            raise InvalidPayloadError("Target binding validation failed.")
 
         if len(self._active_tasks) >= self.max_concurrent_tasks:
             logger.error("Slack Adapter task capacity exceeded.")
@@ -105,47 +101,71 @@ class SlackInteractionAdapter:
 
         is_approve = (action_id == "approve_button")
         
-        task = asyncio.create_task(self._execute_and_update(public_id, channel_id, message_ts, is_approve))
+        # Enclose the entire async flow (including target resolution) in the supervised task
+        task = asyncio.create_task(self._process_interaction(
+            team_id, channel_id, message_ts, public_id, is_approve
+        ))
         self._active_tasks.add(task)
         task.add_done_callback(self._active_tasks.discard)
             
         return {"acknowledged": True}
 
-    async def _execute_and_update(self, public_id: str, channel_id: str, message_ts: str, is_approve: bool):
+    async def _process_interaction(self, team_id: str, channel_id: str, message_ts: str, public_id: str, is_approve: bool):
         try:
+            # 1. Target Binding
+            expected_public_id = await self.target_resolver(team_id, channel_id, message_ts)
+            if not expected_public_id or expected_public_id != public_id:
+                logger.warning(f"Target binding failed: payload {public_id} != expected {expected_public_id}")
+                await self._safe_slack_update(channel_id, message_ts, ":x: Target binding validation failed.")
+                return
+
+            # 2. Re-check stopping after await (Shutdown race condition boundary)
+            if self._stopping:
+                logger.warning("Aborting interaction processing; server is shutting down.")
+                return
+
+            # 3. Execute
             if is_approve:
-                result = await self.approve_callback(public_id)
+                await self.approve_callback(public_id)
             else:
-                result = await self.reject_callback(public_id)
+                await self.reject_callback(public_id)
                 
-            status = result.get("status")
-            authoritative_state = result.get("authoritative_state", status)
-            
-            # Use authoritative state to ensure UI doesn't regress
-            if authoritative_state in ("applied", "approved"):
-                msg = f":white_check_mark: Checkpoint {public_id} successfully applied."
-            elif authoritative_state == "denied":
-                msg = f":x: Checkpoint {public_id} was rejected."
-            elif status == "conflict":
-                # Do not blindly say "already processed". Reflect authoritative state.
-                msg = f":warning: Checkpoint {public_id} processed previously. Current state: {authoritative_state}"
-            elif status == "unknown":
-                msg = f":hourglass_flowing_sand: Checkpoint {public_id} status is unknown. Verifying outcome..."
-            else:
-                msg = f":warning: Checkpoint {public_id} execution securely aborted. (Ref: {public_id})"
-                
+        except asyncio.CancelledError:
+            # Task was cancelled during bounded shutdown drain
+            return
         except Exception as e:
             logger.error(f"Internal error processing checkpoint {public_id}: {type(e).__name__}")
-            msg = f":rotating_light: Internal error processing checkpoint {public_id}."
             
         try:
-            # Wrap slack update in a timeout to prevent hanging the drained tasks
+            # 4. Final authoritative status query ensures out-of-order callbacks don't regress UI
+            final_state = await self.status_callback(public_id)
+            
+            if final_state == "applied":
+                msg = f":white_check_mark: Checkpoint {public_id} successfully applied."
+            elif final_state == "approved":
+                msg = f":white_check_mark: Checkpoint {public_id} approved, pending execution verification."
+            elif final_state == "denied":
+                msg = f":x: Checkpoint {public_id} was rejected."
+            elif final_state == "undone":
+                msg = f":rewind: Checkpoint {public_id} undone."
+            else:
+                msg = f":hourglass_flowing_sand: Checkpoint {public_id} status is {final_state}, pending verification."
+                
+            await self._safe_slack_update(channel_id, message_ts, msg)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"Failed to query final state for {public_id}: {e}")
+            await self._safe_slack_update(channel_id, message_ts, ":rotating_light: Internal error resolving final state.")
+
+    async def _safe_slack_update(self, channel_id: str, message_ts: str, msg: str):
+        try:
             async with asyncio.timeout(3.0):
                 await self.slack_update_callback(channel_id, message_ts, msg)
         except asyncio.TimeoutError:
-            logger.error(f"Timeout updating Slack UI for {public_id}")
-        except Exception as update_err:
-            logger.error(f"Failed to update Slack UI for {public_id}: {update_err}")
+            logger.error("Timeout updating Slack UI.")
+        except Exception as e:
+            logger.error(f"Failed to update Slack UI: {e}")
 
     async def shutdown(self):
         """Bounded drain of active tasks."""
