@@ -76,3 +76,11 @@ BEGIN
         ALTER TABLE undogate.row_changes ADD COLUMN schema_snapshot JSONB;
     END IF;
 END $$;
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='undogate' AND table_name='checkpoints' AND column_name='operation_id') THEN
+        ALTER TABLE undogate.checkpoints ADD COLUMN operation_id TEXT;
+        CREATE UNIQUE INDEX idx_checkpoints_idempotency ON undogate.checkpoints (agent_label, operation_id) WHERE operation_id IS NOT NULL;
+    END IF;
+END $$;

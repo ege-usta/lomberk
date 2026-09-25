@@ -101,9 +101,11 @@ def verify_admin_key(api_key: str = Security(api_key_header)):
     if api_key != _ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid Admin Key")
     return api_key
+from typing import Optional
 class ExecuteRequest(BaseModel):
     sql: str
     agent_label: str = "agent"
+    operation_id: Optional[str] = None
 
 @app.post("/v1/execute")
 def execute_query(

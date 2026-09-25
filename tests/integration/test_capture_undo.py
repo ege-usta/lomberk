@@ -286,3 +286,61 @@ END $$;
         
     res_undo = executor.execute_undo(res.public_id)
     assert res_undo.status == "undone", res_undo.message
+import pytest
+import os
+import psycopg
+from undogate.executor import UndogateExecutor
+from undogate.policy import PolicyDecision
+from undogate.sql.classify import ClassifiedStatement, StatementClass
+from undogate.models import StatementEvaluation
+
+def test_idempotent_dml_replay(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    os.environ["UNDOGATE_ADMIN_DSN"] = dsn
+    os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
+    
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
+    
+    stmt = ClassifiedStatement(
+        sql="INSERT INTO public.test_users (name, age) VALUES ('Idempotent Test', 25)", 
+        stmt_class=StatementClass.WRITE_DML, 
+        tables=["public.test_users"]
+    )
+    eval_res = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
+    
+    # Execution 1
+    res1 = executor.execute(eval_res, agent_label="mcp_agent", operation_id="req_abc123")
+    assert res1.status == "applied"
+    
+    # Execution 2 (Exact same operation_id)
+    res2 = executor.execute(eval_res, agent_label="mcp_agent", operation_id="req_abc123")
+    assert res2.status == "applied"
+    assert res2.public_id == res1.public_id
+    assert res2.message == "Idempotent replay"
+    
+    # Check DB - only one row should be inserted
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM public.test_users WHERE name = 'Idempotent Test'")
+        assert cur.fetchone()[0] == 1
+
+def test_idempotent_approval_replay(dsn, runtime_dsn, setup_db, monkeypatch):
+    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'undogate_control:secret@'); executor = UndogateExecutor(control_dsn, runtime_dsn)
+    
+    stmt = ClassifiedStatement(
+        sql="INSERT INTO public.test_users (name, age) VALUES ('Idempotent Appr', 25)", 
+        stmt_class=StatementClass.WRITE_DML, 
+        tables=["public.test_users"]
+    )
+    eval_res = StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason="Test")
+    
+    # Execution 1
+    res1 = executor.execute(eval_res, agent_label="mcp_agent", operation_id="req_def456")
+    assert res1.status == "approval_required"
+    
+    # Execution 2
+    res2 = executor.execute(eval_res, agent_label="mcp_agent", operation_id="req_def456")
+    assert res2.status == "approval_required"
+    assert res2.public_id == res1.public_id
+    assert res2.message == "Idempotent replay"
+

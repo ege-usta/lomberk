@@ -95,13 +95,13 @@ class UndogateExecutor:
         self.dsn = dsn
         self.runtime_dsn = runtime_dsn
 
-    def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str) -> str:
+    def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str, operation_id: str | None = None) -> str:
         import psycopg
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s)",
-                    (sql, stmt_class, agent_label)
+                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s)",
+                    (sql, stmt_class, agent_label, operation_id)
                 )
                 row = cur.fetchone()
                 cp_id = row[0]
@@ -110,7 +110,7 @@ class UndogateExecutor:
                 return public_id
 
 
-    def execute(self, eval_result, agent_label: str = "agent"):
+    def execute(self, eval_result, agent_label: str = "agent", operation_id: str | None = None):
         if not self.dsn or not self.runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required for execution.")
             
@@ -126,13 +126,25 @@ class UndogateExecutor:
             return ExecutionResult(status="denied", message=eval_result.reason)
             
         if eval_result.decision == PolicyDecision.REQUIRE_APPROVAL:
-            public_id = self.create_pending_checkpoint(
-                sql=eval_result.statement.sql,
-                stmt_class=eval_result.statement.stmt_class.value,
-                decision=eval_result.decision.value,
-                agent_label=agent_label
-            )
-            return ExecutionResult(checkpoint_id=-1, public_id=public_id, status="approval_required", message="Policy requires explicit approval.")
+            import psycopg
+            try:
+                public_id = self.create_pending_checkpoint(
+                    sql=eval_result.statement.sql,
+                    stmt_class=eval_result.statement.stmt_class.value,
+                    decision=eval_result.decision.value,
+                    agent_label=agent_label,
+                    operation_id=operation_id
+                )
+                return ExecutionResult(checkpoint_id=-1, public_id=public_id, status="approval_required", message="Policy requires explicit approval.")
+            except psycopg.errors.UniqueViolation as e:
+                if "idx_checkpoints_idempotency" in str(e):
+                    with psycopg.connect(self.dsn) as conn, conn.cursor() as cur:
+                        cur.execute("SELECT id, public_id, status, rows_affected FROM undogate.checkpoints WHERE agent_label = %s AND operation_id = %s", (agent_label, operation_id))
+                        row = cur.fetchone()
+                        if row:
+                            # Payload fingerprint validation could go here
+                            return ExecutionResult(checkpoint_id=row[0], public_id=row[1], status="approval_required" if row[2] == "pending" else row[2], rows_affected=row[3] or 0, message="Idempotent replay")
+                raise
             
         # READ ONLY PATH
         if eval_result.statement.stmt_class.value == "READ":
@@ -164,7 +176,7 @@ class UndogateExecutor:
                 return ExecutionResult(status="failed", message=error_msg)
             return ExecutionResult(status="applied", message="Success", data=fetched_data)
             
-        return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label)
+        return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, operation_id)
 
     def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str):
         import psycopg
@@ -294,27 +306,35 @@ class UndogateExecutor:
         emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "applied", [], rows_affected)
         return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, rows_affected=rows_affected, status="applied", message="Success", data=fetched_data)
 
-    def _execute_internal(self, sql_to_execute: str, classification: str, decision: str, agent_label: str):
+    def _execute_internal(self, sql_to_execute: str, classification: str, decision: str, agent_label: str, operation_id: str | None = None):
         import psycopg
         try:
-        
             with psycopg.connect(self.dsn, autocommit=False) as conn:
-                with conn.transaction(), conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s)",
-                        (sql_to_execute, classification, agent_label)
-                    )
-                    row = cur.fetchone()
-                    cp_id = row[0]
-                    public_id = row[1]
-                
-                    cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
-                    exec_token = cur.fetchone()[0]
-                    # Transaction context manager will commit
+                try:
+                    with conn.transaction(), conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s)",
+                            (sql_to_execute, classification, agent_label, operation_id)
+                        )
+                        row = cur.fetchone()
+                        cp_id = row[0]
+                        public_id = row[1]
+                    
+                        cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                        exec_token = cur.fetchone()[0]
+                except psycopg.errors.UniqueViolation as e:
+                    if "idx_checkpoints_idempotency" in str(e):
+                        with psycopg.connect(self.dsn) as check_conn, check_conn.cursor() as check_cur:
+                            check_cur.execute("SELECT id, public_id, status, rows_affected FROM undogate.checkpoints WHERE agent_label = %s AND operation_id = %s", (agent_label, operation_id))
+                            existing = check_cur.fetchone()
+                            if existing:
+                                return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], status="approval_required" if existing[2] == "pending" else existing[2], rows_affected=existing[3] or 0, message="Idempotent replay")
+                    raise
 
             return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
 
         except psycopg.OperationalError:
+            return ExecutionResult(status="failed", message="Database connection error")
             return ExecutionResult(status="outcome_unknown", message="Network failure.")
     def execute_pending(self, public_id: str):
         import psycopg
