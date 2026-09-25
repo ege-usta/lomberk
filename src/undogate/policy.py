@@ -56,7 +56,3 @@ class PolicyEngine:
             
         return StatementEvaluation(statement=stmt, decision=PolicyDecision.DENY, reason="Fallback deny.")
 
-    async def resolve_slack_target(self, team: str, channel: str, ts: str):
-        # Stub for resolving Slack target messages to a checkpoint public_id
-        # This will be properly backed by a database table or cache in production.
-        return None

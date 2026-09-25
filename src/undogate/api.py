@@ -79,9 +79,16 @@ async def lifespan(app: FastAPI):
                 
             if not hasattr(config, "slack") or not config.slack.admin_allowlist:
                 raise ValueError("Startup Refusal: config.slack.admin_allowlist is missing or empty.")
+            if not config.slack.team_allowlist:
+                raise ValueError("Startup Refusal: config.slack.team_allowlist is missing or empty.")
                 
-            if not hasattr(_policy_engine_instance, "resolve_slack_target"):
-                raise ValueError("Startup Refusal: PolicyEngine lacks resolve_slack_target implementation.")
+            slack_update_cb = getattr(app.state, "slack_update_callback", None)
+            if not slack_update_cb:
+                raise ValueError("Startup Refusal: slack_update_callback dependency missing. Live notifications cannot function.")
+                
+            slack_resolver = getattr(app.state, "slack_target_resolver", None)
+            if not slack_resolver:
+                raise ValueError("Startup Refusal: slack_target_resolver dependency missing. Cannot bind Slack actions to targets.")
                 
             try:
                 from undogate.slack import SlackInteractionAdapter
@@ -91,9 +98,9 @@ async def lifespan(app: FastAPI):
                 import asyncio
                 
                 # Capture fixed references to avoid None during shutdown
-                def make_callbacks(executor, policy):
+                def make_callbacks(executor, policy, resolver, updater):
                     async def resolve_cb(team, channel, ts):
-                        return await policy.resolve_slack_target(team, channel, ts)
+                        return await resolver(team, channel, ts)
                     
                     async def status_cb(pid):
                         return await asyncio.to_thread(executor.check_status, pid)
@@ -113,15 +120,13 @@ async def lifespan(app: FastAPI):
                         return {"status": "denied"}
                         
                     async def update_cb(channel, ts, msg):
-                        # Overridden in tests if provided
-                        app_state = getattr(app.state, "slack_update_callback", None)
-                        if app_state:
-                            return await app_state(channel, ts, msg)
-                        raise NotImplementedError("Live Slack updates not configured")
+                        return await updater(channel, ts, msg)
                         
                     return resolve_cb, status_cb, approve_cb, reject_cb, update_cb
                 
-                resolve_cb, status_cb, approve_cb, reject_cb, update_cb = make_callbacks(_executor_instance, _policy_engine_instance)
+                resolve_cb, status_cb, approve_cb, reject_cb, update_cb = make_callbacks(
+                    _executor_instance, _policy_engine_instance, slack_resolver, slack_update_cb
+                )
                 
                 adapter = SlackInteractionAdapter(
                     admin_allowlist=set(config.slack.admin_allowlist),

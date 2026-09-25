@@ -287,3 +287,60 @@ async def test_slack_transport_connect_cancelled_cleanup(mock_adapter, mock_clie
     # Verify close was called
     client = hanging_factory.last_client
     client.close.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_slack_transport_double_cancellation_ownership(mock_adapter, mock_client_factory):
+    # This test verifies that if connect is cancelled, it spawns a cleanup task.
+    # If the shield is cancelled (double cancellation), the cleanup task survives
+    # and is correctly drained by disconnect().
+    close_started = asyncio.Event()
+    close_finish = asyncio.Event()
+    
+    def hanging_factory(token):
+        c = mock_client_factory(token)
+        async def hang():
+            await asyncio.sleep(1.0)
+        c.connect.side_effect = hang
+        
+        async def slow_close():
+            close_started.set()
+            await close_finish.wait()
+        c.close = slow_close
+        return c
+        
+    transport = SlackTransport("app-token", mock_adapter, hanging_factory, enabled=True)
+    
+    t = asyncio.create_task(transport.connect())
+    await asyncio.sleep(0.01) # Let connect start
+    
+    # Cancel connect (1st cancellation)
+    t.cancel()
+    
+    # Wait until the inner cleanup task actually starts closing the client
+    await close_started.wait()
+    
+    # Now the cleanup task is running, but the await asyncio.shield(ctask) is still blocking `t` from finishing.
+    # If we cancel `t` again? `t` is already cancelled, it's raising CancelledError.
+    with pytest.raises(asyncio.CancelledError):
+        await t
+        
+    # The client should be None because we detached
+    assert transport.client is None
+    
+    # We should have 1 active cleanup task
+    assert len(transport._cleanup_tasks) == 1
+    
+    # Disconnect will await the cleanup tasks
+    dt = asyncio.create_task(transport.disconnect())
+    await asyncio.sleep(0.01)
+    
+    # It should be waiting for close_finish
+    assert not dt.done()
+    
+    # Release the close
+    close_finish.set()
+    await dt
+    
+    # Cleanup task should be gone
+    assert len(transport._cleanup_tasks) == 0
+

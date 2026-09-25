@@ -170,10 +170,65 @@ async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_
     monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake")
     monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake")
     
-    # config.slack is missing by default in tests
-    with pytest.raises(ValueError, match="config.slack.admin_allowlist is missing"):
+    original_config = undogate.config.load_config()
+    original_config.slack.admin_allowlist = ["U1"]
+    original_config.slack.team_allowlist = []
+    monkeypatch.setattr(undogate.api, "load_config", lambda: original_config)
+    
+    # 1. Missing team allowlist
+    with pytest.raises(ValueError, match="team_allowlist is missing or empty"):
         async with undogate.api.lifespan(app):
             pass
+            
+    original_config.slack.team_allowlist = ["T1"]
+    
+    # 2. Missing update callback
+    app.state.slack_target_resolver = lambda t, c, ts: "cp_test"
+    with pytest.raises(ValueError, match="slack_update_callback dependency missing"):
+        async with undogate.api.lifespan(app):
+            pass
+            
+    # 3. Missing resolver
+    del app.state.slack_target_resolver
+    app.state.slack_update_callback = lambda c, ts, m: None
+    with pytest.raises(ValueError, match="slack_target_resolver dependency missing"):
+        async with undogate.api.lifespan(app):
+            pass
+
+@pytest.mark.asyncio
+async def test_api_lifespan_slack_transport_successful_fake(setup_db, auth_and_config, monkeypatch):
+    import undogate.api
+    monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
+    monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake")
+    
+    original_config = undogate.config.load_config()
+    original_config.slack.admin_allowlist = ["U1"]
+    original_config.slack.team_allowlist = ["T1"]
+    monkeypatch.setattr(undogate.api, "load_config", lambda: original_config)
+    
+    app.state.slack_target_resolver = lambda t, c, ts: "cp_test"
+    
+    update_called = False
+    async def mock_update(c, ts, m):
+        nonlocal update_called
+        update_called = True
+        
+    app.state.slack_update_callback = mock_update
+    
+    def fake_factory(token):
+        from unittest.mock import MagicMock, AsyncMock
+        m = MagicMock()
+        m.connect = AsyncMock()
+        m.socket_mode_request_listeners = []
+        return m
+        
+    app.state.slack_client_factory = fake_factory
+    
+    async with undogate.api.lifespan(app):
+        adapter = undogate.api._slack_transport_instance.business_adapter
+        await adapter.slack_update_callback("C1", "123", "msg")
+        assert update_called
 
 @pytest.mark.asyncio
 async def test_api_lifespan_slack_transport_exception_cleanup(setup_db, auth_and_config, monkeypatch):
@@ -187,6 +242,7 @@ async def test_api_lifespan_slack_transport_exception_cleanup(setup_db, auth_and
     import undogate.api
     original_config = load_config()
     original_config.slack.admin_allowlist = ["U123"]
+    original_config.slack.team_allowlist = ["T1"]
     monkeypatch.setattr(undogate.api, "load_config", lambda: original_config)
     
 
@@ -222,22 +278,28 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
         return m
     app.state.slack_client_factory = mock_factory
     
+    app.state.slack_update_callback = AsyncMock()
+    app.state.slack_target_resolver = AsyncMock(return_value="cp_mock")
+    
     async with undogate.api.lifespan(app):
         adapter = undogate.api._slack_transport_instance.business_adapter
+        adapter.shutdown_timeout = 0.05  # Force very short wait
         
-        # Test that cancelling the adapter doesn't kill the thread abruptly
-        thread_finished = asyncio.Event()
+        import threading
+        thread_started = threading.Event()
+        thread_release = threading.Event()
+        thread_finished = threading.Event()
         
-        # Mock executor to sleep so we can cancel it
-        import time
         def slow_execute(*args):
-            time.sleep(0.1)
+            thread_started.set()
+            # Wait for main test to tell us to proceed
+            if not thread_release.wait(timeout=5.0):
+                return MagicMock(status="failed_timeout")
             thread_finished.set()
             return MagicMock(status="applied")
             
         monkeypatch.setattr(undogate.api._executor_instance, "execute_pending", slow_execute)
         
-        # Submit task
         async def resolve_target(*args):
             return "cp_mock"
         adapter.target_resolver = resolve_target
@@ -248,21 +310,50 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
             "actions": [{"action_id": "approve_button", "value": "cp_mock"}]
         }
         
-        # Dispatch
-        t = asyncio.create_task(adapter.handle_interaction(payload))
-        await asyncio.sleep(0.02) # Let the thread start
+        # Intercept the approve_callback to prove Cancellation happens
+        cancellation_observed = False
+        original_approve = adapter.approve_callback
+        async def tracking_approve(*args, **kwargs):
+            nonlocal cancellation_observed
+            try:
+                return await original_approve(*args, **kwargs)
+            except asyncio.CancelledError:
+                cancellation_observed = True
+                raise
+        adapter.approve_callback = tracking_approve
         
-        # Now trigger shutdown which cancels active tasks
+        await adapter.handle_interaction(payload)
+        
+        import time
+        start_wait = time.time()
+        while not thread_started.is_set():
+            if time.time() - start_wait > 1.0:
+                pytest.fail("Thread never started")
+            await asyncio.sleep(0.01)
+            
+        interaction_task = list(adapter._active_tasks)[0]
+        
         await adapter.shutdown()
         
-        # The task should be done (cancelled)
-        assert t.done()
-        
-        # BUT the thread should still finish successfully in the background
-        # We wait for it
+        # Wait for the event loop to actually process the cancellation
         try:
-            async with asyncio.timeout(1.0):
-                await thread_finished.wait()
-        except asyncio.TimeoutError:
-            pytest.fail("Thread was killed upon task cancellation!")
+            await interaction_task
+        except asyncio.CancelledError:
+            pass
+            
+        # Verification 1: Coroutine was cancelled
+        assert interaction_task.cancelled() or cancellation_observed
+        
+        # Verification 2: Thread is still waiting (not killed!)
+        assert not thread_finished.is_set()
+        
+        # Release the thread
+        thread_release.set()
+        
+        # Verification 3: Thread can finish its work despite task cancellation
+        start_wait = time.time()
+        while not thread_finished.is_set():
+            if time.time() - start_wait > 1.0:
+                pytest.fail("Thread was killed upon task cancellation!")
+            await asyncio.sleep(0.01)
 

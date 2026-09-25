@@ -31,6 +31,7 @@ class SlackTransport:
         self._processed_envelopes: OrderedDict[str, tuple[float, str]] = OrderedDict()
         self._shutdown_event = asyncio.Event()
         self._connect_lock = asyncio.Lock()
+        self._cleanup_tasks: set[asyncio.Task] = set()
 
     def _evict_old_envelopes(self, now: float):
         items_to_remove = []
@@ -66,17 +67,16 @@ class SlackTransport:
                         client_to_close = self.client
                         self.client = None
                         if client_to_close:
-                            try:
-                                # Run the close inside a shielded task so it doesn't get aborted by the same CancelledError
-                                async def _safe_close():
-                                    try:
-                                        async with asyncio.timeout(3.0):
-                                            await client_to_close.close()
-                                    except BaseException:
-                                        pass
-                                await asyncio.shield(_safe_close())
-                            except BaseException:
-                                pass
+                            # Create a tracked background task for cleanup
+                            async def _safe_close():
+                                try:
+                                    async with asyncio.timeout(3.0):
+                                        await client_to_close.close()
+                                except BaseException:
+                                    pass
+                            ctask = asyncio.create_task(_safe_close())
+                            self._cleanup_tasks.add(ctask)
+                            ctask.add_done_callback(self._cleanup_tasks.discard)
                         raise
         except asyncio.TimeoutError:
             logger.error("Timeout waiting for Slack transport connect.")
@@ -172,14 +172,23 @@ class SlackTransport:
                         logger.error(f"Error during business adapter shutdown: {e}")
                     finally:
                         if self.client:
-                            try:
-                                async with asyncio.timeout(3.0):
-                                    await self.client.close()
-                            except asyncio.TimeoutError:
-                                logger.error("Timeout closing Slack Socket Mode client.")
-                            except Exception as e:
-                                logger.error(f"Error closing Slack client: {e}")
-                            finally:
-                                self.client = None
+                            client_to_close = self.client
+                            self.client = None
+                            async def _safe_close_disconnect():
+                                try:
+                                    async with asyncio.timeout(3.0):
+                                        await client_to_close.close()
+                                except BaseException as e:
+                                    logger.error(f"Error closing Slack client: {type(e).__name__}")
+                            
+                            dt = asyncio.create_task(_safe_close_disconnect())
+                            self._cleanup_tasks.add(dt)
+                            dt.add_done_callback(self._cleanup_tasks.discard)
+                            
+                        if self._cleanup_tasks:
+                            logger.info(f"Draining {len(self._cleanup_tasks)} Slack Transport cleanup tasks...")
+                            done, pending = await asyncio.wait(self._cleanup_tasks, timeout=3.0)
+                            if pending:
+                                logger.error(f"Transport disconnect complete, but {len(pending)} cleanup tasks are still hanging.")
         except asyncio.TimeoutError:
             logger.error("Timeout acquiring lock for disconnect.")
