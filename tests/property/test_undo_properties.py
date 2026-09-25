@@ -24,9 +24,21 @@ def postgres():
 def dsn(postgres):
     return postgres.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
 
+
+@pytest.fixture(scope="module")
+def runtime_dsn(dsn):
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(dsn)
+    return urlunparse((parsed.scheme, f"mcp_agent:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+
 @pytest.fixture(scope="module")
 def setup_db(dsn):
-    install_undogate(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP ROLE IF EXISTS mcp_agent")
+        cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS undogate_control")
+        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
                 CREATE TABLE public.prop_users (
@@ -34,7 +46,7 @@ def setup_db(dsn):
                     val INT NOT NULL
                 );
             """)
-        cur.execute("SELECT undogate.attach_trigger_to_table('public', 'prop_users');")
+        cur.execute("SELECT undogate.register_table('public', 'prop_users', 'id', 'mcp_agent');")
 
 def get_checksum(dsn):
     with psycopg.connect(dsn) as conn:
@@ -52,8 +64,8 @@ def get_checksum(dsn):
         min_size=1, max_size=10
     )
 )
-def test_undo_property(dsn, setup_db, ops):
-    executor = UndogateExecutor(dsn)
+def test_undo_property(dsn, runtime_dsn, setup_db, ops):
+    executor = UndogateExecutor(dsn, runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     # 1. Capture initial state

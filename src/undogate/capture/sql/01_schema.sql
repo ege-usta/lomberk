@@ -42,10 +42,14 @@ CREATE TABLE IF NOT EXISTS undogate.registered_tables (
 CREATE SEQUENCE IF NOT EXISTS undogate.seq_row_changes START 1;
 
 
--- MIGRATION: Ensure existing tables have the new columns and types
+
+-- MIGRATION: Update columns for capability-based execution
 DO $$ 
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='undogate' AND table_name='checkpoints' AND column_name='exec_token') THEN
-        ALTER TABLE undogate.checkpoints ADD COLUMN exec_token UUID;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='undogate' AND table_name='checkpoints' AND column_name='capability_token') THEN
+        ALTER TABLE undogate.checkpoints ADD COLUMN capability_token UUID UNIQUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='undogate' AND table_name='checkpoints' AND column_name='exec_txid') THEN
+        ALTER TABLE undogate.checkpoints ADD COLUMN exec_txid BIGINT;
     END IF;
 END $$;

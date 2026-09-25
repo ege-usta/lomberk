@@ -27,9 +27,11 @@ def runtime_dsn(dsn):
 def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
+        cur.execute("DROP ROLE IF EXISTS undogate_control")
+        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
     
-    install_undogate(dsn, agent_role="mcp_agent")
+    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE public.users (
@@ -49,7 +51,7 @@ async def test_mcp_execute_unregistered_fails(dsn, runtime_dsn, setup_db):
     server_params = StdioServerParameters(
         command="uv",
         args=["run", "python", "src/undogate/cli.py", "serve"],
-        env={"UNDOGATE_AGENT_DSN": runtime_dsn}
+        env={"UNDOGATE_AGENT_DSN": runtime_dsn, "UNDOGATE_ADMIN_DSN": dsn.replace("test:test@", "undogate_control:secret@")}
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -70,7 +72,7 @@ async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
     server_params = StdioServerParameters(
         command="uv",
         args=["run", "python", "src/undogate/cli.py", "serve"],
-        env={"UNDOGATE_AGENT_DSN": runtime_dsn}
+        env={"UNDOGATE_AGENT_DSN": runtime_dsn, "UNDOGATE_ADMIN_DSN": dsn.replace("test:test@", "undogate_control:secret@")}
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -90,7 +92,7 @@ async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
                 cur.execute("SELECT data FROM public.users WHERE id = 1")
                 assert cur.fetchone()[0] == 'test_admin'
             
-            executor = UndogateExecutor(dsn)
+            executor = UndogateExecutor(dsn, runtime_dsn)
             exec_res = executor.execute_pending(token)
             assert exec_res.status == "applied"
             

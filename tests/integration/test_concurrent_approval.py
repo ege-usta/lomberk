@@ -24,8 +24,10 @@ def runtime_dsn(dsn):
 @pytest.fixture(scope="module")
 def setup_db(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("CREATE ROLE mcp_agent")
-    install_undogate(dsn, agent_role="mcp_agent")
+        cur.execute("DROP ROLE IF EXISTS undogate_control")
+        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
+    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_race (id SERIAL PRIMARY KEY, val INT);")
@@ -53,7 +55,7 @@ def test_concurrent_approval(dsn, runtime_dsn, setup_db):
     def worker():
         try:
             barrier.wait(timeout=5)
-            executor = UndogateExecutor(dsn)
+            executor = UndogateExecutor(dsn, runtime_dsn)
             res = executor.execute_pending(public_id)
             results.append(res)
         except Exception as e:

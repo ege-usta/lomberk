@@ -34,9 +34,11 @@ def setup_db(dsn, runtime_dsn):
     # Admin creates runtime role
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
+        cur.execute("DROP ROLE IF EXISTS undogate_control")
+        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
     
-    install_undogate(dsn, agent_role="mcp_agent")
+    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
 
     # Create test schema and table as Admin
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -60,7 +62,7 @@ def assert_runtime_role(dsn):
 
 def test_insert_undo(dsn, runtime_dsn, setup_db):
     assert_runtime_role(runtime_dsn)
-    executor = UndogateExecutor(runtime_dsn)
+    executor = UndogateExecutor(dsn, runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_users (name, age) VALUES ('Alice', 30)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_users"])
@@ -92,7 +94,7 @@ def test_insert_undo(dsn, runtime_dsn, setup_db):
         assert cur.fetchone()[0] == 0
             
 def test_update_undo(dsn, runtime_dsn, setup_db):
-    executor = UndogateExecutor(runtime_dsn)
+    executor = UndogateExecutor(dsn, runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     # Insert manually
@@ -118,7 +120,7 @@ def test_update_undo(dsn, runtime_dsn, setup_db):
         assert cur.fetchone()[0] == 40
             
 def test_delete_undo(dsn, runtime_dsn, setup_db):
-    executor = UndogateExecutor(runtime_dsn)
+    executor = UndogateExecutor(dsn, runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     # Insert manually
@@ -144,7 +146,7 @@ def test_delete_undo(dsn, runtime_dsn, setup_db):
         assert cur.fetchone()[0] == 1
 
 def test_cascade_delete_undo(dsn, runtime_dsn, setup_db):
-    executor = UndogateExecutor(runtime_dsn)
+    executor = UndogateExecutor(dsn, runtime_dsn)
     undo_engine = UndoEngine(dsn)
     
     with psycopg.connect(dsn, autocommit=True) as conn:

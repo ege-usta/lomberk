@@ -20,7 +20,8 @@ def get_executor():
         dsn = os.environ.get(config.database.agent_dsn_env)
         if not dsn:
             raise ValueError(f"Database DSN must be provided via {config.database.agent_dsn_env}")
-        _executor_instance = UndogateExecutor(dsn)
+        admin_dsn = os.environ.get(config.database.admin_dsn_env)
+        _executor_instance = UndogateExecutor(admin_dsn, dsn)
         _policy_engine_instance = PolicyEngine(config)
     return _executor_instance, _policy_engine_instance
 

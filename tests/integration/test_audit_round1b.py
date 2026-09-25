@@ -33,8 +33,10 @@ def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS undogate_control")
+        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
     
-    install_undogate(dsn, agent_role='mcp_agent')
+    install_undogate(dsn, control_role='undogate_control', agent_role='mcp_agent')
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.users (id SERIAL PRIMARY KEY, data TEXT, role TEXT, password TEXT)")
         cur.execute("CREATE TABLE IF NOT EXISTS public.dangerous_function ()")
@@ -86,6 +88,10 @@ def test_timeout_mock(monkeypatch):
 
 def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
     monkeypatch.setenv("UNDOGATE_AGENT_DSN", runtime_dsn)
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(dsn)
+    admin_dsn = urlunparse((parsed.scheme, f"undogate_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+    monkeypatch.setenv("UNDOGATE_ADMIN_DSN", admin_dsn)
     monkeypatch.setenv("UNDOGATE_API_KEY", "agent")
     monkeypatch.setenv("UNDOGATE_ADMIN_KEY", "admin")
     
@@ -121,7 +127,7 @@ def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
 def test_p0_quoted_identifier_injection(dsn, runtime_dsn, setup_db):
     from undogate.executor import UndogateExecutor
     import psycopg
-    executor = UndogateExecutor(runtime_dsn)
+    executor = UndogateExecutor(dsn, runtime_dsn)
     
     # 1. Canary check: Ensure the injected SQL was NOT executed.
     # If `SELECT 1; --` was executed, it would just return. But if we put an INSERT into a canary table, we could check it.
@@ -151,7 +157,7 @@ def test_p0_quoted_identifier_injection(dsn, runtime_dsn, setup_db):
 def test_p0_sensitive_alias_leak(dsn, runtime_dsn, setup_db):
     from undogate.executor import UndogateExecutor
     import psycopg
-    executor = UndogateExecutor(runtime_dsn)
+    executor = UndogateExecutor(dsn, runtime_dsn)
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("UPDATE public.users SET password = 'real-synthetic-secret' WHERE id = 1")
@@ -167,7 +173,7 @@ def test_p0_sensitive_alias_leak(dsn, runtime_dsn, setup_db):
 def test_p0_sensitive_returning_leak(dsn, runtime_dsn, setup_db):
     from undogate.executor import UndogateExecutor
     import psycopg
-    executor = UndogateExecutor(runtime_dsn)
+    executor = UndogateExecutor(dsn, runtime_dsn)
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("UPDATE public.users SET data = 'old', password = 'synthetic-secret' WHERE id = 1")
@@ -188,7 +194,7 @@ def test_p0_sensitive_returning_leak(dsn, runtime_dsn, setup_db):
 
 def test_p0_whole_row_wildcard_leak(dsn, runtime_dsn, setup_db):
     from undogate.executor import UndogateExecutor
-    executor = UndogateExecutor(runtime_dsn)
+    executor = UndogateExecutor(dsn, runtime_dsn)
     
     stmt = ClassifiedStatement(sql='SELECT * FROM public.users', stmt_class=StatementClass.READ, tables=["public.users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Test")
@@ -208,7 +214,7 @@ def test_p0_forged_context_rejected(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'pending')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent')")
         cp_id = cur.fetchone()[0]
         
     with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -216,67 +222,109 @@ def test_p0_forged_context_rejected(dsn, runtime_dsn, setup_db):
         with pytest.raises(psycopg.errors.RaiseException, match="Invalid checkpoint context|Security Violation"):
             cur.execute("INSERT INTO public.users (data) VALUES ('forged')")
 
-def test_p0_runtime_checkpoint_state_change(dsn, runtime_dsn, setup_db):
+def test_p0_approval_claim_fail_rejected(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
+    
+    # Control plane creates a pending checkpoint
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent')")
+        row = cur.fetchone()
+        cp_id = row[0]
+        public_id = row[1]
+        
+    # Agent tries to approve/claim/fail using public_id
     with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
         with pytest.raises(psycopg.errors.InsufficientPrivilege, match="permission denied"):
-            cur.execute("UPDATE undogate.checkpoints SET status = 'applied' WHERE id = 1")
-
+            cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+            
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="permission denied"):
+            cur.execute("SELECT undogate.fail_checkpoint(%s)", (public_id,))
+            
+        with pytest.raises(psycopg.errors.InvalidTextRepresentation):
+            # public_id is not a UUID, so claim_checkpoint(UUID) will fail parsing, but even if it passed, it would fail
+            cur.execute("SELECT undogate.claim_checkpoint(%s)", (public_id,))
 
 def test_p0_capability_spoofing(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'ALLOW', 'mcp_agent')")
-        row = cur.fetchone()
-        cp_id = row[0]
-        public_id = row[1]
-
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent')")
+        public_id = cur.fetchone()[1]
+        cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+        token = cur.fetchone()[0]
+        
     with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        # 1. mcp_agent tries to claim with invalid public_id (only knows cp_id)
-        with pytest.raises(psycopg.errors.RaiseException, match="Checkpoint invalid_public_id not found"):
-            cur.execute("SELECT undogate.claim_checkpoint('invalid_public_id')")
-            
-        # 2. Try to fail with invalid public_id
-        with pytest.raises(psycopg.errors.RaiseException, match="Checkpoint invalid_public_id not found"):
-            cur.execute("SELECT undogate.fail_checkpoint('invalid_public_id')")
-            
-        # 3. Try to finish with valid public_id but wrong token
-        # First we simulate the control plane claiming it
-        with psycopg.connect(dsn, autocommit=True) as dsn_conn, dsn_conn.cursor() as dsn_cur:
-            dsn_cur.execute("SELECT undogate.claim_checkpoint(%s)", (public_id,))
-            
-        with pytest.raises(psycopg.errors.RaiseException, match="Cannot finish checkpoint without valid execution token"):
-            cur.execute("SELECT undogate.finish_checkpoint(%s, 1)", (public_id,))
+        # Agent has some OTHER capability token or invalid uuid
+        invalid_token = '00000000-0000-0000-0000-000000000000'
+        with pytest.raises(psycopg.errors.RaiseException, match="Checkpoint not found or not in approved state"):
+            cur.execute("SELECT undogate.claim_checkpoint(%s)", (invalid_token,))
 
 def test_p0_token_stealing_different_backend(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO public.users(data) VALUES (''x'')', 'WRITE_DML', 'ALLOW', 'mcp_agent')")
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO public.users(data) VALUES (''x'')', 'WRITE_DML', 'mcp_agent')")
         row = cur.fetchone()
         cp_id = row[0]
         public_id = row[1]
         
-        cur.execute("SELECT undogate.claim_checkpoint(%s)", (public_id,))
+        cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
         token = cur.fetchone()[0]
         
-    # Now in a DIFFERENT connection, try to use the stolen token
+    # The real executor claims it
+    real_conn = psycopg.connect(runtime_dsn, autocommit=False)
+    real_conn.autocommit = False
+    cur = real_conn.cursor()
+    cur.execute("BEGIN")
+    cur.execute("SELECT undogate.claim_checkpoint(%s)", (str(token),))
+    
+    # Now in a DIFFERENT connection (attacker), try to use the stolen token
+    with psycopg.connect(runtime_dsn, autocommit=False) as attacker_conn:
+        with attacker_conn.transaction():
+            with attacker_conn.cursor() as attacker_cur:
+                # Agent sets GUC with the stolen token
+                attacker_cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
+                attacker_cur.execute("SELECT set_config('undogate.capability_token', %s, true)", (str(token),))
+                attacker_cur.execute("SELECT set_config('undogate.seq', '0', true)")
+                
+                # The state is 'executing', but txid_current() doesn't match!
+                with pytest.raises(psycopg.errors.RaiseException, match="Checkpoint is not in executing state"):
+                    attacker_cur.execute("INSERT INTO public.users(data) VALUES ('stolen')")
+
+    real_conn.rollback()
+    real_conn.close()
+
+def test_p0_valid_claim_dml_finish(dsn, runtime_dsn, setup_db):
+    import psycopg
+    import pytest
+    
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM undogate.begin_checkpoint('INSERT INTO public.users(data) VALUES (''valid'')', 'WRITE_DML', 'mcp_agent')")
+        row = cur.fetchone()
+        cp_id = row[0]
+        public_id = row[1]
+        
+        cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+        token = cur.fetchone()[0]
+        
     with psycopg.connect(runtime_dsn, autocommit=False) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                # Agent sets GUC with the stolen token
+                cur.execute("SELECT undogate.claim_checkpoint(%s)", (str(token),))
+                
                 cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
-                cur.execute("SELECT set_config('undogate.exec_token', %s, false)", (str(token),))
+                cur.execute("SELECT set_config('undogate.capability_token', %s, true)", (str(token),))
                 cur.execute("SELECT set_config('undogate.seq', '0', true)")
                 
-                # Simulate that the REAL connection has already finished it
-                with psycopg.connect(dsn, autocommit=True) as dsn_conn, dsn_conn.cursor() as dsn_cur:
-                    dsn_cur.execute("SELECT set_config('undogate.exec_token', %s, false)", (str(token),))
-                    dsn_cur.execute("SELECT undogate.finish_checkpoint(%s, 1)", (public_id,))
+                cur.execute("INSERT INTO public.users(data) VALUES ('valid')")
                 
-                # Now that it's applied, the trigger should reject the delayed/stolen token usage
-                with pytest.raises(psycopg.errors.RaiseException, match="Undogate Security Violation"):
-                    cur.execute("INSERT INTO public.users(data) VALUES ('stolen')")
+                cur.execute("SELECT undogate.finish_checkpoint(%s, 1)", (str(token),))
+                
+    # Verify success
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM public.users WHERE data = 'valid'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (public_id,))
+        assert cur.fetchone()[0] == 'applied'

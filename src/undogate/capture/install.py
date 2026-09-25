@@ -1,11 +1,11 @@
 from pathlib import Path
 import psycopg
-from urllib.parse import urlparse
+from psycopg import sql
 
-def install_undogate(admin_dsn: str, agent_role: str):
+def install_undogate(admin_dsn: str, control_role: str, agent_role: str):
     """Installs Undogate schema, tables, and functions into the database."""
-    if not agent_role:
-        raise ValueError("agent_role is required")
+    if not agent_role or not control_role:
+        raise ValueError("control_role and agent_role are required")
         
     sql_dir = Path(__file__).parent / "sql"
     
@@ -21,9 +21,18 @@ def install_undogate(admin_dsn: str, agent_role: str):
                 
             cur.execute("SELECT current_user")
             curr_user = cur.fetchone()[0]
-            if curr_user == agent_role:
-                raise ValueError("Installation cannot be performed by the agent role itself.")
+            if curr_user == agent_role or curr_user == control_role:
+                raise ValueError("Installation cannot be performed by the runtime or control role itself.")
         
+            # Legacy cleanup: drop old function signatures to prevent upgrade collisions
+            cur.execute("DROP FUNCTION IF EXISTS undogate.begin_checkpoint(TEXT, TEXT, TEXT);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.approve_checkpoint(BIGINT, TEXT);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.claim_checkpoint(BIGINT);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.fail_checkpoint(BIGINT, TEXT);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.finish_checkpoint(BIGINT, INTEGER);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.get_pending_checkpoint(BIGINT);")
+            cur.execute("DROP FUNCTION IF EXISTS undogate.attach_trigger_to_table(TEXT, TEXT);")
+            
             # 1. Read and execute schema
             with open(sql_dir / "01_schema.sql", "r") as f:
                 cur.execute(f.read())
@@ -35,6 +44,6 @@ def install_undogate(admin_dsn: str, agent_role: str):
                 cur.execute(func_sql)
                 
             # Grant schema usage and functions
-            cur.execute("SELECT undogate.grant_agent_access(%s)", (agent_role,))
+            cur.execute("SELECT undogate.grant_access(%s, %s)", (control_role, agent_role))
             
         conn.commit()

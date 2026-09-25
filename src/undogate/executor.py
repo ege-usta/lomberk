@@ -44,16 +44,19 @@ class UndogateExecutor:
             fetched_data.append(row_dict)
         return fetched_data
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, runtime_dsn: str):
+        if not dsn or not runtime_dsn:
+            raise ValueError("Both dsn and runtime_dsn are required")
         self.dsn = dsn
-        self.pool = ConnectionPool(dsn, min_size=1, max_size=20, timeout=30)
+        self.runtime_dsn = runtime_dsn
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str) -> str:
-        with self.pool.connection() as conn:
+        import psycopg
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s)",
-                    (sql, stmt_class, decision, agent_label)
+                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s)",
+                    (sql, stmt_class, agent_label)
                 )
                 row = cur.fetchone()
                 cp_id = row[0]
@@ -61,35 +64,15 @@ class UndogateExecutor:
                 conn.commit()
                 return public_id
 
-    def execute_pending(self, public_id: str) -> ExecutionResult:
-        with self.pool.connection() as conn:
 
-            with conn.cursor() as cur:
-                # Lock row to prevent concurrent approval race condition
-                cur.execute("SELECT id, sql_text, status FROM undogate.get_pending_checkpoint(%s) FOR UPDATE", (public_id,))
-                row = cur.fetchone()
-                if not row:
-                    return ExecutionResult(status="failed", message="Token not found.")
-                
-                cp_id, sql_to_execute, status = row
-                if status != "pending":
-                    return ExecutionResult(status="failed", message=f"Checkpoint status is {status}, not pending.")
-
-                # Hard Gate Re-evaluation! (Ensure pending wasn't tampered with)
-                from undogate.sentinel import AISentinel
-                safe, reason = AISentinel()._ast_firewall(sql_to_execute)
-                if not safe:
-                    cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
-
-                    conn.commit()
-                    return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
-
-                # Proceed with execution just like a normal ALLOW, but we already have a checkpoint.
-                return self._execute_internal(conn, cur, cp_id, public_id, sql_to_execute)
-
-    def execute(self, eval_result: StatementEvaluation, agent_label: str = "agent") -> ExecutionResult:
-        # HARD GATE CHECK BEFORE ANYTHING ELSE
+    def execute(self, eval_result, agent_label: str = "agent"):
+        if not self.dsn or not self.runtime_dsn:
+            raise ValueError("Both dsn and runtime_dsn are required for execution.")
+            
         from undogate.sentinel import AISentinel
+        from undogate.policy import PolicyDecision
+        
+        
         safe, reason = AISentinel()._ast_firewall(eval_result.statement.sql)
         if not safe:
             return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
@@ -99,216 +82,226 @@ class UndogateExecutor:
             
         if eval_result.decision == PolicyDecision.REQUIRE_APPROVAL:
             public_id = self.create_pending_checkpoint(
-                eval_result.statement.sql, 
-                eval_result.statement.stmt_class.value, 
-                eval_result.decision.value, 
-                agent_label
+                sql=eval_result.statement.sql,
+                stmt_class=eval_result.statement.stmt_class.value,
+                decision=eval_result.decision.value,
+                agent_label=agent_label
             )
+            return ExecutionResult(checkpoint_id=-1, public_id=public_id, status="approval_required", message="Policy requires explicit approval.")
             
-            # Trigger Enterprise Notification
-            from undogate.slack import SlackNotifier
-            SlackNotifier().send_approval_request(
-                token=public_id, 
-                sql=eval_result.statement.sql, 
-                agent=agent_label, 
-                reason=eval_result.reason
-            )
-            
-            return ExecutionResult(
-                status="approval_required", 
-                public_id=public_id,
-                message=f"{eval_result.reason}. Use 'undogate approve {public_id}'"
-            )
-
+        # READ ONLY PATH
         if eval_result.statement.stmt_class.value == "READ":
-            import pglast
-            from undogate.sql.classify import check_sensitive_columns
-            ast = pglast.parse_sql(eval_result.statement.sql)
-            sens_cols = check_sensitive_columns(ast)
-            if sens_cols:
-                return ExecutionResult(status="failed", message=f"Access denied: Query contains sensitive columns {sens_cols}")
+            import psycopg
+            error_msg = None
+            fetched_data = None
+            try:
+                with psycopg.connect(self.runtime_dsn, autocommit=False) as conn:
+                    with conn.transaction():
+                        with conn.cursor() as cur:
+                            from undogate.sql.classify import check_sensitive_columns
+                            import pglast
+                            ast = pglast.parse_sql(eval_result.statement.sql)
+                            sens_cols = check_sensitive_columns(ast)
+                            if sens_cols:
+                                raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
+                            
+                            cur.execute("SET LOCAL statement_timeout = '5s'")
+                            cur.execute("SET TRANSACTION READ ONLY")
+                            cur.execute(eval_result.statement.sql)
+                            if cur.description:
+                                columns = [desc[0] for desc in cur.description]
+                                rows = cur.fetchmany(100)
+                                fetched_data = self._mask_and_sanitize_rows(columns, rows)
+            except Exception as e:
+                error_msg = str(e)
                 
-            with self.pool.connection() as conn:
+            if error_msg:
+                return ExecutionResult(status="failed", message=error_msg)
+            return ExecutionResult(status="applied", message="Success", data=fetched_data)
+            
+        return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label)
 
-                with conn.cursor() as cur:
-                    cur.execute("SET TRANSACTION READ ONLY")
-                    cur.execute("SET LOCAL statement_timeout = '5s'")
-                    try:
-                        cur.execute(eval_result.statement.sql)
-                        fetched_data = None
+    def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str):
+        import psycopg
+        from psycopg import sql
+        
+        
+        error_msg = None
+        fetched_data = None
+        rows_affected = 0
+        execution_completed = False
+        try:
+            with psycopg.connect(self.runtime_dsn, autocommit=False) as runtime_conn:
+                with runtime_conn.transaction():
+                    with runtime_conn.cursor() as cur:
+                        cur.execute("SET LOCAL statement_timeout = '5s'")
+                        cur.execute("SELECT undogate.claim_checkpoint(%s)", (exec_token,))
+                        cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
+                        cur.execute("SELECT set_config('undogate.capability_token', %s, true)", (str(exec_token),))
+                        cur.execute("SELECT set_config('undogate.seq', '0', true)")
+                        
+                        from undogate.sql.classify import extract_tables_from_ast, check_sensitive_columns
+                        import pglast
+                        ast = pglast.parse_sql(sql_to_execute)
+                        tables = extract_tables_from_ast(ast)
+                        
+                        sens_cols = check_sensitive_columns(ast)
+                        if sens_cols:
+                            raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
+                        
+                        for schema, table in tables:
+                            if schema in ('undogate', 'undogate_trash', 'information_schema', 'pg_catalog'):
+                                raise Exception(f"Direct DML on system schema {schema} is forbidden.")
+                            cur.execute(sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE;").format(sql.Identifier(schema), sql.Identifier(table)))
+                            
+                            cur.execute("""
+                                SELECT 
+                                    c.oid AS table_oid, 
+                                    r.table_oid AS reg_oid, 
+                                    r.pk_column, 
+                                    t.tgenabled, 
+                                    t.tgtype, 
+                                    t.tgattr, 
+                                    t.tgqual, 
+                                    t.tgfoid, 
+                                    p.oid AS expected_foid,
+                                    a.attname AS pk_exists,
+                                    (
+                                        SELECT a2.attname
+                                        FROM pg_index i 
+                                        JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[0]
+                                        WHERE i.indrelid = c.oid AND i.indisprimary AND i.indnatts = 1
+                                    ) AS actual_pk_column
+                                FROM pg_class c 
+                                JOIN pg_namespace n ON n.oid = c.relnamespace
+                                LEFT JOIN undogate.registered_tables r ON r.schema_name = n.nspname AND r.table_name = c.relname
+                                LEFT JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = 'undogate_capture'
+                                LEFT JOIN pg_proc p ON p.proname = 'capture_row_change' AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'undogate') AND p.pronargs = 0
+                                LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = r.pk_column AND a.attnum > 0 AND NOT a.attisdropped
+                                WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'
+                            """, (schema, table))
+                            row2 = cur.fetchone()
+                            
+                            if not row2: raise Exception(f"Table {schema}.{table} does not exist.")
+                            
+                            (c_oid, r_table_oid, pk_column, tgenabled, tgtype, tgattr, tgqual, tgfoid, expected_foid, pk_exists, actual_pk_column) = row2
+                            
+                            if r_table_oid is None:
+                                raise Exception(f"Table {schema}.{table} is not registered for mutation.")
+                            if c_oid != r_table_oid:
+                                raise Exception(f"Registration mismatch for {schema}.{table}: OID has changed.")
+                            
+                            if pk_exists is None:
+                                raise Exception(f"Primary key column '{pk_column}' does not exist on table {schema}.{table}.")
+                                
+                            if actual_pk_column is None:
+                                raise Exception(f"Table {schema}.{table} must have exactly one single-column primary key.")
+                            if actual_pk_column != pk_column:
+                                raise Exception(f"Registered primary key '{pk_column}' does not match actual primary key '{actual_pk_column}' on table {schema}.{table}.")
+                            
+                            if tgenabled is None:
+                                raise Exception(f"Trigger missing on {schema}.{table}.")
+                            tge = tgenabled.decode('utf-8') if isinstance(tgenabled, bytes) else str(tgenabled)
+                            if tge not in ('O', 'A'):
+                                raise Exception(f"Trigger disabled or replica-only on {schema}.{table}.")
+                            
+                            if tgfoid != expected_foid or expected_foid is None:
+                                raise Exception(f"Trigger function OID mismatch for {schema}.{table}. Suspected spoofing.")
+                            
+                            if tgtype != 29:
+                                raise Exception(f"Trigger type mismatch on {schema}.{table}. Expected AFTER EACH ROW INSERT/UPDATE/DELETE.")
+                                
+                            if tgqual is not None:
+                                raise Exception(f"Trigger condition (WHEN) is not allowed on {schema}.{table}.")
+                                
+                            if tgattr and str(tgattr) != '' and str(tgattr) != 'b\'\'':
+                                raise Exception(f"Trigger column restrictions (UPDATE OF) are not allowed on {schema}.{table}.")
+                            
+                        cur.execute(sql_to_execute)
                         if cur.description:
                             columns = [desc[0] for desc in cur.description]
-                            rows = cur.fetchmany(100) # Row limit
+                            rows = cur.fetchmany(100)
                             fetched_data = self._mask_and_sanitize_rows(columns, rows)
-                        return ExecutionResult(status="applied", message="Read successful", data=fetched_data, rows_affected=cur.rowcount)
-                    except Exception as e:
-                        return ExecutionResult(status="failed", message=str(e))
+                                
+                        rows_affected = max(cur.rowcount, 0)
+                        cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
+                        execution_completed = True
+        except Exception as e:
+            error_msg = str(e)
+            
+        if error_msg:
+            if execution_completed:
+                return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="outcome_unknown", message="Network failure during commit. Checkpoint state is unknown.")
+            
+            try:
+                with psycopg.connect(self.dsn, autocommit=True) as fail_conn:
+                    with fail_conn.cursor() as fail_cur:
+                        fail_cur.execute("SELECT undogate.fail_checkpoint(%s)", (public_id,))
+            except Exception:
+                pass 
+                
+            from undogate.audit import emit_audit_event
+            emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "failed", rows=0)
+            safe_error_msg = error_msg if "exec_token" not in error_msg else "An error occurred during execution."
+            return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="failed", message=safe_error_msg)
 
-        with self.pool.connection() as conn:
+        from undogate.audit import emit_audit_event
+        emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "applied", [], rows_affected)
+        return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, rows_affected=rows_affected, status="applied", message="Success", data=fetched_data)
 
+    def _execute_internal(self, sql_to_execute: str, classification: str, decision: str, agent_label: str):
+        import psycopg
+        
+        with psycopg.connect(self.dsn, autocommit=False) as conn:
             with conn.cursor() as cur:
-                # Begin new checkpoint
                 cur.execute(
-                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s)",
-                    (eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label)
+                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s)",
+                    (sql_to_execute, classification, agent_label)
                 )
                 row = cur.fetchone()
                 cp_id = row[0]
                 public_id = row[1]
                 
+                cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                exec_token = cur.fetchone()[0]
                 conn.commit()
-                conn.commit()
-                
-                return self._execute_internal(conn, cur, cp_id, public_id, eval_result.statement.sql)
 
-                
-    def _execute_internal(self, conn, cur, cp_id, public_id, sql_to_execute) -> ExecutionResult:
-        try:
-            # Claim the checkpoint to get the execution token
-            cur.execute("SELECT undogate.claim_checkpoint(%s)", (public_id,))
-            exec_token = cur.fetchone()[0]
-            
-            # Set the local configuration for the transaction so triggers know the cp_id and token
-            cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
-            cur.execute("SELECT set_config('undogate.exec_token', %s, true)", (str(exec_token),))
-            cur.execute("SELECT set_config('undogate.seq', '0', true)")
+        return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
 
-            
-            # Enforce Registration and Lock
-            from undogate.sql.classify import extract_tables_from_ast
-            import pglast
-            ast = pglast.parse_sql(sql_to_execute)
-            tables = extract_tables_from_ast(ast)
-            
-            for schema, table in tables:
-                if schema in ('undogate', 'undogate_trash', 'information_schema', 'pg_catalog'):
-                    raise Exception(f"Direct DML on system schema {schema} is forbidden.")
-                
-                # Lock the table to prevent DDL races
-                cur.execute(sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE;").format(sql.Identifier(schema), sql.Identifier(table)))
-                
-                # Verify registration OID and Trigger exact properties
-                cur.execute("""
-                    SELECT c.oid, r.table_oid, r.pk_column,
-                           t.tgenabled, p.proname, np.nspname as func_schema, t.tgtype
-                    FROM pg_class c
-                    JOIN pg_namespace n ON n.oid = c.relnamespace
-                    LEFT JOIN undogate.registered_tables r 
-                        ON r.schema_name = n.nspname AND r.table_name = c.relname
-                    LEFT JOIN pg_trigger t
-                        ON t.tgrelid = c.oid AND t.tgname = 'undogate_capture'
-                    LEFT JOIN pg_proc p ON p.oid = t.tgfoid
-                    LEFT JOIN pg_namespace np ON np.oid = p.pronamespace
-                    WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'
-                """, (schema, table))
+    def execute_pending(self, public_id: str):
+        import psycopg
+        
+        
+        with psycopg.connect(self.dsn, autocommit=False) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, sql_text, status FROM undogate.get_pending_checkpoint(%s)", (public_id,))
                 row = cur.fetchone()
                 if not row:
-                    raise Exception(f"Table {schema}.{table} does not exist.")
-                actual_oid, reg_oid, pk_col, tg_enabled, tg_func, func_schema, tg_type = row
-                
-                if reg_oid is None:
-                    raise Exception(f"Table {schema}.{table} is not registered in Undogate.")
-                if actual_oid != reg_oid:
-                    raise Exception(f"Table {schema}.{table} OID mismatch. It may have been dropped and recreated. Re-register required.")
-                if tg_func != 'capture_row_change' or func_schema != 'undogate':
-                    raise Exception(f"Table {schema}.{table} missing or invalid capture trigger function. Must be undogate.capture_row_change.")
-                if tg_enabled == 'D':
-                    raise Exception(f"Table {schema}.{table} capture trigger is disabled.")
-                
-                # Check tgtype: AFTER (2), INSERT (4), DELETE (8), UPDATE (16) => 2 | 4 | 8 | 16 = 30.
-                # But it's FOR EACH ROW (1). So tgtype must contain these bits.
-                # Bit 1 (0x01) = ROW, Bit 2 (0x02) = BEFORE, Bit 64 (0x40) = INSTEAD OF
-                if not (tg_type & 1) or (tg_type & 2) or (tg_type & 64):
-                    raise Exception(f"Table {schema}.{table} trigger is not AFTER EACH ROW.")
-                    
-                # Verify PK column exists AND has a unique/primary key constraint
-                cur.execute("""
-                    SELECT 1
-                    FROM pg_constraint con
-                    JOIN pg_attribute a ON a.attnum = ANY(con.conkey) AND a.attrelid = con.conrelid
-                    WHERE con.conrelid = %s AND a.attname = %s AND con.contype IN ('p', 'u')
-                """, (actual_oid, pk_col))
-                if not cur.fetchone():
-                    raise Exception(f"Registered PK column {pk_col} does not have a valid Primary Key or Unique constraint on table {schema}.{table}.")
-                    
-            ddl_undo_plan = []
+                    return ExecutionResult(status="failed", message="Token not found.")
+                cp_id, sql_to_execute, status = row
+                if status != "pending":
+                    return ExecutionResult(status="failed", message=f"Checkpoint status is {status}, not pending.")
 
-            skip_execution = False
+                from undogate.sentinel import AISentinel
+                safe, reason = AISentinel()._ast_firewall(sql_to_execute)
+                if not safe:
+                    cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+                    conn.commit()
+                    return ExecutionResult(status="denied", message=f"Hard Gate Denied: {reason}")
 
-            # We must parse again to find DDL reversible objects if any
-            ast = pglast.parse_sql(sql_to_execute)
-            
-            from undogate.sql.classify import check_sensitive_columns
-            sens_cols = check_sensitive_columns(ast)
-            if sens_cols:
-                raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
+                cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                exec_token = cur.fetchone()[0]
+                conn.commit()
 
-            for stmt_dict in ast:
-                stmt = stmt_dict.stmt
-                stmt_type = type(stmt).__name__
-                
-                if stmt_type == "DropStmt":
-                    schema = "public"
-                    table_name = stmt.objects[0][0].sval
-                    if len(stmt.objects[0]) > 1:
-                        schema = stmt.objects[0][0].sval
-                        table_name = stmt.objects[0][1].sval
-                        
-                    plan = handle_drop_table(cur, schema, table_name, public_id)
-                    ddl_undo_plan.append(plan)
-                    skip_execution = True 
-                    
-                elif stmt_type == "TruncateStmt":
-                    table_name = stmt.relations[0].relname
-                    schema = stmt.relations[0].schemaname or "public"
-                    plan = handle_truncate(cur, schema, table_name, public_id)
-                    ddl_undo_plan.append(plan)
-                    
-                elif stmt_type == "AlterTableStmt":
-                    table_name = stmt.relation.relname
-                    schema = stmt.relation.schemaname or "public"
-                    for cmd in stmt.cmds:
-                        if type(cmd).__name__ == "AlterTableCmd" and cmd.subtype == pglast.enums.AlterTableType.AT_DropColumn:
-                            col_name = cmd.name
-                            plan = handle_drop_column(cur, schema, table_name, col_name, public_id)
-                            ddl_undo_plan.append(plan)
+        return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
 
-            if ddl_undo_plan:
-                cur.execute("UPDATE undogate.checkpoints SET ddl_undo_plan = %s WHERE id = %s", (json.dumps(ddl_undo_plan), cp_id))
+    def check_status(self, public_id: str) -> str:
+        import psycopg
+        try:
+            with psycopg.connect(self.dsn, autocommit=True) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT undogate.check_checkpoint_status(%s)", (public_id,))
+                    return cur.fetchone()[0]
+        except psycopg.OperationalError:
+            return "outcome_unknown"
 
-            fetched_data = None
-            if not skip_execution:
-                cur.execute("SET LOCAL statement_timeout = '5s'")
-                cur.execute(sql_to_execute)
-                if cur.description:
-                    columns = [desc[0] for desc in cur.description]
-                    rows = cur.fetchmany(100)
-                    fetched_data = self._mask_and_sanitize_rows(columns, rows)
-
-                
-            rows_affected = max(cur.rowcount, 0)
-            
-            # Finish checkpoint
-            cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (public_id, rows_affected))
-            
-            conn.commit()
-            
-            # Audit Stream
-            from undogate.audit import emit_audit_event
-            emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "applied", ddl_undo_plan, rows_affected)
-            
-            return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, rows_affected=rows_affected, status="applied", message="Success", data=fetched_data)
-            
-        except Exception as e:
-            conn.rollback()
-            # Mark checkpoint as failed
-            with psycopg.connect(self.dsn, autocommit=True) as fail_conn:
-                with fail_conn.cursor() as fail_cur:
-                    fail_cur.execute("SELECT undogate.fail_checkpoint(%s)", (public_id,))
-
-            
-            # Audit Stream
-            from undogate.audit import emit_audit_event
-            emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "failed", rows=0)
-                    
-            return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="failed", message=str(e))

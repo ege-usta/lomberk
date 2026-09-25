@@ -41,12 +41,33 @@ async def lifespan(app: FastAPI):
     _ADMIN_KEY = admin_key
         
     try:
-        _executor_instance = UndogateExecutor(dsn)
+        admin_dsn = os.environ.get(config.database.admin_dsn_env)
+        if not admin_dsn:
+            raise ValueError('Startup Refusal: Admin DSN missing')
+            
+        import psycopg
+        with psycopg.connect(admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)")
+                control_user, control_super = cur.fetchone()
+                
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)")
+                runtime_user, runtime_super = cur.fetchone()
+                
+        if control_user == runtime_user:
+            raise ValueError("Startup Refusal: Admin DSN and Agent DSN must resolve to distinct database roles.")
+        if control_super:
+            raise ValueError("Startup Refusal: Admin role must not be a superuser.")
+        if runtime_super:
+            raise ValueError("Startup Refusal: Agent role must not be a superuser.")
+            
+        _executor_instance = UndogateExecutor(admin_dsn, dsn)
         _policy_engine_instance = PolicyEngine(config)
         yield
     finally:
-        if _executor_instance and hasattr(_executor_instance, 'pool'):
-            _executor_instance.pool.close()
+        pass
         _executor_instance = None
         _policy_engine_instance = None
 
@@ -121,13 +142,33 @@ def list_pending_checkpoints(
     api_key: str = Depends(verify_admin_key),
     executor: UndogateExecutor = Depends(get_executor)
 ):
-    with executor.pool.connection() as conn:
+    import psycopg
+    with psycopg.connect(executor.dsn) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, public_id, sql_text, agent_label, created_at FROM undogate.checkpoints WHERE status = 'pending'")
+            cur.execute("SELECT id, public_id, sql_text, agent_label, created_at FROM undogate.list_pending_checkpoints()")
             rows = cur.fetchall()
             return [{"id": r[0], "public_id": r[1], "sql": r[2], "agent": r[3], "created_at": r[4]} for r in rows]
 
+
+@app.get("/v1/checkpoints/{public_id}/status")
+def check_checkpoint_status(
+    public_id: str,
+    api_key: str = Depends(verify_admin_key),
+    executor: UndogateExecutor = Depends(get_executor)
+):
+    try:
+        status = executor.check_status(public_id)
+        if status == "not_found":
+            raise HTTPException(status_code=404, detail="Token not found")
+        return {"public_id": public_id, "status": status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=502, content={"status": "outcome_unknown", "message": "Database unreachable"})
+
 @app.post("/v1/checkpoints/{public_id}/approve")
+
 def approve_checkpoint(
     public_id: str, 
     api_key: str = Depends(verify_admin_key),
@@ -139,6 +180,9 @@ def approve_checkpoint(
             return {"status": "approved", "rows_affected": res.rows_affected}
         elif res.status == "denied":
             return {"status": "denied", "message": res.message}
+        elif res.status == "outcome_unknown":
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=502, content={"status": "outcome_unknown", "message": res.message, "public_id": res.public_id})
         elif res.status == "failed":
             raise HTTPException(status_code=400, detail=res.message)
         else:
@@ -154,7 +198,8 @@ def reject_checkpoint(
     api_key: str = Depends(verify_admin_key),
     executor: UndogateExecutor = Depends(get_executor)
 ):
-    with executor.pool.connection() as conn:
+    import psycopg
+    with psycopg.connect(executor.dsn) as conn:
         with conn.cursor() as cur:
             try:
                 cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
