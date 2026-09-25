@@ -1,4 +1,7 @@
 import sys
+with open("undogate.yaml", "w") as f:
+    f.write("limits:\n  max_rows_without_approval: 0\nprotected_tables:\n  - public.users\n")
+
 import uuid
 import psycopg
 import json
@@ -23,6 +26,8 @@ class HTTPConflict(Exception):
     pass
 
 def run_pilot():
+    with open("undogate.yaml", "w") as f:
+        f.write("limits:\n  max_rows_without_approval: 0\nprotected_tables:\n  - public.users\n")
     logger.info("Starting local pilot...")
     
     postgres = PostgresContainer("postgres:16-alpine")
@@ -40,12 +45,12 @@ def run_pilot():
         install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
         
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute("CREATE TABLE public.pilot_users (id SERIAL PRIMARY KEY, email TEXT NOT NULL)")
-            cur.execute("CREATE TABLE public.pilot_unprotected (id SERIAL PRIMARY KEY, email TEXT NOT NULL)")
+            cur.execute("CREATE TABLE public.users (id SERIAL PRIMARY KEY, data TEXT NOT NULL)")
+            cur.execute("CREATE TABLE public.pilot_unprotected (id SERIAL PRIMARY KEY, data TEXT NOT NULL)")
             cur.execute("GRANT ALL ON SCHEMA public TO mcp_agent")
             cur.execute("GRANT ALL ON ALL TABLES IN SCHEMA public TO mcp_agent")
             cur.execute("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO mcp_agent")
-            cur.execute("SELECT undogate.register_table('public', 'pilot_users', 'id', 'mcp_agent')")
+            cur.execute("SELECT undogate.register_table('public', 'users', 'id', 'mcp_agent')")
             cur.execute("SELECT undogate.register_table('public', 'pilot_unprotected', 'id', 'mcp_agent')")
             
         os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
@@ -85,18 +90,18 @@ def run_pilot():
 
             logger.info("--- SCENARIO 1: Approval Required & Recovery ---")
             op1 = str(uuid.uuid4())
-            res1 = execute_sql("INSERT INTO public.pilot_users (email) VALUES ('a@a.com'), ('b@b.com')", op1)
+            res1 = execute_sql("INSERT INTO public.users (data) VALUES ('a'), ('b')", op1)
             assert_eq(res1.status, "approval_required", "S1 status should be approval_required")
             pub_id1 = res1.resume_id
             
             res_appr = client.post(f"/v1/checkpoints/{pub_id1}/approve", headers={"X-API-Key": "admin-key"}, json={"decision": "ALLOW"})
             assert_eq(res_appr.json()["status"], "approved", "S1 admin approve should be approved")
             
-            res1_retry = execute_sql("INSERT INTO public.pilot_users (email) VALUES ('a@a.com'), ('b@b.com')", op1)
+            res1_retry = execute_sql("INSERT INTO public.users (data) VALUES ('a'), ('b')", op1)
             assert_eq(res1_retry.status, "applied", "S1 retry should be applied")
             
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-                cur.execute("SELECT count(*) FROM public.pilot_users")
+                cur.execute("SELECT count(*) FROM public.users")
                 assert_eq(cur.fetchone()[0], 2, "S1 exactly 2 rows inserted")
 
             logger.info("--- SCENARIO 2: Runtime Commit Loss ---")
@@ -115,7 +120,7 @@ def run_pilot():
             op2 = str(uuid.uuid4())
             
             try:
-                res_first = execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('c@c.com')", op2)
+                res_first = execute_sql("INSERT INTO public.pilot_unprotected (data) VALUES ('c@c.com')", op2)
                 
                 pub_id2 = res_first.resume_id
             except TransientError:
@@ -126,7 +131,7 @@ def run_pilot():
             with psycopg.connect(dsn) as check_conn, check_conn.cursor() as check_cur:
                 check_cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pub_id2,))
                 
-            res2 = execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('c@c.com')", op2)
+            res2 = execute_sql("INSERT INTO public.pilot_unprotected (data) VALUES ('c@c.com')", op2)
             assert_eq(res2.status, "applied", "S2 recovered status should be applied")
 
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
@@ -148,12 +153,12 @@ def run_pilot():
             psycopg.Transaction.__exit__ = patched_exit_cp
             op3 = str(uuid.uuid4())
             try:
-                execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('d@d.com')", op3)
+                execute_sql("INSERT INTO public.pilot_unprotected (data) VALUES ('d@d.com')", op3)
             except TransientError:
                 pass
                 
             psycopg.Transaction.__exit__ = original_exit
-            res3 = execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('d@d.com')", op3)
+            res3 = execute_sql("INSERT INTO public.pilot_unprotected (data) VALUES ('d@d.com')", op3)
             assert_eq(res3.status, "approved", "S3 recovered CP status should be approved, NOT applied")
 
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
@@ -164,7 +169,7 @@ def run_pilot():
                 
             logger.info("--- SCENARIO 4: Conflicts & Errors ---")
             try:
-                execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('e@e.com')", op3)
+                execute_sql("INSERT INTO public.pilot_unprotected (data) VALUES ('e@e.com')", op3)
                 logger.error("S4 Should have raised Conflict")
                 sys.exit(1)
             except Exception as e:
@@ -172,7 +177,7 @@ def run_pilot():
                 
             logger.info("--- SCENARIO 5: Unauthorized Action ---")
             try:
-                execute_sql("INSERT INTO public.pilot_unprotected (email) VALUES ('f@f.com')", str(uuid.uuid4()), use_auth=False)
+                execute_sql("INSERT INTO public.pilot_unprotected (data) VALUES ('f@f.com')", str(uuid.uuid4()), use_auth=False)
                 logger.error("S5 Should have raised Unauthorized")
                 sys.exit(1)
             except ValueError as e:
@@ -192,7 +197,7 @@ def run_pilot():
                 sys.exit(1)
                 
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-                cur.execute("SELECT email FROM public.pilot_unprotected WHERE email = 'c@c.com'")
+                cur.execute("SELECT data FROM public.pilot_unprotected WHERE data = 'c@c.com'")
                 row = cur.fetchone()
                 assert_eq(row, None, "S6 Source row should be deleted (undone)")
                 

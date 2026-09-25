@@ -1,2 +1,4 @@
+limits:
+  max_rows_without_approval: 0
 protected_tables:
   - public.users
