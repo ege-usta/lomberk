@@ -30,6 +30,16 @@ _ADMIN_KEY = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _slack_transport_instance
+    
+    # Local registry ownership for safe and strict shutdown drainage
+    local_db_workers = set()
+    local_shutdown_event = asyncio.Event()
+    
+    # Still attach to app.state for testing and observability, 
+    # but internal processing strictly uses the local references.
+    app.state._db_workers = local_db_workers
+    app.state._shutdown_event = local_shutdown_event
+    
     config = load_config()
     dsn = os.environ.get(config.database.agent_dsn_env)
     
@@ -99,29 +109,23 @@ async def lifespan(app: FastAPI):
                 from undogate.slack_transport import SlackTransport
                 from slack_sdk.socket_mode.aiohttp import SocketModeClient
                 from slack_sdk.web.async_client import AsyncWebClient
-                import asyncio
-                
-                # Capture fixed references to avoid None during shutdown
-                _db_workers = set()
-                app.state._db_workers = _db_workers  # expose for testing
-                app.state._shutdown_event = asyncio.Event()
-                
-                def make_callbacks(executor, policy, resolver, updater):
+                # Bind local registry to callbacks
+                def make_callbacks(executor, policy, resolver, updater, workers_set, shutdown_evt):
                     async def resolve_cb(team, channel, ts):
                         return await resolver(team, channel, ts)
                     
                     async def _run_tracked(func, *args):
-                        if app.state._shutdown_event.is_set():
+                        if shutdown_evt.is_set():
                             from undogate.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("Server is shutting down. Rejecting new DB workers.")
-                        if len(_db_workers) >= 50:
+                        if len(workers_set) >= 50:
                             from undogate.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("DB worker capacity exceeded. Server is busy.")
                         
                         t = asyncio.create_task(asyncio.to_thread(func, *args))
-                        _db_workers.add(t)
+                        workers_set.add(t)
                         def _done_cb(fut):
-                            _db_workers.discard(fut)
+                            workers_set.discard(fut)
                             if not fut.cancelled() and fut.exception():
                                 logger.error(f"Background DB worker failed: {type(fut.exception()).__name__}")
                         t.add_done_callback(_done_cb)
@@ -150,7 +154,7 @@ async def lifespan(app: FastAPI):
                     return resolve_cb, status_cb, approve_cb, reject_cb, update_cb
                 
                 resolve_cb, status_cb, approve_cb, reject_cb, update_cb = make_callbacks(
-                    _executor_instance, _policy_engine_instance, slack_resolver, slack_update_cb
+                    _executor_instance, _policy_engine_instance, slack_resolver, slack_update_cb, local_db_workers, local_shutdown_event
                 )
                 
                 adapter = SlackInteractionAdapter(
@@ -186,17 +190,15 @@ async def lifespan(app: FastAPI):
 
         yield
     finally:
-        if getattr(app.state, "_shutdown_event", None):
-            app.state._shutdown_event.set()
+        local_shutdown_event.set()
 
         if _slack_transport_instance:
             await _slack_transport_instance.disconnect()
             _slack_transport_instance = None
             
-        _db_workers = getattr(app.state, "_db_workers", set())
-        if _db_workers:
-            logger.info(f"Draining {len(_db_workers)} outstanding DB workers...")
-            done, pending = await asyncio.wait(_db_workers, timeout=5.0)
+        if local_db_workers:
+            logger.info(f"Draining {len(local_db_workers)} outstanding DB workers...")
+            done, pending = await asyncio.wait(local_db_workers, timeout=5.0)
             if pending:
                 logger.error(f"Shutdown timeout: {len(pending)} DB workers remain outstanding/unknown.")
             

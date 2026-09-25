@@ -500,7 +500,6 @@ async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, mon
 
 @pytest.mark.asyncio
 async def test_api_worker_tracking_capacity_and_exception(setup_db, auth_and_config, monkeypatch, caplog):
-    # Test strict worker capacity (max 50) and detached exception logging
     import undogate.api
     import logging
     monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
@@ -518,56 +517,69 @@ async def test_api_worker_tracking_capacity_and_exception(setup_db, auth_and_con
     app.state.slack_client_factory = lambda token: MagicMock(connect=AsyncMock(), close=AsyncMock(), socket_mode_request_listeners=[])
     
     async with undogate.api.lifespan(app):
-        # Fill capacity manually (max 50)
+        from undogate.slack import TaskCapacityExceededError
         import threading
+        
         release_event = threading.Event()
         
         def hanging_execute(*args):
-            release_event.wait()
+            release_event.wait(timeout=5.0)
+            if args[0] == "cp_new":
+                return MagicMock(status="applied")
             raise ValueError("Test detached exception")
             
         monkeypatch.setattr(undogate.api._executor_instance, "execute_pending", hanging_execute)
         
         adapter = undogate.api._slack_transport_instance.business_adapter
         
-        # Start 50 workers
         tasks = []
-        for i in range(50):
-            t = asyncio.create_task(adapter.approve_callback(f"cp_{i}"))
-            tasks.append(t)
+        try:
+            # Start 50 workers
+            for i in range(50):
+                tasks.append(asyncio.create_task(adapter.approve_callback(f"cp_{i}")))
+                
+            # Allow event loop to schedule them
+            await asyncio.sleep(0.05)
             
-        # Give them a moment to start
-        await asyncio.sleep(0.05)
+            # Assert capacity is strictly full
+            assert len(app.state._db_workers) == 50
+            
+            with pytest.raises(TaskCapacityExceededError):
+                await adapter.approve_callback("cp_50")
+                
+            with pytest.raises(TaskCapacityExceededError):
+                await adapter.status_callback("cp_50")
+                
+            # Cancel callers
+            for t in tasks: t.cancel()
+            await asyncio.sleep(0.01) # let cancellation propagate
+            
+            # Registry MUST still be full
+            assert len(app.state._db_workers) == 50
+            
+            with pytest.raises(TaskCapacityExceededError):
+                await adapter.approve_callback("cp_50")
+                
+        finally:
+            # Release workers inside finally
+            release_event.set()
+                
+            # Wait for internal worker completion
+            for _ in range(50):
+                if len(app.state._db_workers) == 0: break
+                await asyncio.sleep(0.01)
+                
+            for t in tasks:
+                try: await t
+                except asyncio.CancelledError: pass
+                
+        # Registry must be completely zeroed
+        assert len(app.state._db_workers) == 0
         
-        # Now capacity is full. Next one should fail with TaskCapacityExceededError
-        with pytest.raises(Exception, match="DB worker capacity exceeded"):
-            await adapter.approve_callback("cp_50")
-            
-        # Same for status_cb
-        with pytest.raises(Exception, match="DB worker capacity exceeded"):
-            await adapter.status_callback("cp_50")
-            
-        # Caller cancel does NOT free capacity instantly
-        for t in tasks:
-            t.cancel()
-            
-        # Let cancel propagate
-        await asyncio.sleep(0.05)
+        # Test subsequent working request
+        res = await adapter.approve_callback("cp_new")
+        assert res == {"status": "applied"}
         
-        # Capacity is STILL full because workers are stuck on release_event
-        with pytest.raises(Exception, match="DB worker capacity exceeded"):
-            await adapter.approve_callback("cp_50")
-            
-        # Release workers
-        release_event.set()
-        await asyncio.sleep(0.05)
-        
-        # Capacity is now freed. Next one works
-        with pytest.raises(Exception):
-            # because execute_pending will raise ValueError, but it won't be CapacityExceeded
-            # Wait, execute_pending raises ValueError ("Test detached exception"), but we run_in_executor
-            await adapter.approve_callback("cp_50")
-            
-        # Verify detached exception logging
+        # Verify exception from detached task was cleanly consumed
         assert "Background DB worker failed: ValueError" in caplog.text
 
