@@ -112,7 +112,7 @@ class SlackInteractionAdapter:
                     final_state = await self.status_callback(public_id)
                     if final_state == "applied": msg = f":white_check_mark: Checkpoint {public_id} successfully applied."
                     elif final_state == "approved": msg = f":white_check_mark: Checkpoint {public_id} approved, pending execution verification."
-                    elif final_state == "denied": msg = f":x: Checkpoint {public_id} was rejected."
+                    elif final_state in ("denied", "rejected"): msg = f":x: Checkpoint {public_id} was rejected."
                     elif final_state == "undone": msg = f":rewind: Checkpoint {public_id} undone."
                     else: msg = f":hourglass_flowing_sand: Checkpoint {public_id} status is {final_state}, pending verification."
                     await self._safe_slack_update(channel_id, message_ts, msg)

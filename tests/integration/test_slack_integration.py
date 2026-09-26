@@ -583,3 +583,142 @@ async def test_api_worker_tracking_capacity_and_exception(setup_db, auth_and_con
         # Verify exception from detached task was cleanly consumed
         assert "Background DB worker failed: ValueError" in caplog.text
 
+
+@pytest.mark.asyncio
+async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatch, caplog):
+    # -------------------------------------------------------------------
+    # Offline Pilot Runbook Test
+    # -------------------------------------------------------------------
+    import undogate.api
+    import asyncio
+    import os
+    import uuid
+    from undogate.api import app
+    from fastapi.testclient import TestClient
+    from unittest.mock import AsyncMock, MagicMock
+    from undogate.policy import PolicyDecision
+
+    monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
+    monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake_app_token")
+    monkeypatch.setenv("UNDOGATE_SLACK_BOT_TOKEN", "fake_bot_token")
+
+    config = undogate.config.load_config()
+    config.slack.admin_allowlist = ["U_ADMIN"]
+    config.slack.team_allowlist = ["T_VALID"]
+    monkeypatch.setattr(undogate.api, "load_config", lambda: config)
+
+    binding_store = {}
+    async def mock_resolver(team_id: str, channel_id: str, message_ts: str):
+        return binding_store.get((team_id, channel_id, message_ts))
+
+    updater_mock = AsyncMock()
+
+    app.state.slack_target_resolver = mock_resolver
+    app.state.slack_update_callback = updater_mock
+
+    fake_socket_client = MagicMock()
+    fake_socket_client.connect = AsyncMock()
+    fake_socket_client.close = AsyncMock()
+    fake_socket_client.socket_mode_request_listeners = []
+    app.state.slack_client_factory = lambda token: fake_socket_client
+
+    import psycopg
+    admin_dsn = os.environ.get("UNDOGATE_ADMIN_DSN")
+    
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS public.test_e2e (id int PRIMARY KEY);")
+        cur.execute("SELECT undogate.register_table('public', 'test_e2e', 'id', 'mcp_agent');")
+        cur.execute("GRANT ALL PRIVILEGES ON public.test_e2e TO mcp_agent, undogate_control;")
+
+    client = TestClient(app)
+
+    def create_checkpoint_via_api():
+        app.dependency_overrides[undogate.api.get_policy_engine] = lambda: MagicMock(
+            evaluate=lambda x: MagicMock(
+                statement=x,
+                decision=PolicyDecision.REQUIRE_APPROVAL,
+                message="mocked",
+                matched_rules=[]
+            )
+        )
+        req = {
+            "operation_id": str(uuid.uuid4()),
+            "sql": "INSERT INTO public.test_e2e VALUES (1);",
+            "agent_label": "tester"
+        }
+        res = client.post("/v1/execute", json=req, headers={"X-API-Key": "real_agent_key"})
+        assert res.status_code == 200, res.json()
+        assert res.json()["results"][0]["status"] == "approval_required", res.json()
+        return res.json()["results"][0]["checkpoint_id"]
+
+    async with undogate.api.lifespan(app):
+        transport = undogate.api._slack_transport_instance
+        adapter = transport.business_adapter
+
+        # Case 1: Normal Approve
+        pid1 = create_checkpoint_via_api()
+        binding_store[("T_VALID", "C_VALID", "TS_1")] = pid1
+        req1 = {
+            "team": {"id": "T_VALID"},
+            "user": {"id": "U_ADMIN"},
+            "container": {"channel_id": "C_VALID", "message_ts": "TS_1"},
+            "actions": [{"action_id": "approve_button", "value": pid1}],
+        }
+        await adapter.handle_interaction(req1)
+        await asyncio.sleep(0.1)
+
+        with psycopg.connect(admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pid1,))
+                assert cur.fetchone()[0] == "applied"
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM public.test_e2e")
+                assert cur.fetchone()[0] == 1
+                cur.execute("DELETE FROM public.test_e2e")
+                conn.commit()
+
+        # Case 2: Duplicate
+        await adapter.handle_interaction(req1)
+        await asyncio.sleep(0.1)
+        updater_mock.assert_called_with("C_VALID", "TS_1", f":white_check_mark: Checkpoint {pid1} successfully applied.")
+
+        # Case 3: Reject
+        pid2 = create_checkpoint_via_api()
+        binding_store[("T_VALID", "C_VALID", "TS_2")] = pid2
+        req2 = {
+            "team": {"id": "T_VALID"},
+            "user": {"id": "U_ADMIN"},
+            "container": {"channel_id": "C_VALID", "message_ts": "TS_2"},
+            "actions": [{"action_id": "reject_button", "value": pid2}],
+        }
+        await adapter.handle_interaction(req2)
+        await asyncio.sleep(0.1)
+
+        with psycopg.connect(admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pid2,))
+                assert cur.fetchone()[0] == "rejected"
+
+        updater_mock.assert_called_with("C_VALID", "TS_2", f":x: Checkpoint {pid2} was rejected.")
+
+        # Case 4: Invalid target / unauthorized
+        req3 = {
+            "team": {"id": "T_VALID"},
+            "user": {"id": "U_ADMIN"},
+            "container": {"channel_id": "C_VALID", "message_ts": "TS_UNKNOWN"},
+            "actions": [{"action_id": "approve_button", "value": "cp_unknown"}],
+        }
+        await adapter.handle_interaction(req3)
+        await asyncio.sleep(0.1)
+
+        # Case 5: Binding lost
+        pid4 = create_checkpoint_via_api()
+        req4 = {
+            "team": {"id": "T_VALID"},
+            "user": {"id": "U_ADMIN"},
+            "container": {"channel_id": "C_VALID", "message_ts": "TS_LOST"},
+            "actions": [{"action_id": "approve_button", "value": pid4}],
+        }
+        await adapter.handle_interaction(req4)
+        await asyncio.sleep(0.1)
