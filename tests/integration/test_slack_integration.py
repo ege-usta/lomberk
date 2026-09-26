@@ -597,6 +597,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     from fastapi.testclient import TestClient
     from unittest.mock import AsyncMock, MagicMock
     from undogate.policy import PolicyDecision
+    from undogate.offline_pilot import InMemoryBindingStore, OfflinePublisher, OfflineUpdater
 
     monkeypatch.setenv("UNDOGATE_SLACK_ENABLED", "true")
     monkeypatch.setenv("UNDOGATE_SLACK_APP_TOKEN", "fake_app_token")
@@ -605,16 +606,19 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     config = undogate.config.load_config()
     config.slack.admin_allowlist = ["U_ADMIN"]
     config.slack.team_allowlist = ["T_VALID"]
+    # Force real policy to block this table
+    config.protected_tables = ["public.test_e2e"]
     monkeypatch.setattr(undogate.api, "load_config", lambda: config)
+    
+    from undogate.policy import PolicyEngine
+    app.dependency_overrides[undogate.api.get_policy_engine] = lambda: PolicyEngine(config)
 
-    binding_store = {}
-    async def mock_resolver(team_id: str, channel_id: str, message_ts: str):
-        return binding_store.get((team_id, channel_id, message_ts))
+    binding_store = InMemoryBindingStore()
+    publisher = OfflinePublisher(binding_store)
+    updater = OfflineUpdater()
 
-    updater_mock = AsyncMock()
-
-    app.state.slack_target_resolver = mock_resolver
-    app.state.slack_update_callback = updater_mock
+    app.state.slack_target_resolver = binding_store.resolve
+    app.state.slack_update_callback = updater.update_message
 
     fake_socket_client = MagicMock()
     fake_socket_client.connect = AsyncMock()
@@ -628,19 +632,13 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_e2e (id int PRIMARY KEY);")
         cur.execute("SELECT undogate.register_table('public', 'test_e2e', 'id', 'mcp_agent');")
-        cur.execute("GRANT ALL PRIVILEGES ON public.test_e2e TO mcp_agent, undogate_control;")
+        # Do NOT grant to undogate_control, only mcp_agent needs DML on business table
+        cur.execute("GRANT ALL PRIVILEGES ON public.test_e2e TO mcp_agent;")
+        conn.commit()
 
     client = TestClient(app)
 
-    def create_checkpoint_via_api():
-        app.dependency_overrides[undogate.api.get_policy_engine] = lambda: MagicMock(
-            evaluate=lambda x: MagicMock(
-                statement=x,
-                decision=PolicyDecision.REQUIRE_APPROVAL,
-                message="mocked",
-                matched_rules=[]
-            )
-        )
+    async def create_and_publish_checkpoint():
         req = {
             "operation_id": str(uuid.uuid4()),
             "sql": "INSERT INTO public.test_e2e VALUES (1);",
@@ -649,60 +647,120 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         res = client.post("/v1/execute", json=req, headers={"X-API-Key": "real_agent_key"})
         assert res.status_code == 200, res.json()
         assert res.json()["results"][0]["status"] == "approval_required", res.json()
-        return res.json()["results"][0]["checkpoint_id"]
+        pid = res.json()["results"][0]["checkpoint_id"]
+        
+        # Verify completely pending and empty before action
+        with psycopg.connect(admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pid,))
+                assert cur.fetchone()[0] == "pending"
+                cur.execute("SELECT count(*) FROM undogate.row_changes WHERE checkpoint_id = (SELECT id FROM undogate.checkpoints WHERE public_id = %s)", (pid,))
+                assert cur.fetchone()[0] == 0
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM public.test_e2e")
+                assert cur.fetchone()[0] == 0
+                
+        # Publish
+        ts = await publisher.publish_checkpoint("T_VALID", "C_VALID", pid)
+        return pid, ts
 
     async with undogate.api.lifespan(app):
         transport = undogate.api._slack_transport_instance
         adapter = transport.business_adapter
 
+        # ---------------------------------------------------------
         # Case 1: Normal Approve
-        pid1 = create_checkpoint_via_api()
-        binding_store[("T_VALID", "C_VALID", "TS_1")] = pid1
+        # ---------------------------------------------------------
+        pid1, ts1 = await create_and_publish_checkpoint()
         req1 = {
             "team": {"id": "T_VALID"},
             "user": {"id": "U_ADMIN"},
-            "container": {"channel_id": "C_VALID", "message_ts": "TS_1"},
+            "container": {"channel_id": "C_VALID", "message_ts": ts1},
             "actions": [{"action_id": "approve_button", "value": pid1}],
         }
         await adapter.handle_interaction(req1)
-        await asyncio.sleep(0.1)
+        # Wait for update
+        update = await updater.wait_for_update(timeout=2.0)
+        assert update is not None
+        assert f"successfully applied" in update[2]
 
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pid1,))
                 assert cur.fetchone()[0] == "applied"
+                cur.execute("SELECT count(*) FROM undogate.row_changes WHERE checkpoint_id = (SELECT id FROM undogate.checkpoints WHERE public_id = %s)", (pid1,))
+                assert cur.fetchone()[0] == 1
         with psycopg.connect(dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM public.test_e2e")
                 assert cur.fetchone()[0] == 1
+
+        # ---------------------------------------------------------
+        # Case 2: Duplicate
+        # ---------------------------------------------------------
+        # Duplicate A: Exact same envelope
+        await adapter.handle_interaction(req1)
+        update_dup = await updater.wait_for_update(timeout=2.0)
+        assert update_dup is not None
+        assert f"successfully applied" in update_dup[2]
+        
+        # Duplicate B: Different envelope, same button value
+        req1b = {
+            "team": {"id": "T_VALID"},
+            "user": {"id": "U_ADMIN"},
+            "container": {"channel_id": "C_VALID", "message_ts": ts1}, # TS doesn't matter much for duplicate if public_id is same
+            "actions": [{"action_id": "approve_button", "value": pid1}],
+        }
+        await adapter.handle_interaction(req1b)
+        update_dup2 = await updater.wait_for_update(timeout=2.0)
+        assert update_dup2 is not None
+
+        # Verify absolutely no new row or capture
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM public.test_e2e")
+                assert cur.fetchone()[0] == 1
+        with psycopg.connect(admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM undogate.row_changes WHERE checkpoint_id = (SELECT id FROM undogate.checkpoints WHERE public_id = %s)", (pid1,))
+                assert cur.fetchone()[0] == 1
+
+        # Cleanup for next cases
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
                 cur.execute("DELETE FROM public.test_e2e")
                 conn.commit()
 
-        # Case 2: Duplicate
-        await adapter.handle_interaction(req1)
-        await asyncio.sleep(0.1)
-        updater_mock.assert_called_with("C_VALID", "TS_1", f":white_check_mark: Checkpoint {pid1} successfully applied.")
-
+        # ---------------------------------------------------------
         # Case 3: Reject
-        pid2 = create_checkpoint_via_api()
-        binding_store[("T_VALID", "C_VALID", "TS_2")] = pid2
+        # ---------------------------------------------------------
+        pid2, ts2 = await create_and_publish_checkpoint()
         req2 = {
             "team": {"id": "T_VALID"},
             "user": {"id": "U_ADMIN"},
-            "container": {"channel_id": "C_VALID", "message_ts": "TS_2"},
+            "container": {"channel_id": "C_VALID", "message_ts": ts2},
             "actions": [{"action_id": "reject_button", "value": pid2}],
         }
         await adapter.handle_interaction(req2)
-        await asyncio.sleep(0.1)
+        update = await updater.wait_for_update(timeout=2.0)
+        assert update is not None
+        assert f"rejected" in update[2]
 
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pid2,))
                 assert cur.fetchone()[0] == "rejected"
+                cur.execute("SELECT count(*) FROM undogate.row_changes WHERE checkpoint_id = (SELECT id FROM undogate.checkpoints WHERE public_id = %s)", (pid2,))
+                assert cur.fetchone()[0] == 0
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM public.test_e2e")
+                assert cur.fetchone()[0] == 0
 
-        updater_mock.assert_called_with("C_VALID", "TS_2", f":x: Checkpoint {pid2} was rejected.")
-
+        # ---------------------------------------------------------
         # Case 4: Invalid target / unauthorized
+        # ---------------------------------------------------------
         req3 = {
             "team": {"id": "T_VALID"},
             "user": {"id": "U_ADMIN"},
@@ -710,15 +768,30 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
             "actions": [{"action_id": "approve_button", "value": "cp_unknown"}],
         }
         await adapter.handle_interaction(req3)
-        await asyncio.sleep(0.1)
+        update = await updater.wait_for_update(timeout=0.5)
+        assert update is None, "Should not update UI for unknown binding"
 
-        # Case 5: Binding lost
-        pid4 = create_checkpoint_via_api()
+        # ---------------------------------------------------------
+        # Case 5: Binding lost (simulate restart)
+        # ---------------------------------------------------------
+        pid4, ts4 = await create_and_publish_checkpoint()
+        binding_store.drop("T_VALID", "C_VALID", ts4) # Simulate memory clear on restart
         req4 = {
             "team": {"id": "T_VALID"},
             "user": {"id": "U_ADMIN"},
-            "container": {"channel_id": "C_VALID", "message_ts": "TS_LOST"},
+            "container": {"channel_id": "C_VALID", "message_ts": ts4},
             "actions": [{"action_id": "approve_button", "value": pid4}],
         }
         await adapter.handle_interaction(req4)
-        await asyncio.sleep(0.1)
+        update = await updater.wait_for_update(timeout=0.5)
+        assert update is None, "Should fail closed, no UI update, no execution"
+        
+        with psycopg.connect(admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (pid4,))
+                assert cur.fetchone()[0] == "pending", "Must remain pending (unmutated)"
+
+        # ---------------------------------------------------------
+        # Case 6: Publisher loss (No binding formed)
+        # ---------------------------------------------------------
+        # (This is implicitly tested by Case 5 since both represent binding=None)
