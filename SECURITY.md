@@ -1,0 +1,48 @@
+# Security Model
+
+Undogate sits between AI agents and PostgreSQL. This document states what it defends against, how, and what it does **not** cover, so a security team can evaluate it honestly.
+
+## Reporting a vulnerability
+
+Please use GitHub's **private vulnerability reporting** ("Security" tab → "Report a vulnerability") on this repository. Do not open public issues for security problems.
+
+## Trust boundaries
+
+| Actor | Holds | Can |
+|---|---|---|
+| AI agent | gateway URL + **agent key** only | submit SQL to `/mcp` or `/v1/execute` |
+| Gateway service | control DSN, agent DSN, both keys | classify, hold, execute, undo |
+| Human approver | **admin key** (or Slack allowlist) | list, approve, reject, undo |
+| DB owner / installer | install DSN (used once) | install schema, register tables |
+
+The agent never receives a database credential or the admin key. **Deploy the gateway as its own service** (see `Dockerfile` / `docker-compose.yml`). The stdio mode (`undogate serve`) puts DSNs on the agent's machine and is meant for local development only: an agent with shell access there can approve its own requests.
+
+## Defenses
+
+1. **AST hard gate** (PostgreSQL's own parser via `pglast`): exactly one statement; only `SELECT/INSERT/UPDATE/DELETE`; writes must be schema-qualified and have a `WHERE`; functions limited to an allowlist of pure built-ins. Blocks DDL, `SET`/`RESET`, `COPY`, `DO`, `PREPARE`, `CALL`, `LOCK`, `SELECT INTO`, `set_config`/`current_setting`, `pg_*`, `dblink`, `lo_*`, `nextval`, and stacked statements. See `tests/unit/test_firewall_attacks.py`.
+2. **Policy**: protected tables and a per-statement row limit. Writes are executed inside a transaction; if they exceed `limits.max_rows_without_approval` **or can cascade (via foreign keys) into a protected table**, they are rolled back and queued for approval. `WHERE 1=1` tricks are caught by the row count, not by pattern matching.
+3. **Database-enforced capture**: a `SECURITY DEFINER` trigger records every changed row, including FK cascades. It refuses agent-role writes that are not bound to a live, single-use capability token for the current transaction. Writes whose cascade would reach an unregistered table are refused, because those rows could not be undone.
+4. **Least privilege**: startup refuses superuser roles and refuses when the control and agent DSNs resolve to the same role. The agent role only gets DML on registered tables.
+5. **Approvals**: human-only (admin key, CLI, or Slack allowlist), constant-time key comparison, expiry after `agent.approval_timeout_minutes`, with the hard gate re-checked at approval time.
+6. **Undo**: undoes rows in an order that respects foreign keys. It refuses when a row changed after the checkpoint, when the schema drifted, or when the undo would cascade into rows it did not create.
+7. **Tamper-evident ledger**: checkpoints are append-only (UPDATE/DELETE of recorded fields is blocked) and SHA-256 hash-chained. `undogate verify-ledger` finds the first altered entry and prints the head hash.
+8. **Data minimisation**: columns named like `password`, `token`, `secret`, `ssn`, `hash`, `credit_card` cannot be referenced and are fully masked in results. The audit log is owner-only (`0600`) and never written to `/tmp`.
+
+## Residual risks (known, documented)
+
+- **Database superusers** can disable triggers and rewrite the whole hash chain. Export the `verify-ledger` head hash to an external system (SIEM, WORM storage) to detect this.
+- **Read access** is governed by the agent role's grants. Undogate masks secret-looking columns by name only; use PostgreSQL column privileges or RLS for real data classification.
+- **Sequences are not rewound** by undo, which is intentional (ADR-005).
+- **Undo scope**: single-column primary keys only. Tables with rules, inheritance, user triggers, or identity/generated columns are refused. DDL is blocked, not reversible.
+- **TLS** is not terminated by the gateway. Run it behind a TLS reverse proxy or service mesh.
+- **Optional LLM sentinel** (`OPENAI_API_KEY`) sends SQL text to a third party and is advisory only. Leave it unset if SQL may contain regulated data.
+- **Throughput**: checkpoint creation is serialized by one ledger lock.
+
+## Hardening checklist
+
+- [ ] Gateway runs as a separate service; agents get only the URL + agent key.
+- [ ] Keys are 32+ random bytes, distinct, and rotated; held in a secret manager.
+- [ ] TLS in front of the gateway; `/v1/checkpoints/*` reachable only from approver networks.
+- [ ] Every table the agent may write is registered (`undogate register`), including FK children.
+- [ ] `protected_tables` and `limits.max_rows_without_approval` reviewed. Config typos fail startup by design.
+- [ ] `verify-ledger` head hash exported on a schedule; audit log shipped to your SIEM.
