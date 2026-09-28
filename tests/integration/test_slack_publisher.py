@@ -15,8 +15,8 @@ import undogate.api
 from undogate.capture.install import install_undogate
 from undogate.config import UndogateConfig
 from undogate.policy import PolicyEngine
-from undogate.slack import UnauthorizedUserError
-from undogate.slack_publisher import SlackPublisher
+from undogate.ee.slack import UnauthorizedUserError
+from undogate.ee.slack_publisher import SlackPublisher
 from undogate.sql.classify import classify_sql
 
 

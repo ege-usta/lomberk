@@ -7,7 +7,7 @@ from testcontainers.postgres import PostgresContainer
 from undogate.api import app, verify_api_key, verify_admin_key, get_executor, get_policy_engine
 import undogate.api
 import undogate.config
-from undogate.slack import SlackInteractionAdapter
+from undogate.ee.slack import SlackInteractionAdapter
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -517,7 +517,7 @@ async def test_api_worker_tracking_capacity_and_exception(setup_db, auth_and_con
     app.state.slack_client_factory = lambda token: MagicMock(connect=AsyncMock(), close=AsyncMock(), socket_mode_request_listeners=[])
     
     async with undogate.api.lifespan(app):
-        from undogate.slack import TaskCapacityExceededError
+        from undogate.ee.slack import TaskCapacityExceededError
         import threading
         
         release_event = threading.Event()

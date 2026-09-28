@@ -113,8 +113,8 @@ async def lifespan(app: FastAPI):
                 from slack_sdk.socket_mode.aiohttp import SocketModeClient
                 from slack_sdk.web.async_client import AsyncWebClient
 
-                from undogate.slack import SlackInteractionAdapter, slack_actor
-                from undogate.slack_transport import SlackTransport
+                from undogate.ee.slack import SlackInteractionAdapter, slack_actor
+                from undogate.ee.slack_transport import SlackTransport
                 # Bind local registry to callbacks
                 def make_callbacks(executor, policy, resolver, updater, workers_set, shutdown_evt):
                     async def resolve_cb(team, channel, ts):
@@ -122,10 +122,10 @@ async def lifespan(app: FastAPI):
                     
                     async def _run_tracked(func, *args):
                         if shutdown_evt.is_set():
-                            from undogate.slack import TaskCapacityExceededError
+                            from undogate.ee.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("Server is shutting down. Rejecting new DB workers.")
                         if len(workers_set) >= 50:
-                            from undogate.slack import TaskCapacityExceededError
+                            from undogate.ee.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("DB worker capacity exceeded. Server is busy.")
                         
                         t = asyncio.create_task(asyncio.to_thread(func, *args))
@@ -155,7 +155,7 @@ async def lifespan(app: FastAPI):
                 
                 web_factory = getattr(app.state, "slack_web_client_factory", None) or AsyncWebClient
                 if use_publisher:
-                    from undogate.slack_publisher import SlackPublisher
+                    from undogate.ee.slack_publisher import SlackPublisher
                     publisher = SlackPublisher(
                         admin_dsn, web_factory(token=bot_token), config.slack.channel_id,
                         set(config.slack.team_allowlist), include_sql=config.slack.include_sql,

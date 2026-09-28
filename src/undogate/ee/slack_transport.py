@@ -7,13 +7,13 @@ from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 
-from undogate.slack import (
+from undogate.ee.slack import (
     InvalidPayloadError,
     SlackInteractionAdapter,
     TaskCapacityExceededError,
 )
 
-logger = logging.getLogger("undogate.slack_transport")
+logger = logging.getLogger("undogate.ee.slack_transport")
 
 
 class SlackTransport:

@@ -2,8 +2,8 @@ import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from slack_sdk.socket_mode.request import SocketModeRequest
-from undogate.slack_transport import SlackTransport
-from undogate.slack import SlackInteractionAdapter, TaskCapacityExceededError
+from undogate.ee.slack_transport import SlackTransport
+from undogate.ee.slack import SlackInteractionAdapter, TaskCapacityExceededError
 
 @pytest.fixture
 def mock_adapter():
@@ -164,8 +164,8 @@ import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from slack_sdk.socket_mode.request import SocketModeRequest
-from undogate.slack_transport import SlackTransport
-from undogate.slack import SlackInteractionAdapter
+from undogate.ee.slack_transport import SlackTransport
+from undogate.ee.slack import SlackInteractionAdapter
 
 @pytest.fixture
 def mock_adapter():
@@ -210,7 +210,7 @@ async def test_inflight_evicted_on_capacity(mock_adapter, mock_client_factory):
     
 @pytest.mark.asyncio
 async def test_inflight_evicted_on_ttl(mock_adapter, mock_client_factory, monkeypatch):
-    import undogate.slack_transport
+    import undogate.ee.slack_transport
     
     transport = SlackTransport("token", mock_adapter, mock_client_factory, enabled=True, dedup_ttl_seconds=1)
     mock_client = mock_client_factory("token")

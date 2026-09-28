@@ -11,7 +11,7 @@ import logging
 
 import psycopg
 
-logger = logging.getLogger("undogate.slack_publisher")
+logger = logging.getLogger("undogate.ee.slack_publisher")
 
 SQL_PREVIEW_CHARS = 1500
 STALE_CLAIM = "2 minutes"  # a claim this old outlived its sender (crash/restart)

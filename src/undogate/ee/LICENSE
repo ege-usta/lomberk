@@ -1,0 +1,19 @@
+Undogate Enterprise License
+
+Copyright (c) 2026 Yusuf Ege Usta. All rights reserved.
+
+This license applies to all files in the "src/undogate/ee/" directory (the
+"Enterprise Software"). Everything outside that directory is licensed under the
+Apache License 2.0 (see the LICENSE file at the repository root).
+
+1. You may read, copy and modify the Enterprise Software, and use it for
+   development, testing and evaluation.
+2. Any other use, including use in production, requires a valid, paid Undogate
+   Enterprise subscription or a separate written agreement with the copyright
+   holder, and is limited to the scope of that subscription.
+3. You may not sell, sublicense, redistribute, or offer the Enterprise Software
+   (modified or not) as a hosted service, and you may not remove or circumvent
+   this license.
+4. THE ENTERPRISE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. IN
+   NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY ARISING FROM ITS USE.

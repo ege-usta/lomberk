@@ -38,7 +38,7 @@ curl -H "$H" -X POST localhost:8000/v1/checkpoints/cp_…/undo       # users AND
 ```
 Pending requests expire after `agent.approval_timeout_minutes`. Review the exact SQL first with `GET /v1/checkpoints/cp_…` or `undogate show cp_…`.
 
-### Or approve in Slack
+### Or approve in Slack (Enterprise)
 Create the app from [`slack/app-manifest.json`](slack/app-manifest.json) (bot scope `chat:write` only, Socket Mode, so no public URL is needed), invite the bot to your approvals channel, then:
 ```yaml
 slack:
@@ -103,4 +103,6 @@ PYTHONPATH=src uv run pytest tests/    # needs Docker (testcontainers)
 ```
 
 ## License
-Apache-2.0
+Open core. Everything outside `src/undogate/ee/` is Apache-2.0: the hard gate, policy, capture, undo, ledger, remote MCP, and API/CLI approvals. You can run the whole safety path for free.
+
+`src/undogate/ee/` (Slack approvals, and upcoming SSO for approvers) is source-available under the [Undogate Enterprise License](src/undogate/ee/LICENSE). It is free for development and evaluation, and production use needs a subscription.
