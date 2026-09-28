@@ -94,3 +94,11 @@ BEGIN
         CREATE UNIQUE INDEX idx_checkpoints_idempotency ON undogate.checkpoints (principal, operation_id) WHERE operation_id IS NOT NULL;
     END IF;
 END $$;
+
+-- MIGRATION: tamper-evident ledger ordering (chain position, assigned under a lock)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='undogate' AND table_name='checkpoints' AND column_name='chain_seq') THEN
+        ALTER TABLE undogate.checkpoints ADD COLUMN chain_seq BIGINT UNIQUE;
+    END IF;
+END $$;

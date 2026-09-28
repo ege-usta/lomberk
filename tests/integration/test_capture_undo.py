@@ -175,8 +175,10 @@ def test_cascade_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
     
     # Undo
     res_undo = executor.execute_undo(res.public_id)
-    assert res_undo.status == 'failed'
-    assert 'Foreign keys not allowed' in res_undo.message
+    assert res_undo.status == 'undone', res_undo.message
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM public.test_orders WHERE user_id = %s", (user_id,))
+        assert cur.fetchone()[0] == 1, "cascaded child row must be restored"
 
 def test_concurrent_undo_busy_while_locked(dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))

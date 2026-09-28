@@ -1,3 +1,4 @@
+import hmac
 import os
 import sys
 import asyncio
@@ -79,7 +80,7 @@ async def lifespan(app: FastAPI):
         if runtime_super:
             raise ValueError("Startup Refusal: Agent role must not be a superuser.")
             
-        _executor_instance = UndogateExecutor(admin_dsn, dsn)
+        _executor_instance = UndogateExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms)
         _policy_engine_instance = PolicyEngine(config)
         
         # Production Slack Transport Wiring
@@ -135,17 +136,11 @@ async def lifespan(app: FastAPI):
                         return await _run_tracked(executor.check_status, pid)
                         
                     async def approve_cb(pid):
-                        res = await _run_tracked(executor.execute_pending, pid)
+                        res = await _run_tracked(executor.execute_pending, pid, "slack")
                         return {"status": res.status}
                         
                     async def reject_cb(pid):
-                        def _do_reject():
-                            import psycopg
-                            with psycopg.connect(executor.dsn) as conn:
-                                with conn.cursor() as cur:
-                                    cur.execute("SELECT undogate.reject_checkpoint(%s)", (pid,))
-                                    conn.commit()
-                        await _run_tracked(_do_reject)
+                        await _run_tracked(executor.reject, pid, "slack")
                         return {"status": "denied"}
                         
                     async def update_cb(channel, ts, msg):
@@ -188,7 +183,17 @@ async def lifespan(app: FastAPI):
         else:
             _slack_transport_instance = None
 
-        yield
+        # Remote MCP: the agent gets only a URL + agent key, never DSNs or the admin key.
+        # The SDK session manager runs once per instance, so build a fresh one per lifespan.
+        mcp = build_mcp(_mcp_deps, principal="remote_mcp_agent")
+        # host="0.0.0.0" skips the SDK's localhost-only Host check; the agent key gate authenticates instead.
+        mcp_http = mcp.streamable_http_app(streamable_http_path="/mcp", stateless_http=True, json_response=True, host="0.0.0.0")
+        async with mcp.session_manager.run():
+            _mcp_gate.inner = mcp_http.routes[0].app
+            try:
+                yield
+            finally:
+                _mcp_gate.inner = None
     finally:
         local_shutdown_event.set()
 
@@ -208,6 +213,46 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Undogate Enterprise API", lifespan=lifespan)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+
+def _key_matches(presented: str | None, expected: str | None) -> bool:
+    return bool(presented and expected) and hmac.compare_digest(presented.encode(), expected.encode())
+
+
+class _AgentKeyGate:
+    """ASGI guard for the MCP endpoint: agent key via X-API-Key or Authorization: Bearer."""
+
+    def __init__(self):
+        self.inner = None  # set while the app lifespan is running
+
+    async def __call__(self, scope, receive, send):
+        headers = dict(scope.get("headers") or [])
+        key = headers.get(b"x-api-key", b"").decode()
+        auth = headers.get(b"authorization", b"").decode()
+        if not key and auth.lower().startswith("bearer "):
+            key = auth[7:].strip()
+        from starlette.responses import JSONResponse
+        if not _key_matches(key, _API_KEY):
+            await JSONResponse({"detail": "Valid agent key required"}, status_code=401)(scope, receive, send)
+            return
+        if self.inner is None:
+            await JSONResponse({"detail": "Gateway not ready"}, status_code=503)(scope, receive, send)
+            return
+        await self.inner(scope, receive, send)
+
+
+def _mcp_deps():
+    if not _executor_instance or not _policy_engine_instance:
+        raise RuntimeError("Gateway not initialized")
+    return _executor_instance, _policy_engine_instance
+
+
+from starlette.routing import Route  # noqa: E402
+
+from undogate.server import build_mcp  # noqa: E402
+
+_mcp_gate = _AgentKeyGate()
+app.router.routes.append(Route("/mcp", endpoint=_mcp_gate))
+
 def get_executor():
     if not _executor_instance:
         raise HTTPException(status_code=500, detail="Configuration Error: Agent DSN not provided or pool is closed.")
@@ -223,7 +268,7 @@ def verify_api_key(api_key: str = Security(api_key_header)):
         raise HTTPException(status_code=500, detail="Configuration Error: API Key not loaded.")
     if not api_key:
         raise HTTPException(status_code=401, detail="API Key required")
-    if api_key != _API_KEY:
+    if not _key_matches(api_key, _API_KEY):
         raise HTTPException(status_code=403, detail="Invalid API Key")
     return api_key
 
@@ -232,7 +277,7 @@ def verify_admin_key(api_key: str = Security(api_key_header)):
         raise HTTPException(status_code=500, detail="Configuration Error: Admin Key not loaded.")
     if not api_key:
         raise HTTPException(status_code=401, detail="Admin Key required")
-    if api_key != _ADMIN_KEY:
+    if not _key_matches(api_key, _ADMIN_KEY):
         raise HTTPException(status_code=403, detail="Invalid Admin Key")
     return api_key
 from typing import Optional
@@ -321,7 +366,7 @@ def approve_checkpoint(
     executor: UndogateExecutor = Depends(get_executor)
 ):
     try:
-        res = executor.execute_pending(public_id)
+        res = executor.execute_pending(public_id, actor="api_admin")
         if res.status == "applied":
             return {"status": "approved", "rows_affected": res.rows_affected}
         elif res.status == "denied":
@@ -344,17 +389,48 @@ def reject_checkpoint(
     api_key: str = Depends(verify_admin_key),
     executor: UndogateExecutor = Depends(get_executor)
 ):
-    import psycopg
-    with psycopg.connect(executor.dsn) as conn:
-        with conn.cursor() as cur:
-            try:
-                cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
-            except Exception as e:
-                raise HTTPException(status_code=404, detail="Token not found or not pending")
-            conn.commit()
-
-            return {"status": "denied"}
+    if not executor.reject(public_id, actor="api_admin"):
+        raise HTTPException(status_code=404, detail="Token not found or not pending")
+    return {"status": "denied"}
             
+_UNDO_HTTP_STATUS = {"already_undone": 409, "conflict": 409, "busy": 423, "denied": 404, "failed": 400}
+
+
+@app.post("/v1/checkpoints/{public_id}/undo")
+def undo_checkpoint(
+    public_id: str,
+    api_key: str = Depends(verify_admin_key),
+    executor: UndogateExecutor = Depends(get_executor)
+):
+    res = executor.execute_undo(public_id, agent_label="api_admin")
+    if res.status == "undone":
+        return {"status": "undone", "rows_affected": res.rows_affected}
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=_UNDO_HTTP_STATUS.get(res.status, 502), content={"status": res.status, "message": res.message})
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    """Liveness: the process is up."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz", include_in_schema=False)
+def readyz():
+    """Readiness: both database roles are reachable."""
+    from fastapi.responses import JSONResponse
+    if not _executor_instance:
+        return JSONResponse(status_code=503, content={"status": "starting"})
+    import psycopg
+    try:
+        for dsn in (_executor_instance.dsn, _executor_instance.runtime_dsn):
+            with psycopg.connect(dsn, connect_timeout=3) as conn:
+                conn.execute("SELECT 1")
+    except psycopg.Error:
+        return JSONResponse(status_code=503, content={"status": "database_unreachable"})
+    return {"status": "ready"}
+
+
 @app.get("/", include_in_schema=False)
 def dashboard():
     from fastapi.responses import HTMLResponse

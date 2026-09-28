@@ -92,16 +92,29 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
     return results
 
 def extract_tables_from_ast(ast):
+    class CteNameVisitor(Visitor):
+        def __init__(self):
+            super().__init__()
+            self.names = set()
+        def visit_CommonTableExpr(self, ancestors, node):
+            self.names.add(node.ctename)
+
+    cte_visitor = CteNameVisitor()
+    for stmt_dict in ast:
+        cte_visitor(stmt_dict)
+
     class RangeVarVisitor(Visitor):
         def __init__(self):
             super().__init__()
             self.tables = []
         def visit_RangeVar(self, ancestors, node):
+            if not getattr(node, 'schemaname', None) and node.relname in cte_visitor.names:
+                return  # reference to a WITH query, not a table
             schema = node.schemaname if getattr(node, 'schemaname', None) else 'public'
             table = node.relname
             if table:
                 self.tables.append((schema, table))
-            
+
     visitor = RangeVarVisitor()
     for stmt_dict in ast:
         visitor(stmt_dict)

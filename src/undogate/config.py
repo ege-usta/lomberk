@@ -1,28 +1,33 @@
 import os
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class DatabaseConfig(BaseModel):
+class _Strict(BaseModel):
+    # A typo like `protected_table:` must fail startup, not silently disable protection.
+    model_config = ConfigDict(extra="forbid")
+
+
+class DatabaseConfig(_Strict):
     agent_dsn_env: str = "UNDOGATE_AGENT_DSN"
     admin_dsn_env: str = "UNDOGATE_ADMIN_DSN"
 
-class LimitsConfig(BaseModel):
+class LimitsConfig(_Strict):
     max_rows_without_approval: int = 100
     max_snapshot_rows: int = 1000000
     statement_timeout_ms: int = 15000
     trash_retention_days: int = 7
 
-class AgentConfig(BaseModel):
+class AgentConfig(_Strict):
     allow_self_undo: bool = True
     approval_timeout_minutes: int = 30
 
-class SlackConfig(BaseModel):
+class SlackConfig(_Strict):
     admin_allowlist: list[str] = Field(default_factory=list)
     team_allowlist: list[str] = Field(default_factory=list)
 
-class UndogateConfig(BaseModel):
+class UndogateConfig(_Strict):
     version: int = 1
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)

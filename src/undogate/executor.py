@@ -6,7 +6,7 @@ from psycopg import sql
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
-from undogate.ddl.handlers import handle_drop_column, handle_drop_table, handle_truncate
+from undogate.audit import audit
 from undogate.models import PolicyDecision, StatementEvaluation
 
 
@@ -20,7 +20,14 @@ class ExecutionResult(BaseModel):
     message: str
     error_code: str | None = None
 
+class HoldForApproval(Exception):
+    """Auto-approved write must be rolled back and sent to a human instead."""
+
+
 class UndogateExecutor:
+    # ponytail: a fresh connection per step (~5 ms each, ~18 ms p50 per captured write
+    # on localhost) keeps outcome-unknown handling exact. Add psycopg_pool when the DB
+    # is remote/TLS and latency matters; pooled conns must be discarded after errors.
 
     def _resolve_duplicate(self, principal: str, operation_id: str, sql_to_execute: str):
         import psycopg
@@ -34,8 +41,22 @@ class UndogateExecutor:
         raise RuntimeError(f"UniqueViolation occurred but no existing record found for {principal}:{operation_id}")
 
     def execute_undo(self, public_id: str, agent_label: str = "UNDOGATE_SYSTEM") -> ExecutionResult:
-        import psycopg
-        import json
+        res = self._execute_undo(public_id, agent_label)
+        audit("undone" if res.status == "undone" else "undo_failed", actor=agent_label, public_id=public_id,
+              status=res.status, rows_affected=res.rows_affected, message=res.message)
+        return res
+
+    def reject(self, public_id: str, actor: str) -> bool:
+        """Reject a pending checkpoint. Returns False if it is not pending."""
+        try:
+            with psycopg.connect(self.dsn, autocommit=True) as conn:
+                conn.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+        except psycopg.errors.RaiseException:
+            return False
+        audit("rejected", actor=actor, public_id=public_id)
+        return True
+
+    def _execute_undo(self, public_id: str, agent_label: str) -> ExecutionResult:
         
         try:
             with psycopg.connect(self.dsn, autocommit=False) as conn:
@@ -92,21 +113,22 @@ class UndogateExecutor:
             row_dict = dict(zip(columns, row))
             for col in columns:
                 if any(sens in col.lower() for sens in SENSITIVE_COLUMNS) and row_dict[col]:
-                    val_str = str(row_dict[col])
-                    if len(val_str) > 4:
-                        row_dict[col] = "***MASKED***" + val_str[-4:]
-                    else:
-                        row_dict[col] = "***MASKED***"
+                    row_dict[col] = "***MASKED***"
                 elif isinstance(row_dict[col], str):
                     row_dict[col] = sanitize_payload(row_dict[col])
             fetched_data.append(row_dict)
         return fetched_data
 
-    def __init__(self, dsn: str, runtime_dsn: str):
+    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000):
         if not dsn or not runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required")
         self.dsn = dsn
         self.runtime_dsn = runtime_dsn
+        # None disables the check (library/test use); servers pass config.limits values.
+        self.max_rows_without_approval = max_rows_without_approval
+        self.approval_timeout_minutes = approval_timeout_minutes
+        self.protected_tables = set(protected_tables or ())
+        self.statement_timeout_ms = int(statement_timeout_ms)
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str, principal: str = "system", operation_id: str | None = None) -> str:
         import psycopg
@@ -133,9 +155,11 @@ class UndogateExecutor:
         
         safe, reason = AISentinel()._ast_firewall(eval_result.statement.sql)
         if not safe:
+            audit("denied", actor=principal, sql=eval_result.statement.sql, reason=reason)
             return ExecutionResult(operation_id=operation_id, status="denied", message=f"Hard Gate Denied: {reason}")
             
         if eval_result.decision == PolicyDecision.DENY:
+            audit("denied", actor=principal, sql=eval_result.statement.sql, reason=eval_result.reason)
             return ExecutionResult(operation_id=operation_id, status="denied", message=eval_result.reason)
             
         if eval_result.decision == PolicyDecision.REQUIRE_APPROVAL:
@@ -149,7 +173,8 @@ class UndogateExecutor:
                     principal=principal,
                     operation_id=operation_id
                 )
-                return ExecutionResult(checkpoint_id=-1, public_id=public_id, operation_id=operation_id, status="approval_required", message="Policy requires explicit approval.")
+                audit("held", actor=principal, public_id=public_id, sql=eval_result.statement.sql, reason=eval_result.reason)
+                return ExecutionResult(checkpoint_id=-1, public_id=public_id, operation_id=operation_id, status="approval_required", message=f"Policy requires explicit approval: {eval_result.reason}")
             except psycopg.errors.UniqueViolation as e:
                 if e.diag.constraint_name == 'idx_checkpoints_idempotency':
                     return self._resolve_duplicate(principal, operation_id, eval_result.statement.sql)
@@ -171,7 +196,7 @@ class UndogateExecutor:
                             if sens_cols:
                                 raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
                             
-                            cur.execute("SET LOCAL statement_timeout = '5s'")
+                            cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{self.statement_timeout_ms}ms",))
                             cur.execute("SET TRANSACTION READ ONLY")
                             cur.execute(eval_result.statement.sql)
                             if cur.description:
@@ -187,7 +212,7 @@ class UndogateExecutor:
             
         return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, principal, operation_id)
 
-    def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str):
+    def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str, enforce_row_limit: bool = False, actor: str = "system"):
         import psycopg
         from psycopg import sql
         
@@ -200,7 +225,7 @@ class UndogateExecutor:
             with psycopg.connect(self.runtime_dsn, autocommit=False) as runtime_conn:
                 with runtime_conn.transaction():
                     with runtime_conn.cursor() as cur:
-                        cur.execute("SET LOCAL statement_timeout = '5s'")
+                        cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{self.statement_timeout_ms}ms",))
                         cur.execute("SELECT undogate.claim_checkpoint(%s)", (exec_token,))
                         cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
                         cur.execute("SELECT set_config('undogate.capability_token', %s, true)", (str(exec_token),))
@@ -282,7 +307,29 @@ class UndogateExecutor:
                                 
                             if tgattr and str(tgattr) != '' and str(tgattr) != 'b\'\'':
                                 raise Exception(f"Trigger column restrictions (UPDATE OF) are not allowed on {schema}.{table}.")
+
+                            cur.execute("SELECT undogate.unprotected_cascade_child(%s)", (c_oid,))
+                            unprotected = cur.fetchone()[0]
+                            if unprotected:
+                                raise Exception(f"Write on {schema}.{table} could cascade into {unprotected}, which is not registered with Undogate; its rows could not be undone.")
                             
+                        if enforce_row_limit and self.protected_tables:
+                            # FK cascades can reach a protected table the SQL never names.
+                            cur.execute("""
+                                WITH RECURSIVE reach(oid) AS (
+                                    SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                                    WHERE (n.nspname, c.relname) IN (SELECT * FROM unnest(%s::text[], %s::text[]))
+                                    UNION
+                                    SELECT k.conrelid FROM pg_constraint k JOIN reach r ON k.confrelid = r.oid
+                                    WHERE k.contype = 'f' AND (k.confdeltype IN ('c', 'n', 'd') OR k.confupdtype IN ('c', 'n', 'd'))
+                                )
+                                SELECT n.nspname || '.' || c.relname FROM reach JOIN pg_class c ON c.oid = reach.oid
+                                JOIN pg_namespace n ON n.oid = c.relnamespace
+                            """, ([s for s, _ in tables], [t for _, t in tables]))
+                            hit = sorted({r[0] for r in cur.fetchall()} & self.protected_tables)
+                            if hit:
+                                raise HoldForApproval(f"Write can cascade into protected table(s) {', '.join(hit)}.")
+
                         cur.execute(sql_to_execute)
                         if cur.description:
                             columns = [desc[0] for desc in cur.description]
@@ -290,8 +337,25 @@ class UndogateExecutor:
                             fetched_data = self._mask_and_sanitize_rows(columns, rows)
                                 
                         rows_affected = max(cur.rowcount, 0)
+                        limit = self.max_rows_without_approval
+                        if enforce_row_limit and limit is not None:
+                            # Count what the capture trigger recorded, not the outer command tag:
+                            # includes FK cascades and anything nested in the statement.
+                            cur.execute("SELECT current_setting('undogate.seq')::bigint")
+                            changed = max(rows_affected, cur.fetchone()[0])
+                            if changed > limit:
+                                # Leaving the with-block via exception rolls the write back.
+                                raise HoldForApproval(f"Rows changed ({changed}) exceeds limit ({limit}).")
                         cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
                         execution_completed = True
+        except HoldForApproval as e:
+            try:
+                with psycopg.connect(self.dsn, autocommit=True) as rq_conn, rq_conn.cursor() as rq_cur:
+                    rq_cur.execute("SELECT undogate.requeue_checkpoint(%s)", (public_id,))
+            except psycopg.Error:
+                return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="unknown", message=f"{e} Write was rolled back but the checkpoint could not be re-queued.")
+            audit("held", actor=actor, public_id=public_id, sql=sql_to_execute, reason=str(e))
+            return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="approval_required", message=f"{e} Write was rolled back and requires explicit approval.")
         except Exception as e:
             error_msg = str(e)
             
@@ -306,13 +370,11 @@ class UndogateExecutor:
             except Exception:
                 pass 
                 
-            from undogate.audit import emit_audit_event
-            emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "failed", rows=0)
+            audit("failed", actor=actor, public_id=public_id, sql=sql_to_execute, error=error_msg)
             safe_error_msg = error_msg if "exec_token" not in error_msg else "An error occurred during execution."
             return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="failed", message=safe_error_msg)
 
-        from undogate.audit import emit_audit_event
-        emit_audit_event(cp_id, public_id, sql_to_execute, "mcp_agent", "applied", [], rows_affected)
+        audit("applied", actor=actor, public_id=public_id, sql=sql_to_execute, rows_affected=rows_affected)
         return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, rows_affected=rows_affected, status="applied", message="Success", data=fetched_data)
 
     def _execute_internal(self, sql_to_execute: str, classification: str, decision: str, agent_label: str, principal: str = "system", operation_id: str | None = None):
@@ -336,13 +398,13 @@ class UndogateExecutor:
                         return self._resolve_duplicate(principal, operation_id, sql_to_execute)
                     raise
 
-            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
+            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute, enforce_row_limit=True, actor=principal)
 
         except psycopg.OperationalError as e:
             if operation_id:
                 return ExecutionResult(operation_id=operation_id, status="unknown", message="Network lost during checkpoint creation. Retry with same operation_id.")
             return ExecutionResult(operation_id=operation_id, status="failed", message=f"Pre-execution connection error: {e}")
-    def execute_pending(self, public_id: str):
+    def execute_pending(self, public_id: str, actor: str = "unknown_approver"):
         import psycopg
         try:
         
@@ -357,10 +419,18 @@ class UndogateExecutor:
                     if status != "pending":
                         return ExecutionResult(operation_id=None, status="failed", message=f"Checkpoint status is {status}, not pending.")
 
+                    if self.approval_timeout_minutes is not None:
+                        cur.execute("SELECT created_at < now() - make_interval(mins => %s) FROM undogate.checkpoints WHERE id = %s", (self.approval_timeout_minutes, cp_id))
+                        if cur.fetchone()[0]:
+                            cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+                            audit("expired", actor=actor, public_id=public_id, sql=sql_to_execute)
+                            return ExecutionResult(operation_id=None, status="denied", message=f"Checkpoint expired: pending longer than {self.approval_timeout_minutes} minutes. Ask the agent to resubmit.")
+
                     from undogate.sentinel import AISentinel
                     safe, reason = AISentinel()._ast_firewall(sql_to_execute)
                     if not safe:
                         cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+                        audit("rejected", actor="hard_gate", public_id=public_id, sql=sql_to_execute, reason=reason)
                         # Transaction context manager will commit
                         return ExecutionResult(operation_id=None, status="denied", message=f"Hard Gate Denied: {reason}")
 
@@ -368,7 +438,8 @@ class UndogateExecutor:
                     exec_token = cur.fetchone()[0]
                     # Transaction context manager will commit
 
-            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute)
+            audit("approved", actor=actor, public_id=public_id, sql=sql_to_execute)
+            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute, actor=actor)
 
         except psycopg.OperationalError as e:
             return ExecutionResult(operation_id=None, status="unknown", message=str(e))
@@ -379,7 +450,7 @@ class UndogateExecutor:
                 with conn.cursor() as cur:
                     cur.execute("SELECT undogate.check_checkpoint_status(%s)", (public_id,))
                     return cur.fetchone()[0]
-        except psycopg.OperationalError as e:
-            print("check_status Error:", repr(e))
+        except psycopg.OperationalError:
+            # Never print: stdout is the MCP JSON-RPC channel.
             return "unknown"
 

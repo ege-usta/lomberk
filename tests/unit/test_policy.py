@@ -57,3 +57,17 @@ def test_policy_unknown(policy_engine):
     stmt = ClassifiedStatement(sql="DO $$ $$", stmt_class=StatementClass.UNKNOWN, tables=[])
     eval = policy_engine.evaluate(stmt)
     assert eval.decision == PolicyDecision.REQUIRE_APPROVAL
+
+
+def test_config_typo_is_rejected_not_silently_ignored(tmp_path):
+    import pytest
+    from pydantic import ValidationError
+
+    from undogate.config import load_config
+    cfg = tmp_path / "undogate.yaml"
+    cfg.write_text("protected_table:\n  - public.users\n")
+    with pytest.raises(ValidationError):
+        load_config(str(cfg))
+    cfg.write_text("limits:\n  max_row_without_approval: 5\n")
+    with pytest.raises(ValidationError):
+        load_config(str(cfg))

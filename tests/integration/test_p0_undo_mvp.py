@@ -151,10 +151,9 @@ def test_undo_unsupported_schema(control_dsn, runtime_dsn, dsn, setup_db, monkey
     stmt3 = ClassifiedStatement(sql="INSERT INTO public.test_trigger VALUES (1, 'val');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     res_trig = executor.execute(StatementEvaluation(statement=stmt3, decision=PolicyDecision.ALLOW, reason=""))
 
-    # Undo should fail for all
+    # Foreign keys are supported; rules and user triggers still refuse
     undo_fk = executor.execute_undo(res_fk.public_id)
-    assert undo_fk.status == "failed"
-    assert "Foreign keys" in undo_fk.message
+    assert undo_fk.status == "undone", undo_fk.message
 
     undo_rule = executor.execute_undo(res_rule.public_id)
     assert undo_rule.status == "failed"

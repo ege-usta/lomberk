@@ -12,8 +12,20 @@ class AISentinel:
     def _ast_firewall(self, sql: str) -> tuple[bool, str]:
         import pglast
         violations = []
+        dml_nodes = []
         
         ALLOWED_STMTS = {'RawStmt', 'SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt'}
+        # Pure built-ins only. Anything that touches GUCs, files, sessions, sleep,
+        # sequences or other databases (set_config, pg_*, dblink, lo_*, nextval...) stays banned.
+        # ponytail: name allowlist, resolve by OID if agents need user-defined functions.
+        ALLOWED_FUNCS = {
+            'count', 'sum', 'avg', 'min', 'max', 'bool_and', 'bool_or', 'string_agg', 'array_agg',
+            'coalesce', 'nullif', 'greatest', 'least', 'lower', 'upper', 'length', 'char_length',
+            'trim', 'btrim', 'ltrim', 'rtrim', 'substr', 'substring', 'replace', 'concat', 'concat_ws',
+            'left', 'right', 'position', 'strpos', 'abs', 'round', 'ceil', 'ceiling', 'floor', 'trunc',
+            'now', 'date_trunc', 'date_part', 'extract', 'age', 'to_char', 'to_date', 'to_timestamp',
+            'make_date', 'jsonb_build_object', 'json_build_object', 'jsonb_agg', 'json_agg',
+        }
 
         def traverse(node):
             if isinstance(node, dict):
@@ -34,12 +46,16 @@ class AISentinel:
                         violations.append("DELETE statement missing WHERE clause")
                 
                 if node_type in ['InsertStmt', 'UpdateStmt', 'DeleteStmt']:
+                    dml_nodes.append(node_type)
                     relation = node.get('relation')
                     if relation and isinstance(relation, dict) and relation.get('schemaname') is None:
                         violations.append(f"Unqualified relation write in {node_type} (missing schema)")
                         
                 if node_type == 'FuncCall':
-                    violations.append("Function calls are structurally banned in Round 1A")
+                    parts = [p.get('sval') for p in node.get('funcname', ()) if isinstance(p, dict)]
+                    schema_ok = len(parts) == 1 or (len(parts) == 2 and parts[0] == 'pg_catalog')
+                    if not (schema_ok and parts[-1] in ALLOWED_FUNCS):
+                        violations.append(f"Function {'.'.join(str(p) for p in parts)}() is not on the allowlist")
                             
                 for k, v in node.items():
                     traverse(v)
@@ -60,6 +76,11 @@ class AISentinel:
                 
             for raw_stmt in ast:
                 traverse(raw_stmt(skip_none=True))
+                # Only the top-level statement may write. A write nested in a CTE or
+                # subquery hides its row count behind the outer statement's.
+                top_is_dml = type(raw_stmt.stmt).__name__ in ('InsertStmt', 'UpdateStmt', 'DeleteStmt')
+                if len(dml_nodes) > (1 if top_is_dml else 0):
+                    violations.append("Writes nested inside another statement (e.g. data-modifying CTE) are structurally banned")
             
             if violations:
                 return False, "AST Firewall: " + " | ".join(violations)

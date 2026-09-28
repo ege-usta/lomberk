@@ -275,6 +275,7 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.approve_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.reject_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.fail_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.requeue_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.claim_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.finish_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.get_pending_checkpoint TO %I', p_control_role);
@@ -292,6 +293,7 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.list_pending_checkpoints TO %I', p_control_role);
     
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.check_checkpoint_status TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.verify_ledger TO %I', p_control_role);
     
     
     -- Runtime (only agent role)
@@ -310,6 +312,8 @@ BEGIN
     
     
     EXECUTE format('GRANT SELECT ON undogate.registered_tables TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.unprotected_cascade_child TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.unprotected_cascade_child TO %I', p_control_role);
     EXECUTE format('GRANT SELECT ON undogate.registered_tables TO %I', p_control_role);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -365,6 +369,63 @@ BEGIN
     EXECUTE format('LOCK TABLE %I.%I IN SHARE ROW EXCLUSIVE MODE NOWAIT', p_schema, p_table);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+-- Returns the first table reachable from p_table_oid through ON DELETE CASCADE /
+-- SET NULL / SET DEFAULT foreign keys that has no enabled capture trigger, or NULL.
+-- A write whose cascade reaches such a table would change rows Undogate cannot undo.
+CREATE OR REPLACE FUNCTION undogate.unprotected_cascade_child(p_table_oid OID)
+RETURNS TEXT
+LANGUAGE sql STABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+    WITH RECURSIVE reach(oid) AS (
+        SELECT p_table_oid
+        UNION
+        SELECT c.conrelid FROM pg_constraint c JOIN reach r ON c.confrelid = r.oid
+        WHERE c.contype = 'f' AND (c.confdeltype IN ('c', 'n', 'd') OR c.confupdtype IN ('c', 'n', 'd'))
+    )
+    SELECT r.oid::regclass::text FROM reach r
+    WHERE r.oid <> p_table_oid AND NOT EXISTS (
+        SELECT 1 FROM pg_trigger t
+        WHERE t.tgrelid = r.oid AND t.tgname = 'undogate_capture' AND t.tgenabled IN ('O', 'A')
+    )
+    ORDER BY 1 LIMIT 1
+$$;
+
+-- Re-inserts deleted rows whose FK parent was not restored yet, retrying until
+-- every row lands or a pass makes no progress (then the whole undo aborts).
+-- ponytail: O(n^2) passes for pathological self-referencing chains; fine for per-statement checkpoints.
+CREATE OR REPLACE FUNCTION undogate.replay_deferred_inserts(p_tables TEXT[], p_rows JSONB[])
+RETURNS INT
+SET search_path = undogate, pg_temp
+AS $$
+DECLARE
+    v_left_tables TEXT[];
+    v_left_rows JSONB[];
+    v_done INT := 0;
+    i INT;
+BEGIN
+    WHILE coalesce(array_length(p_tables, 1), 0) > 0 LOOP
+        v_left_tables := '{}';
+        v_left_rows := '{}';
+        FOR i IN 1..array_length(p_tables, 1) LOOP
+            BEGIN
+                EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', p_tables[i], p_tables[i]) USING p_rows[i];
+                v_done := v_done + 1;
+            EXCEPTION WHEN foreign_key_violation THEN
+                v_left_tables := v_left_tables || p_tables[i];
+                v_left_rows := v_left_rows || p_rows[i];
+            END;
+        END LOOP;
+        IF coalesce(array_length(v_left_tables, 1), 0) = array_length(p_tables, 1) THEN
+            RAISE EXCEPTION 'Conflict: % deleted row(s) cannot be restored because their foreign key parent no longer exists', array_length(v_left_tables, 1);
+        END IF;
+        p_tables := v_left_tables;
+        p_rows := v_left_rows;
+    END LOOP;
+    RETURN v_done;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION undogate.execute_undo(
     p_public_id TEXT,
     p_agent_label TEXT
@@ -383,6 +444,11 @@ DECLARE
     v_seq_val BIGINT;
     v_live_pk TEXT;
     v_live_pk_count INT;
+    v_unprotected TEXT;
+    v_captured INT;
+    v_retry_tables TEXT[] := '{}';
+    v_retry_rows JSONB[] := '{}';
+    v_drained BOOLEAN := false;
 BEGIN
     -- 1. Fetch and lock original checkpoint
     SELECT id, status INTO v_cp_id, v_status
@@ -429,13 +495,11 @@ BEGIN
             RAISE EXCEPTION 'Unsupported schema: Table inheritance is not allowed on %', v_change.table_name;
         END IF;
 
-        IF EXISTS (
-            SELECT 1 FROM pg_constraint 
-            WHERE (conrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass 
-               OR confrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass)
-            AND contype = 'f'
-        ) THEN
-            RAISE EXCEPTION 'Unsupported schema: Foreign keys not allowed on %', v_change.table_name;
+        -- Foreign keys are supported: LIFO replay restores parents before children.
+        -- Cascades must stay inside captured tables so nothing changes invisibly.
+        v_unprotected := undogate.unprotected_cascade_child(v_change.table_oid);
+        IF v_unprotected IS NOT NULL THEN
+            RAISE EXCEPTION 'Unsupported schema: % cascades into % which is not registered with Undogate', v_change.table_name, v_unprotected;
         END IF;
         
         -- Check triggers: exactly ONE trigger allowed, and it MUST be undogate_capture, and ENABLED.
@@ -491,13 +555,31 @@ BEGIN
     
     v_seq_val := 1;
 
-    -- 4. Apply reverse DML in LIFO order
-    FOR v_change IN 
-        SELECT table_schema, table_name, table_oid, op, pk, old_row, new_row, schema_snapshot
-        FROM undogate.row_changes 
-        WHERE checkpoint_id = v_cp_id 
-        ORDER BY seq DESC
+    -- 4. Apply reverse DML. Capture order is not a reliable FK order (RI actions
+    -- such as SET NULL can be captured after their parent), so replay in phases:
+    -- re-insert deleted rows parents-first (FK depth), then revert updates, then
+    -- delete inserted rows; LIFO within each phase (covers self-referencing FKs).
+    FOR v_change IN
+        SELECT rc.table_schema, rc.table_name, rc.table_oid, rc.op, rc.pk, rc.old_row, rc.new_row, rc.schema_snapshot
+        FROM undogate.row_changes rc
+        LEFT JOIN LATERAL (
+            WITH RECURSIVE up(oid, d) AS (
+                SELECT rc.table_oid, 0
+                UNION ALL
+                SELECT c.confrelid, up.d + 1 FROM pg_catalog.pg_constraint c JOIN up ON c.conrelid = up.oid
+                WHERE c.contype = 'f' AND c.confrelid <> c.conrelid AND up.d < 32
+            )
+            SELECT max(d) AS depth FROM up
+        ) fk ON true
+        WHERE rc.checkpoint_id = v_cp_id
+        ORDER BY CASE rc.op WHEN 'D' THEN 0 WHEN 'U' THEN 1 ELSE 2 END,
+                 CASE WHEN rc.op = 'D' THEN fk.depth END,
+                 rc.seq DESC
     LOOP
+        IF v_change.op <> 'D' AND NOT v_drained THEN
+            v_affected := v_affected + undogate.replay_deferred_inserts(v_retry_tables, v_retry_rows);
+            v_drained := true;
+        END IF;
         PERFORM set_config('undogate.seq', v_seq_val::text, true);
         v_seq_val := v_seq_val + 1;
         
@@ -589,13 +671,30 @@ BEGIN
                 (v_change.pk->>v_live_pk)) USING v_change.old_row;
 
         ELSIF v_change.op = 'D' THEN
-            EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', v_full_table, v_full_table) USING v_change.old_row;
+            BEGIN
+                EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', v_full_table, v_full_table) USING v_change.old_row;
+            EXCEPTION WHEN foreign_key_violation THEN
+                v_retry_tables := v_retry_tables || v_full_table;
+                v_retry_rows := v_retry_rows || v_change.old_row;
+                CONTINUE;
+            END;
         ELSE
             RAISE EXCEPTION 'Unknown operation: %', v_change.op;
         END IF;
         
         v_affected := v_affected + 1;
     END LOOP;
+
+    IF NOT v_drained THEN
+        v_affected := v_affected + undogate.replay_deferred_inserts(v_retry_tables, v_retry_rows);
+    END IF;
+
+    -- Every row the undo touched is captured. More captured rows than replayed
+    -- changes means an FK cascade reached rows written after the checkpoint.
+    SELECT count(*) INTO v_captured FROM undogate.row_changes WHERE checkpoint_id = v_undo_cp_id;
+    IF v_captured <> v_affected THEN
+        RAISE EXCEPTION 'Conflict: undo would cascade into % row(s) changed after checkpoint %', v_captured - v_affected, p_public_id;
+    END IF;
 
     -- 5. Mark old checkpoint undone, new checkpoint applied
     UPDATE undogate.checkpoints SET status = 'undone' WHERE id = v_cp_id;
@@ -611,3 +710,110 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
+
+-- Row-limit hold: an auto-approved write that touched too many rows is rolled
+-- back by the executor and sent back to the human approval queue.
+CREATE OR REPLACE FUNCTION undogate.requeue_checkpoint(
+    p_public_id TEXT
+) RETURNS VOID AS $$
+BEGIN
+    UPDATE undogate.checkpoints
+    SET status = 'pending', decision = 'REQUIRE_APPROVAL', capability_token = NULL, exec_txid = NULL
+    WHERE public_id = p_public_id AND status = 'approved';
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Checkpoint % not found or not in approved state.', p_public_id;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = undogate, pg_temp;
+
+-- ---------------------------------------------------------------------------
+-- Tamper-evident ledger. Every checkpoint row carries sha256(prev_hash + its
+-- immutable fields); editing or deleting any past row breaks the chain.
+-- ponytail: one advisory lock serializes checkpoint creation; shard the chain per
+-- principal if write throughput ever needs it. The chain lives in the same DB as
+-- an attacker with superuser, so ship verify_ledger()'s head hash to your SIEM.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION undogate.checkpoint_hash(
+    p_prev TEXT, p_public_id TEXT, p_created_at TIMESTAMPTZ, p_principal TEXT,
+    p_agent_label TEXT, p_classification TEXT, p_sql_text TEXT, p_operation_id TEXT
+) RETURNS TEXT
+LANGUAGE sql IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT encode(sha256(convert_to(jsonb_build_array(
+        p_prev, p_public_id, extract(epoch FROM p_created_at)::text, p_principal,
+        p_agent_label, p_classification, p_sql_text, p_operation_id
+    )::text, 'UTF8')), 'hex')
+$$;
+
+CREATE OR REPLACE FUNCTION undogate.chain_checkpoint() RETURNS TRIGGER AS $$
+DECLARE
+    v_prev TEXT;
+    v_seq BIGINT;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('undogate.ledger'));
+    SELECT hash, chain_seq INTO v_prev, v_seq
+    FROM undogate.checkpoints WHERE chain_seq IS NOT NULL
+    ORDER BY chain_seq DESC LIMIT 1;
+
+    NEW.prev_hash := coalesce(v_prev, 'genesis');
+    NEW.chain_seq := coalesce(v_seq, 0) + 1;
+    NEW.hash := undogate.checkpoint_hash(NEW.prev_hash, NEW.public_id, NEW.created_at, NEW.principal,
+                                         NEW.agent_label, NEW.classification, NEW.sql_text, NEW.operation_id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = undogate, pg_temp;
+
+CREATE OR REPLACE FUNCTION undogate.guard_checkpoint_immutability() RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Undogate ledger is append-only: checkpoints cannot be deleted.';
+    END IF;
+    IF (NEW.public_id, NEW.created_at, NEW.principal, NEW.agent_label, NEW.classification, NEW.sql_text,
+        NEW.operation_id, NEW.prev_hash, NEW.hash, NEW.chain_seq)
+       IS DISTINCT FROM
+       (OLD.public_id, OLD.created_at, OLD.principal, OLD.agent_label, OLD.classification, OLD.sql_text,
+        OLD.operation_id, OLD.prev_hash, OLD.hash, OLD.chain_seq) THEN
+        RAISE EXCEPTION 'Undogate ledger is append-only: recorded checkpoint fields cannot be changed.';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = undogate, pg_temp;
+
+DROP TRIGGER IF EXISTS undogate_chain ON undogate.checkpoints;
+CREATE TRIGGER undogate_chain BEFORE INSERT ON undogate.checkpoints
+    FOR EACH ROW EXECUTE FUNCTION undogate.chain_checkpoint();
+DROP TRIGGER IF EXISTS undogate_immutable ON undogate.checkpoints;
+CREATE TRIGGER undogate_immutable BEFORE UPDATE OR DELETE ON undogate.checkpoints
+    FOR EACH ROW EXECUTE FUNCTION undogate.guard_checkpoint_immutability();
+
+-- Walks the chain; returns how many links were checked, the first broken one
+-- (NULL if intact) and the head hash to anchor externally.
+CREATE OR REPLACE FUNCTION undogate.verify_ledger()
+RETURNS TABLE (checked BIGINT, first_broken_public_id TEXT, head_hash TEXT)
+SET search_path = undogate, pg_temp
+AS $$
+DECLARE
+    r RECORD;
+    v_prev TEXT := 'genesis';
+    v_expected_seq BIGINT := 1;
+BEGIN
+    checked := 0;
+    FOR r IN SELECT * FROM undogate.checkpoints WHERE chain_seq IS NOT NULL ORDER BY chain_seq LOOP
+        IF r.chain_seq <> v_expected_seq OR r.prev_hash IS DISTINCT FROM v_prev
+           OR r.hash IS DISTINCT FROM undogate.checkpoint_hash(r.prev_hash, r.public_id, r.created_at, r.principal,
+                                                            r.agent_label, r.classification, r.sql_text, r.operation_id) THEN
+            first_broken_public_id := r.public_id;
+            head_hash := NULL;
+            RETURN NEXT;
+            RETURN;
+        END IF;
+        v_prev := r.hash;
+        v_expected_seq := v_expected_seq + 1;
+        checked := checked + 1;
+    END LOOP;
+    head_hash := CASE WHEN checked > 0 THEN v_prev END;
+    RETURN NEXT;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

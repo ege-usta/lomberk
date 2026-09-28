@@ -43,7 +43,7 @@ def install_undogate(admin_dsn: str, control_role: str, agent_role: str):
             # 2. Read and execute functions
             with open(sql_dir / "02_functions.sql", "r") as f:
                 func_sql = f.read()
-                func_sql = func_sql.replace('__AGENT_ROLE__', agent_role)
+                func_sql = func_sql.replace('__AGENT_ROLE__', agent_role.replace("'", "''"))
                 cur.execute(func_sql)
                 
             # Grant schema usage and functions

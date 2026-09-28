@@ -46,6 +46,9 @@ jobs:
             --junitxml=test-results/junit.xml \
             --strict-markers
 
+      - name: Build container image
+        run: docker build -t undogate:ci .
+
       - name: Upload Test Results
         if: always()
         uses: actions/upload-artifact@v4.3.1

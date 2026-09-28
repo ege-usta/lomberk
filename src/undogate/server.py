@@ -1,92 +1,88 @@
+import json
 import os
 import sys
+from collections.abc import Callable
 
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from undogate.config import load_config
-from undogate.executor import UndogateExecutor
+from undogate.executor import ExecutionResult, UndogateExecutor
 from undogate.policy import PolicyEngine
-from undogate.sql.classify import classify_sql
 from undogate.sentinel import AISentinel
-
-_executor_instance = None
-_policy_engine_instance = None
-
-def get_executor():
-    global _executor_instance, _policy_engine_instance
-    if _executor_instance is None:
-        config = load_config()
-        dsn = os.environ.get(config.database.agent_dsn_env)
-        if not dsn:
-            raise ValueError(f"Database DSN must be provided via {config.database.agent_dsn_env}")
-        admin_dsn = os.environ.get(config.database.admin_dsn_env)
-        _executor_instance = UndogateExecutor(admin_dsn, dsn)
-        _policy_engine_instance = PolicyEngine(config)
-    return _executor_instance, _policy_engine_instance
-
-# Fail at startup if config is missing
-try:
-    get_executor()
-except ValueError as e:
-    print(f"Startup Refusal: {e}", file=sys.stderr)
-    sys.exit(1)
-
-app = MCPServer("undogate")
+from undogate.sql.classify import classify_sql
 
 
-@app.tool()
-def execute_sql(
-    sql: str = Field(description="The SQL statement to execute on the PostgreSQL database."),
-    operation_id: str | None = Field(default=None, description="Optional idempotency key (client-generated UUID). Retries with the same operation_id are safely idempotent.")
-) -> str:
-    """Executes a SQL statement with Undogate protection."""
+def format_result(res: ExecutionResult) -> str:
+    if res.status == "applied":
+        msg = "Success." if res.public_id is None else f"Success. Checkpoint: {res.public_id}. Rows affected: {res.rows_affected}."
+        if res.data is not None:
+            msg += f"\nData: {json.dumps(res.data, default=str)}"
+        return msg
+    if res.status == "approval_required":
+        return f"APPROVAL REQUIRED. Token: {res.public_id}. {res.message} A human must approve it out of band; do not retry."
+    if res.status == "denied":
+        return f"DENIED: {res.message}"
+    return f"FAILED: {res.message}"
+
+
+def run_agent_sql(executor: UndogateExecutor, policy_engine: PolicyEngine, sql: str, operation_id: str | None, principal: str) -> str:
+    """Single agent entrypoint shared by the stdio and HTTP MCP transports."""
     try:
-        try:
-            executor, policy_engine = get_executor()
-        except ValueError as e:
-            return f"Error: {str(e)}"
-            
-        sentinel = AISentinel()
-        safe, reason = sentinel._ast_firewall(sql)
+        safe, reason = AISentinel()._ast_firewall(sql)
         if not safe:
             return f"Hard Gate Denied: {reason}"
-
         statements = classify_sql(sql)
         if not statements:
-             return "Success (no statements executed)."
-             
+            return "Success (no statements executed)."
         results = []
         for stmt in statements:
-            eval_result = policy_engine.evaluate(stmt)
-            res = executor.execute(
-                eval_result, 
-                agent_label="mcp_agent", 
-                principal="mcp_agent", 
-                operation_id=operation_id
-            )
-            
-            if res.status == "applied":
-                msg = f"Success. Checkpoint: {res.public_id}. Rows affected: {res.rows_affected}."
-                if res.data is not None:
-                    import json
-                    msg += f"\nData: {json.dumps(res.data, default=str)}"
-                results.append(msg)
-            elif res.status == "approval_required":
-                results.append(f"APPROVAL REQUIRED. Token: {res.public_id}. Ask human to run `undogate approve {res.public_id}` in their terminal.")
-            elif res.status == "denied":
-                results.append(f"DENIED: {res.message}")
-            else:
-                results.append(f"FAILED: {res.message}")
-                
+            res = executor.execute(policy_engine.evaluate(stmt), agent_label=principal, principal=principal, operation_id=operation_id)
+            results.append(format_result(res))
         return "\n".join(results)
-        
-    except Exception as e:
-         return f"Error executing SQL: {e}"
+    except Exception as e:  # noqa: BLE001 - a tool must answer the agent, never crash the session
+        return f"Error executing SQL: {e}"
+
+
+def build_mcp(get_deps: Callable[[], tuple[UndogateExecutor, PolicyEngine]], principal: str = "mcp_agent") -> MCPServer:
+    app = MCPServer("undogate")
+
+    @app.tool()
+    def execute_sql(
+        sql: str = Field(description="One PostgreSQL statement. Writes must be schema-qualified and have a WHERE clause."),
+        operation_id: str | None = Field(default=None, description="Optional idempotency key (client-generated UUID). Retries with the same operation_id are safely idempotent."),
+    ) -> str:
+        """Executes a SQL statement with Undogate protection. Large or sensitive writes are held for human approval; every applied write can be undone."""
+        executor, policy_engine = get_deps()
+        return run_agent_sql(executor, policy_engine, sql, operation_id, principal)
+
+    return app
+
+
+def build_executor() -> tuple[UndogateExecutor, PolicyEngine]:
+    config = load_config()
+    dsn = os.environ.get(config.database.agent_dsn_env)
+    admin_dsn = os.environ.get(config.database.admin_dsn_env)
+    if not dsn or not admin_dsn:
+        raise ValueError(f"Database DSNs must be provided via {config.database.agent_dsn_env} and {config.database.admin_dsn_env}")
+    executor = UndogateExecutor(
+        admin_dsn, dsn,
+        max_rows_without_approval=config.limits.max_rows_without_approval,
+        approval_timeout_minutes=config.agent.approval_timeout_minutes,
+        protected_tables=config.protected_tables,
+        statement_timeout_ms=config.limits.statement_timeout_ms,
+    )
+    return executor, PolicyEngine(config)
+
+
+def main() -> None:
+    try:
+        deps = build_executor()
+    except ValueError as e:
+        print(f"Startup Refusal: {e}", file=sys.stderr)
+        sys.exit(1)
+    build_mcp(lambda: deps).run()
+
 
 if __name__ == "__main__":
-    try:
-        app.run()
-    finally:
-        if _executor_instance and hasattr(_executor_instance, 'pool'):
-            _executor_instance.pool.close()
+    main()
