@@ -1,11 +1,17 @@
-import logging
 import asyncio
-from typing import Optional, Callable
+import logging
 from collections import OrderedDict
+from collections.abc import Callable
+
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
-from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.socket_mode.request import SocketModeRequest
-from undogate.slack import SlackInteractionAdapter, TaskCapacityExceededError, InvalidPayloadError
+from slack_sdk.socket_mode.response import SocketModeResponse
+
+from undogate.slack import (
+    InvalidPayloadError,
+    SlackInteractionAdapter,
+    TaskCapacityExceededError,
+)
 
 logger = logging.getLogger("undogate.slack_transport")
 
@@ -27,7 +33,7 @@ class SlackTransport:
         self.dedup_ttl_seconds = dedup_ttl_seconds
         self.max_dedup_size = max_dedup_size
         
-        self.client: Optional[SocketModeClient] = None
+        self.client: SocketModeClient | None = None
         self._processed_envelopes: OrderedDict[str, tuple[float, str]] = OrderedDict()
         self._shutdown_event = asyncio.Event()
         self._connect_lock = asyncio.Lock()
@@ -78,7 +84,7 @@ class SlackTransport:
                             self._cleanup_tasks.add(ctask)
                             ctask.add_done_callback(self._cleanup_tasks.discard)
                         raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("Timeout waiting for Slack transport connect.")
             raise
 
@@ -190,5 +196,5 @@ class SlackTransport:
                             done, pending = await asyncio.wait(self._cleanup_tasks, timeout=3.0)
                             if pending:
                                 logger.error(f"Transport disconnect complete, but {len(pending)} cleanup tasks are still hanging.")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("Timeout acquiring lock for disconnect.")

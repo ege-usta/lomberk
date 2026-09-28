@@ -1,6 +1,8 @@
 from pathlib import Path
+
 import psycopg
 from psycopg import sql
+
 
 def install_undogate(admin_dsn: str, control_role: str, agent_role: str):
     """Installs Undogate schema, tables, and functions into the database."""

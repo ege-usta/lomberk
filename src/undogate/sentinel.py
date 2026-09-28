@@ -86,9 +86,9 @@ class AISentinel:
                 return False, "AST Firewall: " + " | ".join(violations)
                 
         except pglast.parser.ParseError as e:
-            return False, f"AST Firewall: Malformed SQL syntax. {str(e)}"
+            return False, f"AST Firewall: Malformed SQL syntax. {e!s}"
         except Exception as e:
-            return False, f"AST Firewall: Unexpected error during parsing: {str(e)}"
+            return False, f"AST Firewall: Unexpected error during parsing: {e!s}"
             
         return True, ""
 

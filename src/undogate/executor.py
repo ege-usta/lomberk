@@ -1,13 +1,9 @@
-import json
 
-import pglast
 import psycopg
 from psycopg import sql
-from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from undogate.audit import audit
-from undogate.models import PolicyDecision, StatementEvaluation
 
 
 class ExecutionResult(BaseModel):
@@ -78,11 +74,11 @@ class UndogateExecutor:
                         )
                 except psycopg.errors.LockNotAvailable:
                     return ExecutionResult(status="busy", message="Checkpoint is busy.", public_id=public_id, rows_affected=0)
-                except psycopg.errors.UniqueViolation as e:
+                except psycopg.errors.UniqueViolation:
                     return ExecutionResult(status="conflict", message="Unique constraint violation during undo.", public_id=public_id, rows_affected=0)
-                except psycopg.errors.DeadlockDetected as e:
+                except psycopg.errors.DeadlockDetected:
                     return ExecutionResult(status="busy", message="Deadlock detected.", public_id=public_id, rows_affected=0)
-                except psycopg.errors.QueryCanceled as e:
+                except psycopg.errors.QueryCanceled:
                     return ExecutionResult(status="busy", message="Statement timeout.", public_id=public_id, rows_affected=0)
                 except psycopg.errors.RaiseException as e:
                     error_msg = str(e)
@@ -156,8 +152,8 @@ class UndogateExecutor:
         if not self.dsn or not self.runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required for execution.")
             
-        from undogate.sentinel import AISentinel
         from undogate.policy import PolicyDecision
+        from undogate.sentinel import AISentinel
         
         
         safe, reason = AISentinel()._ast_firewall(eval_result.statement.sql)
@@ -196,8 +192,9 @@ class UndogateExecutor:
                 with psycopg.connect(self.runtime_dsn, autocommit=False) as conn:
                     with conn.transaction():
                         with conn.transaction(), conn.cursor() as cur:
-                            from undogate.sql.classify import check_sensitive_columns
                             import pglast
+
+                            from undogate.sql.classify import check_sensitive_columns
                             ast = pglast.parse_sql(eval_result.statement.sql)
                             sens_cols = check_sensitive_columns(ast)
                             if sens_cols:
@@ -221,7 +218,6 @@ class UndogateExecutor:
 
     def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str, enforce_row_limit: bool = False, actor: str = "system"):
         import psycopg
-        from psycopg import sql
         
         
         error_msg = None
@@ -238,8 +234,12 @@ class UndogateExecutor:
                         cur.execute("SELECT set_config('undogate.capability_token', %s, true)", (str(exec_token),))
                         cur.execute("SELECT set_config('undogate.seq', '0', true)")
                         
-                        from undogate.sql.classify import extract_tables_from_ast, check_sensitive_columns
                         import pglast
+
+                        from undogate.sql.classify import (
+                            check_sensitive_columns,
+                            extract_tables_from_ast,
+                        )
                         ast = pglast.parse_sql(sql_to_execute)
                         tables = extract_tables_from_ast(ast)
                         

@@ -1,20 +1,22 @@
-import time
 import math
 import random
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Dict, Any, Optional
+from typing import Any
+
 
 @dataclass
 class RecoveryResult:
     operation_id: str
     status: str
-    resume_id: Optional[str] = None
-    message: Optional[str] = None
+    resume_id: str | None = None
+    message: str | None = None
     is_late: bool = False
 
 class RecoveryBudgetExhausted(Exception):
-    def __init__(self, last_known_state: str, resume_id: Optional[str], operation_id: str, late_result: Optional[RecoveryResult] = None):
+    def __init__(self, last_known_state: str, resume_id: str | None, operation_id: str, late_result: RecoveryResult | None = None):
         self.last_known_state = last_known_state
         self.resume_id = resume_id
         self.operation_id = operation_id
@@ -29,7 +31,7 @@ class IdMismatchError(Exception):
 
 def execute_with_recovery(
     operation_id: str,
-    submit_fn: Callable[[float], Dict[str, Any]],
+    submit_fn: Callable[[float], dict[str, Any]],
     status_fn: Callable[[str, float], str],
     timeout_seconds: float = 15.0,
     base_delay: float = 0.5,
@@ -37,7 +39,7 @@ def execute_with_recovery(
     max_attempts: int = 50,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
-    cancel_event: Optional[threading.Event] = None
+    cancel_event: threading.Event | None = None
 ) -> RecoveryResult:
     
     if math.isnan(timeout_seconds) or math.isinf(timeout_seconds) or timeout_seconds <= 0:

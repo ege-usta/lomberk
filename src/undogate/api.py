@@ -1,21 +1,22 @@
-import hmac
-import os
-import sys
 import asyncio
+import hmac
 import inspect
 import logging
+import os
+
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, HTTPException, Request, Depends, Security
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
-from contextlib import asynccontextmanager
 
 from undogate.config import load_config
 from undogate.executor import UndogateExecutor
 from undogate.policy import PolicyEngine
-from undogate.sql.classify import classify_sql
 from undogate.sentinel import AISentinel
+from undogate.sql.classify import classify_sql
 
 # Global references for lifespan
 _executor_instance = None
@@ -109,10 +110,11 @@ async def lifespan(app: FastAPI):
                     raise ValueError("Startup Refusal: slack_target_resolver dependency missing or not an async function.")
                 
             try:
-                from undogate.slack import SlackInteractionAdapter, slack_actor
-                from undogate.slack_transport import SlackTransport
                 from slack_sdk.socket_mode.aiohttp import SocketModeClient
                 from slack_sdk.web.async_client import AsyncWebClient
+
+                from undogate.slack import SlackInteractionAdapter, slack_actor
+                from undogate.slack_transport import SlackTransport
                 # Bind local registry to callbacks
                 def make_callbacks(executor, policy, resolver, updater, workers_set, shutdown_evt):
                     async def resolve_cb(team, channel, ts):
@@ -261,9 +263,9 @@ def _mcp_deps():
     return _executor_instance, _policy_engine_instance
 
 
-from starlette.routing import Route  # noqa: E402
+from starlette.routing import Route
 
-from undogate.server import build_mcp  # noqa: E402
+from undogate.server import build_mcp
 
 _mcp_gate = _AgentKeyGate()
 app.router.routes.append(Route("/mcp", endpoint=_mcp_gate))
@@ -295,11 +297,12 @@ def verify_admin_key(api_key: str = Security(api_key_header)):
     if not _key_matches(api_key, _ADMIN_KEY):
         raise HTTPException(status_code=403, detail="Invalid Admin Key")
     return api_key
-from typing import Optional
+
+
 class ExecuteRequest(BaseModel):
     sql: str
     agent_label: str = "agent"
-    operation_id: Optional[str] = None
+    operation_id: str | None = None
 
 @app.post("/v1/execute")
 def execute_query(
@@ -369,7 +372,7 @@ def check_checkpoint_status(
         return {"public_id": public_id, "status": status}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=502, content={"status": "unknown", "message": "Database unreachable"})
 

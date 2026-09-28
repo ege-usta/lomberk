@@ -1,7 +1,7 @@
 import json
-import os
 import logging
-from datetime import datetime, timezone
+import os
+from datetime import UTC, datetime
 
 # Configure standard logger to write JSON to a file or stream
 logger = logging.getLogger("undogate_audit")
@@ -22,7 +22,7 @@ def audit(event: str, *, actor: str, public_id: str | None = None, **fields) -> 
     actor: who caused it (agent principal, or approver such as "cli:alice" / "api_admin").
     """
     record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "event_type": f"undogate.{event}",
         "actor": actor,
         "public_id": public_id,

@@ -1,14 +1,14 @@
-import logging
 import asyncio
-from typing import Set, Dict, Any, Callable, Awaitable, Optional
-
+import logging
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from typing import Any
 
 logger = logging.getLogger("undogate.slack")
 
 # "slack:<user_id>" of the approver while an approve/reject callback runs, for the
 # audit trail. A context variable keeps callback signatures unchanged.
-slack_actor: ContextVar[Optional[str]] = ContextVar("slack_actor", default=None)
+slack_actor: ContextVar[str | None] = ContextVar("slack_actor", default=None)
 
 class UnauthorizedUserError(Exception): pass
 class InvalidPayloadError(Exception):
@@ -25,11 +25,11 @@ SETTLE_INTERVAL = 0.1
 class SlackInteractionAdapter:
     def __init__(
         self, 
-        admin_allowlist: Set[str], 
-        team_allowlist: Set[str],
-        target_resolver: Callable[[str, str, str], Awaitable[Optional[str]]],
-        approve_callback: Callable[[str], Awaitable[Dict[str, Any]]], 
-        reject_callback: Callable[[str], Awaitable[Dict[str, Any]]],
+        admin_allowlist: set[str], 
+        team_allowlist: set[str],
+        target_resolver: Callable[[str, str, str], Awaitable[str | None]],
+        approve_callback: Callable[[str], Awaitable[dict[str, Any]]], 
+        reject_callback: Callable[[str], Awaitable[dict[str, Any]]],
         status_callback: Callable[[str], Awaitable[str]], 
         slack_update_callback: Callable[[str, str, str], Awaitable[None]],
         max_concurrent_tasks: int = 100,
@@ -45,8 +45,8 @@ class SlackInteractionAdapter:
         self.max_concurrent_tasks = max_concurrent_tasks
         self.shutdown_timeout = shutdown_timeout
         
-        self._active_tasks: Set[asyncio.Task] = set()
-        self._update_locks: Dict[tuple, Dict[str, Any]] = {}
+        self._active_tasks: set[asyncio.Task] = set()
+        self._update_locks: dict[tuple, dict[str, Any]] = {}
         self._stopping = False
 
     def _validate_payload_structure(self, payload: Any) -> tuple[str, str, str, str, str, str]:
@@ -86,7 +86,7 @@ class SlackInteractionAdapter:
         task.add_done_callback(self._active_tasks.discard)
         return {"acknowledged": True}
 
-    async def _process_interaction(self, team_id: str, channel_id: str, message_ts: str, public_id: str, is_approve: bool, actor: Optional[str] = None):
+    async def _process_interaction(self, team_id: str, channel_id: str, message_ts: str, public_id: str, is_approve: bool, actor: str | None = None):
         try:
             try:
                 expected_public_id = await self.target_resolver(team_id, channel_id, message_ts)
@@ -149,7 +149,7 @@ class SlackInteractionAdapter:
         try:
             async with asyncio.timeout(3.0):
                 await self.slack_update_callback(channel_id, message_ts, msg)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("Timeout updating Slack UI.")
         except Exception as e:
             logger.error(f"Failed to update Slack UI: {e}")
