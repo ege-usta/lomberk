@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Security
-from fastapi.security import APIKeyHeader
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from undogate.config import load_config
@@ -28,10 +28,12 @@ _slack_transport_instance = None
 # Immutable runtime config
 _API_KEY = None
 _ADMIN_KEY = None
+_SSO = None  # ee OidcVerifier when sso.issuer is set
+_ALLOW_ADMIN_KEY = True
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _slack_transport_instance
+    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY
     
     # Local registry ownership for safe and strict shutdown drainage
     local_db_workers = set()
@@ -58,6 +60,13 @@ async def lifespan(app: FastAPI):
         
     _API_KEY = agent_key
     _ADMIN_KEY = admin_key
+    _SSO, _ALLOW_ADMIN_KEY = None, True
+    if config.sso.issuer:
+        from undogate.ee.sso import OidcVerifier
+        _SSO = await asyncio.to_thread(OidcVerifier, config.sso)
+        _ALLOW_ADMIN_KEY = config.sso.allow_admin_key
+    elif not config.sso.allow_admin_key:
+        raise ValueError("Startup Refusal: sso.allow_admin_key is false but no sso.issuer is configured.")
         
     try:
         admin_dsn = os.environ.get(config.database.admin_dsn_env)
@@ -289,6 +298,24 @@ def verify_api_key(api_key: str = Security(api_key_header)):
         raise HTTPException(status_code=403, detail="Invalid API Key")
     return api_key
 
+_bearer = HTTPBearer(auto_error=False)
+
+
+def verify_approver(api_key: str = Security(api_key_header),
+                    cred: HTTPAuthorizationCredentials | None = Security(_bearer)) -> str:
+    """Who is approving: a person via SSO ("oidc:<email>"), or the shared admin key."""
+    if _SSO is not None and cred is not None:
+        from undogate.ee.sso import SsoError
+        try:
+            return _SSO.verify(cred.credentials)
+        except SsoError:
+            raise HTTPException(status_code=401, detail="Invalid SSO token") from None
+    if not _ALLOW_ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="SSO token required")
+    verify_admin_key(api_key)
+    return "api_admin"
+
+
 def verify_admin_key(api_key: str = Security(api_key_header)):
     if not _ADMIN_KEY:
         raise HTTPException(status_code=500, detail="Configuration Error: Admin Key not loaded.")
@@ -348,7 +375,7 @@ def execute_query(
 
 @app.get("/v1/checkpoints/pending")
 def list_pending_checkpoints(
-    api_key: str = Depends(verify_admin_key),
+    actor: str = Depends(verify_approver),
     executor: UndogateExecutor = Depends(get_executor)
 ):
     import psycopg
@@ -362,7 +389,7 @@ def list_pending_checkpoints(
 @app.get("/v1/checkpoints/{public_id}/status")
 def check_checkpoint_status(
     public_id: str,
-    api_key: str = Depends(verify_admin_key),
+    actor: str = Depends(verify_approver),
     executor: UndogateExecutor = Depends(get_executor)
 ):
     try:
@@ -380,11 +407,11 @@ def check_checkpoint_status(
 
 def approve_checkpoint(
     public_id: str, 
-    api_key: str = Depends(verify_admin_key),
+    actor: str = Depends(verify_approver),
     executor: UndogateExecutor = Depends(get_executor)
 ):
     try:
-        res = executor.execute_pending(public_id, actor="api_admin")
+        res = executor.execute_pending(public_id, actor=actor)
         if res.status == "applied":
             return {"status": "approved", "rows_affected": res.rows_affected}
         elif res.status == "denied":
@@ -404,10 +431,10 @@ def approve_checkpoint(
 @app.post("/v1/checkpoints/{public_id}/reject")
 def reject_checkpoint(
     public_id: str, 
-    api_key: str = Depends(verify_admin_key),
+    actor: str = Depends(verify_approver),
     executor: UndogateExecutor = Depends(get_executor)
 ):
-    if not executor.reject(public_id, actor="api_admin"):
+    if not executor.reject(public_id, actor=actor):
         raise HTTPException(status_code=404, detail="Token not found or not pending")
     return {"status": "denied"}
             
@@ -417,7 +444,7 @@ _UNDO_HTTP_STATUS = {"already_undone": 409, "conflict": 409, "busy": 423, "denie
 @app.get("/v1/checkpoints/{public_id}")
 def get_checkpoint(
     public_id: str,
-    api_key: str = Depends(verify_admin_key),
+    actor: str = Depends(verify_approver),
     executor: UndogateExecutor = Depends(get_executor)
 ):
     """What an approver reviews before deciding: the exact SQL and who sent it."""
@@ -430,10 +457,10 @@ def get_checkpoint(
 @app.post("/v1/checkpoints/{public_id}/undo")
 def undo_checkpoint(
     public_id: str,
-    api_key: str = Depends(verify_admin_key),
+    actor: str = Depends(verify_approver),
     executor: UndogateExecutor = Depends(get_executor)
 ):
-    res = executor.execute_undo(public_id, agent_label="api_admin")
+    res = executor.execute_undo(public_id, agent_label=actor)
     if res.status == "undone":
         return {"status": "undone", "rows_affected": res.rows_affected}
     from fastapi.responses import JSONResponse

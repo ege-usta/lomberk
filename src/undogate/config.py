@@ -31,6 +31,17 @@ class SlackConfig(_Strict):
     # Off by default: SQL literals may contain regulated data that must not leave for Slack.
     include_sql: bool = False
 
+class SsoConfig(_Strict):
+    # OIDC approvers (Enterprise). Unset issuer = approvals use the admin key only.
+    issuer: str | None = None
+    audience: str | None = None
+    jwks_url: str | None = None  # default: discovered from the issuer
+    identity_claim: str = "email"
+    groups_claim: str = "groups"
+    allowed_groups: list[str] = Field(default_factory=list)  # empty = anyone the issuer signs for
+    # Break-glass. Set false so every approval names a person, not a shared key.
+    allow_admin_key: bool = True
+
 class UndogateConfig(_Strict):
     version: int = 1
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -39,6 +50,7 @@ class UndogateConfig(_Strict):
     deny_patterns: list[str] = Field(default_factory=list)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
+    sso: SsoConfig = Field(default_factory=SsoConfig)
 
 def load_config(path: str = "undogate.yaml") -> UndogateConfig:
     if not os.path.exists(path):

@@ -1,0 +1,86 @@
+"""OIDC approvers: an approval carries a person's ID token from the company IdP
+(Okta, Entra ID, Google...), so the audit trail names a human, not a shared key."""
+import json
+import threading
+import time
+import urllib.parse
+import urllib.request
+
+import jwt
+
+# Asymmetric only: "none" and HS* would let anyone who knows the public key sign.
+ALLOWED_ALGS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"]
+JWKS_MIN_REFRESH_SECONDS = 60  # unknown key IDs are attacker-chosen; don't let them hammer the IdP
+HTTP_TIMEOUT_SECONDS = 5
+CLOCK_LEEWAY_SECONDS = 30
+
+
+class SsoError(Exception):
+    pass
+
+
+def _require_https(url: str) -> None:
+    u = urllib.parse.urlparse(url)
+    if u.scheme != "https" and not (u.scheme == "http" and u.hostname in ("localhost", "127.0.0.1")):
+        raise ValueError(f"Startup Refusal: SSO URL must be https: {url}")
+
+
+def _get_json(url: str) -> dict:
+    _require_https(url)
+    with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as r:
+        return json.load(r)
+
+
+class OidcVerifier:
+    def __init__(self, cfg):
+        if not cfg.issuer or not cfg.audience:
+            raise ValueError("Startup Refusal: sso.issuer and sso.audience are both required.")
+        _require_https(cfg.issuer)
+        self.cfg = cfg
+        if cfg.jwks_url:
+            self.jwks_url = cfg.jwks_url
+        else:
+            doc = _get_json(cfg.issuer.rstrip("/") + "/.well-known/openid-configuration")
+            if doc.get("issuer") != cfg.issuer:
+                raise ValueError("Startup Refusal: SSO discovery document names a different issuer.")
+            self.jwks_url = doc["jwks_uri"]
+        _require_https(self.jwks_url)
+        self._lock = threading.Lock()
+        self._keys: dict = {}
+        self._fetched_at = float("-inf")
+        self._refresh()
+
+    def _refresh(self) -> None:
+        keyset = jwt.PyJWKSet.from_dict(_get_json(self.jwks_url))
+        self._keys = {k.key_id: k for k in keyset.keys}
+        self._fetched_at = time.monotonic()
+
+    def _key(self, kid):
+        with self._lock:
+            if kid not in self._keys and time.monotonic() - self._fetched_at >= JWKS_MIN_REFRESH_SECONDS:
+                self._refresh()  # the IdP rotated its keys
+            return self._keys.get(kid)
+
+    def verify(self, token: str) -> str:
+        """Returns the audited actor ("oidc:<identity>") or raises SsoError."""
+        try:
+            key = self._key(jwt.get_unverified_header(token).get("kid"))
+            if key is None:
+                raise SsoError("unknown signing key")
+            claims = jwt.decode(
+                token, key.key, algorithms=ALLOWED_ALGS, audience=self.cfg.audience, issuer=self.cfg.issuer,
+                leeway=CLOCK_LEEWAY_SECONDS, options={"require": ["exp", "iat", "iss", "aud", "sub"]})
+        except SsoError:
+            raise
+        except Exception as e:  # noqa: BLE001 - any parse/verify/fetch failure means "not authenticated"
+            raise SsoError(type(e).__name__) from None
+        if self.cfg.identity_claim == "email" and claims.get("email_verified") is False:
+            raise SsoError("email not verified")
+        if self.cfg.allowed_groups:
+            groups = claims.get(self.cfg.groups_claim) or []
+            if not isinstance(groups, list) or not set(groups) & set(self.cfg.allowed_groups):
+                raise SsoError("not in an approver group")
+        identity = claims.get(self.cfg.identity_claim)
+        if not isinstance(identity, str) or not identity:
+            raise SsoError(f"token has no {self.cfg.identity_claim}")
+        return f"oidc:{identity}"

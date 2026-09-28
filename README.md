@@ -52,6 +52,20 @@ UNDOGATE_SLACK_ENABLED=true UNDOGATE_SLACK_APP_TOKEN=xapp-… UNDOGATE_SLACK_BOT
 ```
 Every held request is posted with Approve/Reject buttons, and the message updates to the final state. The approver's Slack ID is written to the audit log.
 
+### Approver SSO (Enterprise)
+Approvers sign in with the company identity provider (Okta, Microsoft Entra ID, Google, Keycloak, any OIDC issuer) and send their ID token. The audit log then records the person (`oidc:alice@corp.com`), not a shared key.
+```yaml
+sso:
+  issuer: https://corp.okta.com          # keys are discovered from the issuer
+  audience: undogate-approvals           # the client ID registered for Undogate
+  allowed_groups: [db-approvers]         # only these groups may approve
+  allow_admin_key: false                 # optional: turn off the shared key entirely
+```
+```bash
+curl -H "Authorization: Bearer $ID_TOKEN" -X POST localhost:8000/v1/checkpoints/cp_…/approve
+```
+Only asymmetrically signed tokens (RS/PS/ES) for this issuer and audience are accepted, and they must be unexpired. The email must not be marked unverified.
+
 ## Configuration (`undogate.yaml`)
 ```yaml
 limits:
