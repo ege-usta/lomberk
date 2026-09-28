@@ -58,13 +58,13 @@ Approvers sign in with the company identity provider (Okta, Microsoft Entra ID, 
 sso:
   issuer: https://corp.okta.com          # keys are discovered from the issuer
   audience: undogate-approvals           # the client ID registered for Undogate
-  allowed_groups: [db-approvers]         # only these groups may approve
-  allow_admin_key: false                 # optional: turn off the shared key entirely
+  allowed_groups: [db-approvers]         # and/or allowed_identities: [alice@corp.com]
+  # allow_admin_key: true                # the shared key is OFF once SSO is on; CLI stays as break-glass
 ```
 ```bash
 curl -H "Authorization: Bearer $ID_TOKEN" -X POST localhost:8000/v1/checkpoints/cp_…/approve
 ```
-Only asymmetrically signed tokens (RS/PS/ES) for this issuer and audience are accepted, and they must be unexpired. The email must not be marked unverified.
+Only asymmetrically signed tokens (RS/PS/ES) for this issuer and audience are accepted, and they must be unexpired. With the default `identity_claim: email`, the token must mark the email as verified. Entra ID does not send that flag, so set `identity_claim` to `upn` or `oid` there.
 
 ## Configuration (`undogate.yaml`)
 ```yaml

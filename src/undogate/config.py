@@ -38,9 +38,13 @@ class SsoConfig(_Strict):
     jwks_url: str | None = None  # default: discovered from the issuer
     identity_claim: str = "email"
     groups_claim: str = "groups"
-    allowed_groups: list[str] = Field(default_factory=list)  # empty = anyone the issuer signs for
-    # Break-glass. Set false so every approval names a person, not a shared key.
-    allow_admin_key: bool = True
+    # Who may approve. At least one list is required: an issuer like Google signs for
+    # anyone with an account, so "anyone the issuer signs for" is never a safe default.
+    allowed_groups: list[str] = Field(default_factory=list)
+    allowed_identities: list[str] = Field(default_factory=list)
+    # Shared admin key next to SSO. Default: on without SSO, off with SSO (the CLI
+    # remains the break-glass path if the IdP is down).
+    allow_admin_key: bool | None = None
 
 class UndogateConfig(_Strict):
     version: int = 1

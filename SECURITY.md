@@ -38,7 +38,7 @@ The agent never receives a database credential or the admin key. **Deploy the ga
 - **TLS** is not terminated by the gateway. Run it behind a TLS reverse proxy or service mesh.
 - **Optional LLM sentinel** (`OPENAI_API_KEY`) sends SQL text to a third party and is advisory only. Leave it unset if SQL may contain regulated data.
 - **Throughput**: checkpoint creation is serialized by one ledger lock.
-- **Approver identity**: with `sso` configured (Enterprise), API approvals carry the person from a verified OIDC ID token, and `sso.allow_admin_key: false` removes the shared key. Without it, API approvals are the shared admin key and CLI approvals are the OS user. Slack approvals always carry the Slack user ID.
+- **Approver identity**: with `sso` configured (Enterprise), API approvals carry the person from a verified OIDC ID token, and the shared key is off unless `sso.allow_admin_key: true`. An approver allowlist (groups or identities) is mandatory. Without it, API approvals are the shared admin key and CLI approvals are the OS user. Slack approvals always carry the Slack user ID.
 
 ## Hardening checklist
 

@@ -35,6 +35,8 @@ class OidcVerifier:
     def __init__(self, cfg):
         if not cfg.issuer or not cfg.audience:
             raise ValueError("Startup Refusal: sso.issuer and sso.audience are both required.")
+        if not cfg.allowed_groups and not cfg.allowed_identities:
+            raise ValueError("Startup Refusal: set sso.allowed_groups or sso.allowed_identities.")
         _require_https(cfg.issuer)
         self.cfg = cfg
         if cfg.jwks_url:
@@ -56,6 +58,8 @@ class OidcVerifier:
         self._fetched_at = time.monotonic()
 
     def _key(self, kid):
+        # ponytail: the fetch runs under the lock, so a key rotation stalls other approvals
+        # for up to HTTP_TIMEOUT_SECONDS once per JWKS_MIN_REFRESH_SECONDS; fine at approval rates.
         with self._lock:
             if kid not in self._keys and time.monotonic() - self._fetched_at >= JWKS_MIN_REFRESH_SECONDS:
                 self._refresh()  # the IdP rotated its keys
@@ -74,13 +78,15 @@ class OidcVerifier:
             raise
         except Exception as e:  # noqa: BLE001 - any parse/verify/fetch failure means "not authenticated"
             raise SsoError(type(e).__name__) from None
-        if self.cfg.identity_claim == "email" and claims.get("email_verified") is False:
+        # Fail closed: IdPs that omit email_verified (e.g. Entra ID) must use another
+        # identity_claim, since their email attribute may be user-editable.
+        if self.cfg.identity_claim == "email" and claims.get("email_verified") is not True:
             raise SsoError("email not verified")
-        if self.cfg.allowed_groups:
-            groups = claims.get(self.cfg.groups_claim) or []
-            if not isinstance(groups, list) or not set(groups) & set(self.cfg.allowed_groups):
-                raise SsoError("not in an approver group")
         identity = claims.get(self.cfg.identity_claim)
         if not isinstance(identity, str) or not identity:
             raise SsoError(f"token has no {self.cfg.identity_claim}")
+        groups = claims.get(self.cfg.groups_claim)
+        in_group = isinstance(groups, list) and bool(set(groups) & set(self.cfg.allowed_groups))
+        if not in_group and identity not in self.cfg.allowed_identities:
+            raise SsoError("not an allowed approver")
         return f"oidc:{identity}"

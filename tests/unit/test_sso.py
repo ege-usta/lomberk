@@ -85,6 +85,8 @@ def test_valid_token_names_the_person(idp):
     lambda iss: token(iss, groups=["engineering"]),                 # not an approver
     lambda iss: token(iss, groups="db-approvers"),                  # malformed groups claim
     lambda iss: token(iss, email_verified=False),                   # unverified email
+    lambda iss: token(iss, email_verified=None),                    # IdP never says it's verified
+    lambda iss: token(iss, groups=None),                            # no groups, not listed by name
     lambda iss: token(iss, email=None),                             # no identity
     lambda iss: token(iss, kid="unknown"),                          # unknown key
     lambda iss: jwt.encode({"iss": iss, "aud": AUD, "sub": "u", "email": "a@b", "groups": ["db-approvers"],
@@ -124,9 +126,24 @@ def test_unknown_kid_flood_does_not_hammer_the_idp(idp):
     assert hits["jwks"] == before
 
 
+def test_named_identity_without_group(idp):
+    issuer, _ = idp
+    v = OidcVerifier(SsoConfig(issuer=issuer, audience=AUD, allowed_identities=["alice@corp.com"]))
+    assert v.verify(token(issuer, groups=None)) == "oidc:alice@corp.com"
+    with pytest.raises(SsoError):
+        v.verify(token(issuer, email="mallory@corp.com", groups=None))
+
+
+def test_open_door_config_refused(idp):
+    """Google signs ID tokens for any Google account: no allowlist must not mean everyone."""
+    issuer, _ = idp
+    with pytest.raises(ValueError, match="allowed_groups"):
+        OidcVerifier(SsoConfig(issuer=issuer, audience=AUD))
+
+
 def test_plain_http_issuer_refused():
     with pytest.raises(ValueError, match="https"):
-        OidcVerifier(SsoConfig(issuer="http://idp.corp.com", audience=AUD))
+        OidcVerifier(SsoConfig(issuer="http://idp.corp.com", audience=AUD, allowed_groups=["g"]))
 
 
 class FakeExecutor:

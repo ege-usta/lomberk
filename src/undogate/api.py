@@ -64,8 +64,8 @@ async def lifespan(app: FastAPI):
     if config.sso.issuer:
         from undogate.ee.sso import OidcVerifier
         _SSO = await asyncio.to_thread(OidcVerifier, config.sso)
-        _ALLOW_ADMIN_KEY = config.sso.allow_admin_key
-    elif not config.sso.allow_admin_key:
+        _ALLOW_ADMIN_KEY = bool(config.sso.allow_admin_key)
+    elif config.sso.allow_admin_key is False:
         raise ValueError("Startup Refusal: sso.allow_admin_key is false but no sso.issuer is configured.")
         
     try:
