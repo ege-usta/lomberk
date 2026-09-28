@@ -17,6 +17,16 @@ SQL_PREVIEW_CHARS = 1500
 STALE_CLAIM = "2 minutes"  # a claim this old outlived its sender (crash/restart)
 
 
+def _esc(value) -> str:
+    """Slack mrkdwn escaping (api.slack.com/reference/surfaces/formatting#escaping):
+    agent-controlled text must never render as a link, mention or broadcast."""
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _inline(value) -> str:
+    return _esc(value).replace("`", "'")  # cannot close the surrounding code span
+
+
 class SlackPublisher:
     def __init__(self, dsn: str, web_client, channel_id: str, team_allowlist: set[str],
                  include_sql: bool = False, poll_seconds: float = 2.0, batch_size: int = 20):
@@ -66,10 +76,10 @@ class SlackPublisher:
     def _blocks(self, public_id, agent_label, principal, classification, sql_text, created_at) -> tuple[str, list]:
         text = f"Undogate approval needed: {public_id}"
         detail = (f"*Approval needed* `{public_id}`\n"
-                  f"Agent: `{agent_label}` ({principal}) · {classification} · {created_at:%Y-%m-%d %H:%M:%S %Z}")
+                  f"Agent: `{_inline(agent_label)}` ({_inline(principal)}) · {_inline(classification)} · {created_at:%Y-%m-%d %H:%M:%S %Z}")
         if self.include_sql:
             preview = sql_text if len(sql_text) <= SQL_PREVIEW_CHARS else sql_text[:SQL_PREVIEW_CHARS] + " …"
-            detail += f"\n```{preview.replace('```', '` ` `')}```"
+            detail += f"\n```{_esc(preview).replace('```', '` ` `')}```"
         else:
             detail += f"\nReview the SQL before deciding: `undogate show {public_id}`"
         return text, [

@@ -177,3 +177,17 @@ def _ts(dsn, public_id):
 def _status(dsn, public_id):
     with psycopg.connect(dsn) as conn:
         return conn.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (public_id,)).fetchone()[0]
+
+
+def test_agent_controlled_fields_cannot_inject_slack_markup():
+    import datetime
+    evil = "x` <!channel> <https://evil.example|SAFE, click> & `"
+    for include_sql in (False, True):
+        pub = SlackPublisher("unused", FakeWeb(), "C", {"T1"}, include_sql=include_sql)
+        _, blocks = pub._blocks("cp_1", evil, evil, evil, f"SELECT '{evil}'",
+                                datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC))
+        text = blocks[0]["text"]["text"]
+        assert "<!" not in text and "<http" not in text, text
+        agent_line = text.splitlines()[1]
+        assert agent_line.count("`") == 2, agent_line  # label cannot close its code span
+        assert "&lt;!channel&gt;" in text
