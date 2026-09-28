@@ -26,6 +26,10 @@ class AgentConfig(_Strict):
 class SlackConfig(_Strict):
     admin_allowlist: list[str] = Field(default_factory=list)
     team_allowlist: list[str] = Field(default_factory=list)
+    # Channel the gateway posts pending approvals to. Unset = no built-in publisher.
+    channel_id: str | None = None
+    # Off by default: SQL literals may contain regulated data that must not leave for Slack.
+    include_sql: bool = False
 
 class UndogateConfig(_Strict):
     version: int = 1

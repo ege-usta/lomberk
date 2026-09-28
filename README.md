@@ -36,7 +36,21 @@ curl -H "$H" localhost:8000/v1/checkpoints/pending
 curl -H "$H" -X POST localhost:8000/v1/checkpoints/cp_…/approve    # or /reject
 curl -H "$H" -X POST localhost:8000/v1/checkpoints/cp_…/undo       # users AND cascaded payments come back
 ```
-Pending requests expire after `agent.approval_timeout_minutes`. Slack approvals via Socket Mode are available (`UNDOGATE_SLACK_ENABLED=true`).
+Pending requests expire after `agent.approval_timeout_minutes`. Review the exact SQL first with `GET /v1/checkpoints/cp_…` or `undogate show cp_…`.
+
+### Or approve in Slack
+Create the app from [`slack/app-manifest.json`](slack/app-manifest.json) (bot scope `chat:write` only, Socket Mode, so no public URL is needed), invite the bot to your approvals channel, then:
+```yaml
+slack:
+  channel_id: C0123APPROVALS
+  team_allowlist: [T0123]
+  admin_allowlist: [U0ALICE, U0BOB]   # only these users' clicks count
+  include_sql: false                  # default: SQL never leaves for Slack
+```
+```bash
+UNDOGATE_SLACK_ENABLED=true UNDOGATE_SLACK_APP_TOKEN=xapp-… UNDOGATE_SLACK_BOT_TOKEN=xoxb-…
+```
+Every held request is posted with Approve/Reject buttons, and the message updates to the final state. The approver's Slack ID is written to the audit log.
 
 ## Configuration (`undogate.yaml`)
 ```yaml

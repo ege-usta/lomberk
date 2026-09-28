@@ -294,6 +294,7 @@ BEGIN
     
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.check_checkpoint_status TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION undogate.verify_ledger TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON undogate.slack_messages TO %I', p_control_role);
     
     
     -- Runtime (only agent role)

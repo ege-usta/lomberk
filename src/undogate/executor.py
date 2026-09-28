@@ -46,6 +46,13 @@ class UndogateExecutor:
               status=res.status, rows_affected=res.rows_affected, message=res.message)
         return res
 
+    def get_checkpoint(self, public_id: str) -> dict | None:
+        with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT public_id, status, classification, decision, agent_label, principal, sql_text, "
+                "rows_affected, created_at FROM undogate.checkpoints WHERE public_id = %s", (public_id,))
+            return cur.fetchone()
+
     def reject(self, public_id: str, actor: str) -> bool:
         """Reject a pending checkpoint. Returns False if it is not pending."""
         try:

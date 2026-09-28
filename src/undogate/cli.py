@@ -110,6 +110,20 @@ def approve(token: str):
         raise typer.Exit(1)
 
 @app.command()
+def show(token: str):
+    """Show exactly what a checkpoint will run (review before approving)."""
+    control, runtime = get_dsns()
+    cp = UndogateExecutor(control, runtime).get_checkpoint(token)
+    if not cp:
+        console.print(f"[red]Token {token} not found.[/red]")
+        raise typer.Exit(1)
+    for key in ("public_id", "status", "classification", "agent_label", "principal", "created_at", "rows_affected"):
+        console.print(f"[bold]{key}[/bold]: {cp[key]}")
+    console.print("[bold]sql[/bold]:")
+    console.print(cp["sql_text"], markup=False, highlight=False)
+
+
+@app.command()
 def reject(token: str):
     """Reject a pending SQL statement."""
     control, runtime = get_dsns()

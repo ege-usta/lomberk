@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI):
     # Local registry ownership for safe and strict shutdown drainage
     local_db_workers = set()
     local_shutdown_event = asyncio.Event()
+    publisher_task = None
     
     # Still attach to app.state for testing and observability, 
     # but internal processing strictly uses the local references.
@@ -98,15 +99,17 @@ async def lifespan(app: FastAPI):
                 raise ValueError("Startup Refusal: config.slack.team_allowlist is missing or empty.")
                 
             slack_update_cb = getattr(app.state, "slack_update_callback", None)
-            if not slack_update_cb or not inspect.iscoroutinefunction(slack_update_cb):
-                raise ValueError("Startup Refusal: slack_update_callback dependency missing or not an async function.")
-                
             slack_resolver = getattr(app.state, "slack_target_resolver", None)
-            if not slack_resolver or not inspect.iscoroutinefunction(slack_resolver):
-                raise ValueError("Startup Refusal: slack_target_resolver dependency missing or not an async function.")
+            # Built-in publisher mode: config names a channel and nothing is injected.
+            use_publisher = bool(config.slack.channel_id) and slack_update_cb is None and slack_resolver is None
+            if not use_publisher:
+                if not slack_update_cb or not inspect.iscoroutinefunction(slack_update_cb):
+                    raise ValueError("Startup Refusal: slack_update_callback dependency missing or not an async function.")
+                if not slack_resolver or not inspect.iscoroutinefunction(slack_resolver):
+                    raise ValueError("Startup Refusal: slack_target_resolver dependency missing or not an async function.")
                 
             try:
-                from undogate.slack import SlackInteractionAdapter
+                from undogate.slack import SlackInteractionAdapter, slack_actor
                 from undogate.slack_transport import SlackTransport
                 from slack_sdk.socket_mode.aiohttp import SocketModeClient
                 from slack_sdk.web.async_client import AsyncWebClient
@@ -136,11 +139,11 @@ async def lifespan(app: FastAPI):
                         return await _run_tracked(executor.check_status, pid)
                         
                     async def approve_cb(pid):
-                        res = await _run_tracked(executor.execute_pending, pid, "slack")
+                        res = await _run_tracked(executor.execute_pending, pid, slack_actor.get() or "slack")
                         return {"status": res.status}
                         
                     async def reject_cb(pid):
-                        await _run_tracked(executor.reject, pid, "slack")
+                        await _run_tracked(executor.reject, pid, slack_actor.get() or "slack")
                         return {"status": "denied"}
                         
                     async def update_cb(channel, ts, msg):
@@ -148,6 +151,16 @@ async def lifespan(app: FastAPI):
                         
                     return resolve_cb, status_cb, approve_cb, reject_cb, update_cb
                 
+                web_factory = getattr(app.state, "slack_web_client_factory", None) or AsyncWebClient
+                if use_publisher:
+                    from undogate.slack_publisher import SlackPublisher
+                    publisher = SlackPublisher(
+                        admin_dsn, web_factory(token=bot_token), config.slack.channel_id,
+                        set(config.slack.team_allowlist), include_sql=config.slack.include_sql,
+                    )
+                    slack_resolver, slack_update_cb = publisher.resolve, publisher.update
+                    publisher_task = asyncio.create_task(publisher.run(local_shutdown_event))
+
                 resolve_cb, status_cb, approve_cb, reject_cb, update_cb = make_callbacks(
                     _executor_instance, _policy_engine_instance, slack_resolver, slack_update_cb, local_db_workers, local_shutdown_event
                 )
@@ -163,7 +176,7 @@ async def lifespan(app: FastAPI):
                 )
                 
                 def client_factory(token: str):
-                    return SocketModeClient(app_token=token, web_client=AsyncWebClient(token=bot_token))
+                    return SocketModeClient(app_token=token, web_client=web_factory(token=bot_token))
                 
                 factory_override = getattr(app.state, "slack_client_factory", None)
                 
@@ -196,6 +209,8 @@ async def lifespan(app: FastAPI):
                 _mcp_gate.inner = None
     finally:
         local_shutdown_event.set()
+        if publisher_task:
+            await asyncio.gather(publisher_task, return_exceptions=True)
 
         if _slack_transport_instance:
             await _slack_transport_instance.disconnect()
@@ -394,6 +409,19 @@ def reject_checkpoint(
     return {"status": "denied"}
             
 _UNDO_HTTP_STATUS = {"already_undone": 409, "conflict": 409, "busy": 423, "denied": 404, "failed": 400}
+
+
+@app.get("/v1/checkpoints/{public_id}")
+def get_checkpoint(
+    public_id: str,
+    api_key: str = Depends(verify_admin_key),
+    executor: UndogateExecutor = Depends(get_executor)
+):
+    """What an approver reviews before deciding: the exact SQL and who sent it."""
+    cp = executor.get_checkpoint(public_id)
+    if not cp:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return cp
 
 
 @app.post("/v1/checkpoints/{public_id}/undo")

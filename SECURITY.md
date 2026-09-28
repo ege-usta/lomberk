@@ -24,6 +24,7 @@ The agent never receives a database credential or the admin key. **Deploy the ga
 3. **Database-enforced capture**: a `SECURITY DEFINER` trigger records every changed row, including FK cascades. It refuses agent-role writes that are not bound to a live, single-use capability token for the current transaction. Writes whose cascade would reach an unregistered table are refused, because those rows could not be undone.
 4. **Least privilege**: startup refuses superuser roles and refuses when the control and agent DSNs resolve to the same role. The agent role only gets DML on registered tables.
 5. **Approvals**: human-only (admin key, CLI, or Slack allowlist), constant-time key comparison, expiry after `agent.approval_timeout_minutes`, with the hard gate re-checked at approval time.
+   Slack: the bot has only the `chat:write` scope and uses Socket Mode (no inbound URL). A click counts only when the team and user are allowlisted **and** the `(team, channel, message_ts)` matches the durable binding the gateway recorded when it posted. The checkpoint ID in the button is never trusted on its own. A post whose outcome is unknown is never re-sent, and SQL is not sent to Slack unless `slack.include_sql` is set.
 6. **Undo**: undoes rows in an order that respects foreign keys. It refuses when a row changed after the checkpoint, when the schema drifted, or when the undo would cascade into rows it did not create.
 7. **Tamper-evident ledger**: checkpoints are append-only (UPDATE/DELETE of recorded fields is blocked) and SHA-256 hash-chained. `undogate verify-ledger` finds the first altered entry and prints the head hash.
 8. **Data minimisation**: columns named like `password`, `token`, `secret`, `ssn`, `hash`, `credit_card` cannot be referenced and are fully masked in results. The audit log is owner-only (`0600`) and never written to `/tmp`.
@@ -37,6 +38,7 @@ The agent never receives a database credential or the admin key. **Deploy the ga
 - **TLS** is not terminated by the gateway. Run it behind a TLS reverse proxy or service mesh.
 - **Optional LLM sentinel** (`OPENAI_API_KEY`) sends SQL text to a third party and is advisory only. Leave it unset if SQL may contain regulated data.
 - **Throughput**: checkpoint creation is serialized by one ledger lock.
+- **Approver identity** over the API/CLI is the shared admin key or the OS user; only Slack approvals carry a verified per-person ID. SSO/OIDC for approvers is not implemented.
 
 ## Hardening checklist
 

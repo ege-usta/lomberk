@@ -102,3 +102,15 @@ BEGIN
         ALTER TABLE undogate.checkpoints ADD COLUMN chain_seq BIGINT UNIQUE;
     END IF;
 END $$;
+
+-- Slack approval outbox: one row per pending checkpoint posted to Slack.
+-- The (team, channel, ts) binding is the ONLY thing that authorizes a button click.
+CREATE TABLE IF NOT EXISTS undogate.slack_messages (
+    public_id   TEXT PRIMARY KEY REFERENCES undogate.checkpoints(public_id),
+    team_id     TEXT,
+    channel_id  TEXT NOT NULL,
+    message_ts  TEXT,
+    state       TEXT NOT NULL CHECK (state IN ('publishing', 'bound', 'unknown')),
+    claimed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (channel_id, message_ts)
+);

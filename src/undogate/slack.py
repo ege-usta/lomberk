@@ -2,13 +2,25 @@ import logging
 import asyncio
 from typing import Set, Dict, Any, Callable, Awaitable, Optional
 
+from contextvars import ContextVar
+
 logger = logging.getLogger("undogate.slack")
+
+# "slack:<user_id>" of the approver while an approve/reject callback runs, for the
+# audit trail. A context variable keeps callback signatures unchanged.
+slack_actor: ContextVar[Optional[str]] = ContextVar("slack_actor", default=None)
 
 class UnauthorizedUserError(Exception): pass
 class InvalidPayloadError(Exception):
     pass
 
 class TaskCapacityExceededError(Exception): pass
+
+# A concurrent click can read the checkpoint mid-flight. Wait briefly for a terminal
+# state so the last UI update never freezes on "executing" after the write applied.
+TRANSIENT_STATES = ("approved", "executing")  # "busy" is a final per-click outcome (Phase 3B lifecycle)
+SETTLE_POLLS = 30
+SETTLE_INTERVAL = 0.1
 
 class SlackInteractionAdapter:
     def __init__(
@@ -69,12 +81,12 @@ class SlackInteractionAdapter:
 
         is_approve = (action_id == "approve_button")
         
-        task = asyncio.create_task(self._process_interaction(team_id, channel_id, message_ts, public_id, is_approve))
+        task = asyncio.create_task(self._process_interaction(team_id, channel_id, message_ts, public_id, is_approve, actor=f"slack:{user_id}"))
         self._active_tasks.add(task)
         task.add_done_callback(self._active_tasks.discard)
         return {"acknowledged": True}
 
-    async def _process_interaction(self, team_id: str, channel_id: str, message_ts: str, public_id: str, is_approve: bool):
+    async def _process_interaction(self, team_id: str, channel_id: str, message_ts: str, public_id: str, is_approve: bool, actor: Optional[str] = None):
         try:
             try:
                 expected_public_id = await self.target_resolver(team_id, channel_id, message_ts)
@@ -92,10 +104,12 @@ class SlackInteractionAdapter:
                 logger.warning("Aborting interaction processing; server is shutting down.")
                 return
 
-            if is_approve:
-                await self.approve_callback(public_id)
-            else:
-                await self.reject_callback(public_id)
+            callback = self.approve_callback if is_approve else self.reject_callback
+            token = slack_actor.set(actor)
+            try:
+                await callback(public_id)
+            finally:
+                slack_actor.reset(token)
                 
         except asyncio.CancelledError:
             return
@@ -110,6 +124,11 @@ class SlackInteractionAdapter:
             async with lock_entry["lock"]:
                 try:
                     final_state = await self.status_callback(public_id)
+                    for _ in range(SETTLE_POLLS):
+                        if final_state not in TRANSIENT_STATES:
+                            break
+                        await asyncio.sleep(SETTLE_INTERVAL)
+                        final_state = await self.status_callback(public_id)
                     if final_state == "applied": msg = f":white_check_mark: Checkpoint {public_id} successfully applied."
                     elif final_state == "approved": msg = f":white_check_mark: Checkpoint {public_id} approved, pending execution verification."
                     elif final_state in ("denied", "rejected"): msg = f":x: Checkpoint {public_id} was rejected."
