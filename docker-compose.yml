@@ -1,6 +1,7 @@
 # Demo stack: a "production" Postgres, a one-shot installer, and the Rowback gateway.
 # Agents connect to http://localhost:8000/mcp with the agent key ONLY.
 # Replace every secret below before using this outside a laptop.
+name: rowback
 services:
   db:
     image: postgres:16-alpine
