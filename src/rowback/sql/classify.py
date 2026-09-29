@@ -121,23 +121,97 @@ def extract_tables_from_ast(ast):
     return list(dict.fromkeys(visitor.tables))
 
 
-def check_sensitive_columns(ast):
-    from pglast.visitors import Visitor
-    class ColumnRefVisitor(Visitor):
-        def __init__(self):
-            super().__init__()
-            self.sensitive_found = []
-            self.sensitive_keywords = {"password", "token", "secret", "ssn", "hash", "credit_card"}
-            
-        def visit_ColumnRef(self, ancestors, node):
-            # Fields is a list of String or A_Star nodes
-            for field in node.fields:
-                if hasattr(field, 'sval'):
-                    val = field.sval.lower()
-                    if any(k in val for k in self.sensitive_keywords):
-                        self.sensitive_found.append(field.sval)
-                        
-    visitor = ColumnRefVisitor()
-    for stmt_dict in ast:
-        visitor(stmt_dict)
-    return visitor.sensitive_found
+SENSITIVE_KEYWORDS = ("password", "token", "secret", "ssn", "hash", "credit_card")
+
+
+def check_sensitive_columns(ast) -> list[str]:
+    """Reasons the statement could expose a secret-looking column, or [] if it can't.
+
+    Results are masked by output column name, so a secret must never reach the output
+    under another name or folded into one value. Refused: naming such a column anywhere
+    (column refs, field selection, USING, alias lists); whole-row references (`u`,
+    `u::text`, `jsonb_build_object('r', u)`); `*` anywhere but the top-level select or
+    RETURNING list (a subquery, CTE, UNION branch or INSERT ... SELECT could rename it);
+    and renaming a table's columns with an alias list. String literals are data.
+    """
+    found: list[str] = []
+    names: set[str] = set()
+
+    def collect(node) -> None:  # every relation, alias and CTE name a whole-row ref could use
+        if isinstance(node, dict):
+            kind = node.get("@")
+            if kind == "RangeVar":
+                names.add(node.get("relname", ""))
+            if kind == "CommonTableExpr":
+                names.add(node.get("ctename", ""))
+            alias = node.get("alias")
+            if isinstance(alias, dict):
+                names.add(alias.get("aliasname", ""))
+            for v in node.values():
+                collect(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                collect(v)
+
+    def secret(name) -> bool:
+        return isinstance(name, str) and any(k in name.lower() for k in SENSITIVE_KEYWORDS)
+
+    def walk(node, star_ok: bool = False) -> None:
+        if isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v, star_ok)
+            return
+        if not isinstance(node, dict):
+            return
+        kind = node.get("@")
+        if kind == "A_Const":
+            return
+        if kind == "String" and secret(node.get("sval")):
+            found.append(node["sval"])
+        if kind == "A_Star" and not star_ok:
+            found.append("* outside the top-level select list")
+        if kind == "ColumnRef":
+            fields = node.get("fields", [])
+            if len(fields) == 1 and fields[0].get("@") == "String" and fields[0].get("sval") in names:
+                found.append(f"whole-row reference {fields[0]['sval']}")
+            walk(fields, star_ok)
+            return
+        if kind == "A_Indirection":
+            walk(node.get("arg"))
+            walk(node.get("indirection"), star_ok)
+            return
+        if kind in ("RangeVar", "JoinExpr") and (node.get("alias") or {}).get("colnames"):
+            found.append("renaming a table's columns with an alias list")
+        if kind == "SubLink":
+            exists = (node.get("subLinkType") or {}).get("name") == "EXISTS_SUBLINK"
+            walk(node.get("testexpr"))
+            walk_stmt(node.get("subselect"), top=exists)  # EXISTS returns a boolean, never the row
+            return
+        if kind in ("SelectStmt", "InsertStmt", "UpdateStmt", "DeleteStmt"):
+            walk_stmt(node, top=False)
+            return
+        for v in node.values():
+            walk(v)
+
+    def walk_stmt(stmt, top: bool) -> None:
+        if not isinstance(stmt, dict):
+            return
+        plain_select = (stmt.get("op") or {}).get("name", "SETOP_NONE") == "SETOP_NONE"
+        for key, value in stmt.items():
+            if key == "returningClause" and isinstance(value, dict):
+                key, value = "returningList", value.get("exprs", [])
+            star_here = top and (key == "returningList" or (key == "targetList" and plain_select and stmt.get("@") == "SelectStmt"))
+            if star_here:
+                for target in value:  # only a bare `*` / `t.*` / `(t).*` in the output list
+                    if isinstance(target, dict):
+                        walk(target.get("val"), star_ok=True)
+            elif key in ("larg", "rarg", "selectStmt"):
+                walk_stmt(value, top=False)
+            else:
+                walk(value)
+
+    for raw in ast:
+        tree = raw(skip_none=True)
+        collect(tree)
+        walk_stmt(tree.get("stmt"), top=True)
+    return found

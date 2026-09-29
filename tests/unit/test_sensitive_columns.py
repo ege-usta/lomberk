@@ -1,0 +1,58 @@
+"""Secret-looking columns (password, token, secret, ssn, hash, credit_card) must not reach the
+agent under any name. Masking works on output column names, so every way to move a secret
+into a differently named column, or into one value, has to be refused before execution."""
+import pglast
+import pytest
+
+from rowback.sql.classify import check_sensitive_columns
+
+
+def refused(sql: str) -> bool:
+    return bool(check_sensitive_columns(pglast.parse_sql(sql)))
+
+
+LEAKS = [
+    "SELECT password_hash FROM public.users",
+    "SELECT password_hash AS x FROM public.users",
+    "SELECT u FROM public.users u",                                   # whole row as one value
+    "SELECT users FROM public.users",
+    "SELECT u::text AS x FROM public.users u",
+    "SELECT jsonb_build_object('r', u) AS x FROM public.users u",
+    "SELECT (u).password_hash AS x FROM public.users u",              # field selection
+    "SELECT upper((u).api_token) FROM public.users u",
+    "SELECT y FROM (SELECT * FROM public.users) s(a, b, y)",          # * in a subquery, renamed
+    "SELECT y FROM (TABLE public.users) s(a, b, y)",
+    "SELECT * FROM public.users AS u(a, b, y)",                       # base-table columns renamed
+    "SELECT * FROM (public.users JOIN public.t USING (id)) AS j(a, b, y)",
+    "SELECT id, name, 'x' AS y FROM public.a UNION ALL SELECT * FROM public.users",
+    "WITH s AS (SELECT * FROM public.users) SELECT * FROM s",
+    "INSERT INTO public.notes (body) SELECT u::text FROM public.users u",
+    "INSERT INTO public.notes SELECT * FROM public.users",
+    "SELECT count(*) FROM public.users JOIN public.guess USING (password_hash)",
+    "SELECT concat(u.*) FROM public.users u",
+    "SELECT id FROM public.users u WHERE u::text LIKE '%a%'",
+    "SELECT a FROM public.t WHERE a IN (SELECT * FROM public.users)",
+]
+
+ALLOWED = [
+    "SELECT * FROM public.users",                                     # top-level *: masked by name
+    "SELECT u.* FROM public.users u",
+    "SELECT id, name FROM public.users WHERE id = 1",
+    "SELECT count(*) FROM public.users",
+    "SELECT id FROM public.t WHERE EXISTS (SELECT * FROM public.users WHERE users.id = t.id)",
+    "SELECT 'password' AS label, 'my token' FROM public.t",           # string literals are data
+    "SELECT a, b FROM (VALUES (1, 2)) v(a, b)",
+    "UPDATE public.users SET name = 'x' WHERE id = 1 RETURNING *",
+    "DELETE FROM public.users WHERE id = 1",
+    "SELECT o.id, c.name FROM public.orders o JOIN public.customers c ON c.id = o.customer_id",
+]
+
+
+@pytest.mark.parametrize("sql", LEAKS)
+def test_every_route_to_a_secret_is_refused(sql):
+    assert refused(sql), sql
+
+
+@pytest.mark.parametrize("sql", ALLOWED)
+def test_ordinary_queries_still_pass(sql):
+    assert not refused(sql), check_sensitive_columns(pglast.parse_sql(sql))
