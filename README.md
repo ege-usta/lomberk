@@ -7,6 +7,8 @@ Undogate is an MCP gateway for PostgreSQL. AI agents send SQL through it instead
 
 In April 2026 an autonomous coding agent deleted a production database in 9 seconds. Here is the same scenario behind Undogate.
 
+![Undogate demo: destructive SQL denied, a protected DELETE held, approved, then undone](site/demo.gif)
+
 ### 1. Start the stack
 ```bash
 docker compose up -d --build
