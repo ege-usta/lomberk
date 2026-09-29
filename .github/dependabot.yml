@@ -1,0 +1,28 @@
+# One grouped PR a month per ecosystem keeps upkeep to a few minutes; CI (tests, core
+# without ee/, pip-audit) must pass before merging. Security fixes still arrive right away.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7   # let a fresh release prove itself before we take it
+    groups:
+      python:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7   # let a fresh release prove itself before we take it
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7   # let a fresh release prove itself before we take it
