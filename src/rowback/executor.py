@@ -461,10 +461,12 @@ class RowbackExecutor:
 
                     cur.execute("SELECT rowback.record_approval(%s, %s)", (public_id, actor))
                     approvals = cur.fetchone()[0]
-                    if approvals < self.required_approvals:
+                    if self.required_approvals > 1 and approvals < self.required_approvals:
                         audit("approval_recorded", actor=actor, public_id=public_id, approvals=approvals, required=self.required_approvals)
+                        note = ("" if actor.startswith(("oidc:", "slack:")) else
+                                " Admin-key and CLI approvals are recorded but don't count toward the two-person rule; approve with SSO or Slack.")
                         return ExecutionResult(operation_id=None, status="awaiting_approval", public_id=public_id,
-                                               message=f"Approval {approvals} of {self.required_approvals} recorded. Another person must approve.")
+                                               message=f"{approvals} of {self.required_approvals} approvals.{note}")
 
                     cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                     exec_token = cur.fetchone()[0]

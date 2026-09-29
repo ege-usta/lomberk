@@ -84,7 +84,7 @@ Set `ROWBACK_SSO_CLIENT_SECRET` if your IdP requires a client secret for that cl
 approvals:
   required: 2      # a held write runs only after two different people approve it
 ```
-Approvals from the panel, API, Slack and CLI all count, and each person counts once. The shared admin key is one person, so use SSO or Slack for real two-person control. One reject cancels the write. Every approval is stored in the append-only `rowback.approvals` table.
+Only verified identities count: the N people must all approve through SSO (panel or API), or all through Slack. Mixing systems doesn't add up, because one person can hold both. Admin-key and CLI approvals are recorded but don't count, since they prove no identity. One reject cancels the write. Every approval is stored in the append-only `rowback.approvals` table.
 
 ### Audit export (Pro)
 ```bash

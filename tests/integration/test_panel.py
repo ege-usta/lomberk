@@ -179,8 +179,16 @@ def test_sso_sign_in_then_two_people_apply(gateway, idp):
 
         pid = pending(control)
         assert c.post(f"/panel/api/checkpoints/{pid}/approve", headers=H).json()["status"] == "awaiting_approval"
-        admin_login(c)  # a second, different person: the admin key holder
+        admin_login(c)  # the shared key proves no identity, so it can't be the second person
+        assert c.post(f"/panel/api/checkpoints/{pid}/approve", headers=H).json()["status"] == "awaiting_approval"
+
+        fake["email"] = "bob@corp.com"  # a second person signs in with SSO
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(
+            c.get("/panel/sso/login", follow_redirects=False).headers["location"]).query))
+        fake["challenge"], fake["nonce"] = q["code_challenge"], q["nonce"]
+        c.get("/panel/sso/callback", params={"code": "good-code", "state": q["state"]}, follow_redirects=False)
         assert c.post(f"/panel/api/checkpoints/{pid}/approve", headers=H).json()["status"] == "applied"
+        fake["email"] = "alice@corp.com"
 
 
 def test_sso_token_with_another_nonce_is_refused(gateway, idp):

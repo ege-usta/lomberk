@@ -60,11 +60,11 @@ function pendingItem(cp) {
   const reject = el("button", { className: "btn deny", type: "button" }, "Reject");
   approve.onclick = () => act(cp.public_id, "approve", approve);
   reject.onclick = () => act(cp.public_id, "reject", reject);
-  const got = cp.approved_by.length;
+  const got = cp.approved_by.length;  // the server decides the quorum; this only lists who approved
   const meta = el("p", { className: "meta" },
     el("span", { className: "verdict held" }, "HELD"), ` ${cp.agent_label || "agent"} · ${when(cp.created_at)} · ${cp.public_id}`);
   const count = required > 1
-    ? el("p", { className: "meta" }, `${got} of ${required} approvals`, got ? ` (${cp.approved_by.join(", ")})` : "")
+    ? el("p", { className: "meta" }, got ? `Approved so far by ${cp.approved_by.join(", ")}` : "No approvals yet")
     : "";
   return el("li", {}, meta, el("pre", { className: "sql" }, cp.sql_text), count, el("div", { className: "actions" }, approve, reject));
 }
@@ -106,7 +106,7 @@ function showSignin() {
 async function start() {
   const s = await call("api/session");
   required = s.required_approvals;
-  $("rule").textContent = required > 1 ? `Each write needs ${required} different people.` : "";
+  $("rule").textContent = required > 1 ? `Each write needs ${required} different people signed in with the same SSO or Slack.` : "";
   if (!s.actor) {
     showSignin();
     $("sso").hidden = !s.sso;

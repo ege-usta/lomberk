@@ -66,6 +66,16 @@ def test_single_approval_is_recorded_by_default(dsn):
         assert conn.execute("SELECT actor FROM rowback.approvals WHERE public_id = %s", (pid,)).fetchall() == [("cli:carol",)]
 
 
+def test_unverified_or_cross_system_approvals_do_not_make_a_quorum(dsn):
+    ex, pid, before = _executor(dsn, 2), _pending(dsn), _val(dsn)
+    for actor in ("api_admin", "cli:alice", "cli:mallory", "slack:UALICE", "oidc:alice@co.com"):
+        res = ex.execute_pending(pid, actor=actor)  # one human could hold every one of these
+        assert res.status == "awaiting_approval", actor
+    assert "don't count" in ex.execute_pending(pid, actor="api_admin").message
+    assert _val(dsn) == before
+    assert ex.execute_pending(pid, actor="slack:UBOB").status == "applied"  # two people in one system
+
+
 def test_one_reject_vetoes(dsn):
     ex, pid, before = _executor(dsn, 2), _pending(dsn), _val(dsn)
     assert ex.execute_pending(pid, actor="oidc:alice@co.com").status == "awaiting_approval"
