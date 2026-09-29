@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "undogate",
+  "description": "Database safety for AI agents",
+  "owner": { "name": "Undogate" },
+  "plugins": [
+    {
+      "name": "seatbelt",
+      "description": "Stops your agent before a destructive database command and asks you first.",
+      "category": "security",
+      "source": "./seatbelt"
+    }
+  ]
+}

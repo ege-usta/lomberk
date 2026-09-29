@@ -3,6 +3,8 @@
 **Ctrl+Z for AI agents.**
 Undogate is an MCP gateway for PostgreSQL. AI agents send SQL through it instead of holding database credentials. It blocks destructive commands, holds large or sensitive writes for a human, records every changed row, and can undo any applied write, including foreign-key cascades.
 
+**Just want a seatbelt for Claude Code?** [Undogate Seatbelt](seatbelt/) is a free plugin that makes your agent ask before `DROP`, `TRUNCATE`, `DELETE` without `WHERE`, `prisma migrate reset`, `dropdb` and friends. Install it in two commands.
+
 ## 9-second database deletion demo
 
 In April 2026 an autonomous coding agent deleted a production database in 9 seconds (through an over-privileged infrastructure token). Undogate closes the other door: an agent's own database access. Here is what a rogue agent can and can't do when its SQL goes through Undogate.

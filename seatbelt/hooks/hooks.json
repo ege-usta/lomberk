@@ -1,0 +1,11 @@
+{
+  "description": "Undogate Seatbelt: ask before destructive database commands",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|mcp__.*",
+        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/seatbelt.py\"", "timeout": 10 }]
+      }
+    ]
+  }
+}
