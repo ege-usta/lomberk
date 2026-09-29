@@ -598,7 +598,8 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     from fastapi.testclient import TestClient
     from unittest.mock import AsyncMock, MagicMock
     from rowback.policy import PolicyDecision
-    from rowback.offline_pilot import InMemoryBindingStore, OfflinePublisher, OfflineUpdater
+    from offline_pilot import InMemoryBindingStore, OfflinePublisher, OfflineUpdater, PublishOutcomeUnknown
+    from slack_sdk.socket_mode.request import SocketModeRequest
 
     monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake_app_token")
@@ -624,6 +625,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     fake_socket_client = MagicMock()
     fake_socket_client.connect = AsyncMock()
     fake_socket_client.close = AsyncMock()
+    fake_socket_client.send_socket_mode_response = AsyncMock()
     fake_socket_client.socket_mode_request_listeners = []
     app.state.slack_client_factory = lambda token: fake_socket_client
 
@@ -670,6 +672,16 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         transport = rowback.api._slack_transport_instance
         adapter = transport.business_adapter
 
+        async def deliver(payload, envelope_id):
+            request = SocketModeRequest(type="interactive", envelope_id=envelope_id,
+                                        payload={"type": "block_actions", **payload})
+            for listener in fake_socket_client.socket_mode_request_listeners:
+                await listener(fake_socket_client, request)
+            tasks = tuple(adapter._active_tasks)
+            if tasks:
+                await asyncio.wait_for(asyncio.gather(*tasks), 5)
+
+
         # ---------------------------------------------------------
         # Case 1: Normal Approve
         # ---------------------------------------------------------
@@ -680,7 +692,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
             "container": {"channel_id": "C_VALID", "message_ts": ts1},
             "actions": [{"action_id": "approve_button", "value": pid1}],
         }
-        await adapter.handle_interaction(req1)
+        await deliver(req1, "envelope-1")
         # Wait for update
         update = await updater.wait_for_update(timeout=2.0)
         assert update is not None
@@ -701,10 +713,11 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         # Case 2: Duplicate
         # ---------------------------------------------------------
         # Duplicate A: Exact same envelope
-        await adapter.handle_interaction(req1)
-        update_dup = await updater.wait_for_update(timeout=2.0)
-        assert update_dup is not None
-        assert f"successfully applied" in update_dup[2]
+        before_updates = len(updater.updates)
+        before_acks = fake_socket_client.send_socket_mode_response.await_count
+        await deliver(req1, "envelope-1")
+        assert len(updater.updates) == before_updates
+        assert fake_socket_client.send_socket_mode_response.await_count == before_acks + 1
         
         # Duplicate B: Different envelope, same button value
         req1b = {
@@ -713,7 +726,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
             "container": {"channel_id": "C_VALID", "message_ts": ts1}, # TS doesn't matter much for duplicate if public_id is same
             "actions": [{"action_id": "approve_button", "value": pid1}],
         }
-        await adapter.handle_interaction(req1b)
+        await deliver(req1b, "envelope-2")
         update_dup2 = await updater.wait_for_update(timeout=2.0)
         assert update_dup2 is not None
 
@@ -743,7 +756,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
             "container": {"channel_id": "C_VALID", "message_ts": ts2},
             "actions": [{"action_id": "reject_button", "value": pid2}],
         }
-        await adapter.handle_interaction(req2)
+        await deliver(req2, "envelope-reject")
         update = await updater.wait_for_update(timeout=2.0)
         assert update is not None
         assert f"rejected" in update[2]
@@ -768,7 +781,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
             "container": {"channel_id": "C_VALID", "message_ts": "TS_UNKNOWN"},
             "actions": [{"action_id": "approve_button", "value": "cp_unknown"}],
         }
-        await adapter.handle_interaction(req3)
+        await deliver(req3, "envelope-invalid")
         update = await updater.wait_for_update(timeout=0.5)
         assert update is None, "Should not update UI for unknown binding"
 
@@ -783,7 +796,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
             "container": {"channel_id": "C_VALID", "message_ts": ts4},
             "actions": [{"action_id": "approve_button", "value": pid4}],
         }
-        await adapter.handle_interaction(req4)
+        await deliver(req4, "envelope-lost")
         update = await updater.wait_for_update(timeout=0.5)
         assert update is None, "Should fail closed, no UI update, no execution"
         
@@ -795,4 +808,36 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         # ---------------------------------------------------------
         # Case 6: Publisher loss (No binding formed)
         # ---------------------------------------------------------
-        # (This is implicitly tested by Case 5 since both represent binding=None)
+        sends_before = publisher.message_counter
+        bindings_before = dict(binding_store.store)
+        with pytest.raises(PublishOutcomeUnknown):
+            await publisher.publish_checkpoint("T_VALID", "C_VALID", pid4, lossy=True)
+        assert publisher.message_counter == sends_before + 1
+        assert binding_store.store == bindings_before
+
+        # Independent authorization/target mutations; each must preserve DB state.
+        import copy
+        pid5, ts5 = await create_and_publish_checkpoint()
+        baseline = {"team": {"id": "T_VALID"}, "user": {"id": "U_ADMIN"},
+                    "container": {"channel_id": "C_VALID", "message_ts": ts5},
+                    "actions": [{"action_id": "approve_button", "value": pid5}]}
+        for index, (section, field, value) in enumerate([
+            ("team", "id", "T_OTHER"), ("user", "id", "U_OTHER"),
+            ("container", "channel_id", "C_OTHER"),
+            ("container", "message_ts", "TS_OTHER"),
+            ("actions", "value", pid4),
+        ]):
+            payload = copy.deepcopy(baseline)
+            target = payload[section][0] if section == "actions" else payload[section]
+            target[field] = value
+            count_before = len(updater.updates)
+            await deliver(payload, f"unauthorized-{index}")
+            assert len(updater.updates) == count_before
+            with psycopg.connect(admin_dsn) as conn, conn.cursor() as cur:
+                cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (pid5,))
+                assert cur.fetchone()[0] == "pending"
+                cur.execute("SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = (SELECT id FROM rowback.checkpoints WHERE public_id = %s)", (pid5,))
+                assert cur.fetchone()[0] == 0
+            with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM public.test_e2e")
+                assert cur.fetchone()[0] == 0
