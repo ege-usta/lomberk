@@ -328,6 +328,21 @@ class RowbackExecutor:
                                 
                             if tgqual is not None:
                                 raise Exception(f"Trigger condition (WHEN) is not allowed on {schema}.{table}.")
+                            # Rows reached through inheritance children or rewrite rules never pass
+                            # the capture trigger, so they could not be undone: refuse before writing.
+                            cur.execute(
+                                "SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = %(t)s OR inhrelid = %(t)s), "
+                                "EXISTS (SELECT 1 FROM pg_rewrite WHERE ev_class = %(t)s AND rulename <> '_RETURN'), "
+                                "EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = %(t)s AND NOT tgisinternal AND tgname <> 'rowback_capture')",
+                                {"t": c_oid})
+                            in_inheritance, has_rules, has_user_triggers = cur.fetchone()
+                            if in_inheritance:
+                                raise Exception(f"Table {schema}.{table} is part of an inheritance tree, whose rows can't all be captured or undone.")
+                            if has_rules:
+                                raise Exception(f"Table {schema}.{table} has rewrite rules, which move writes past capture.")
+                            if has_user_triggers and enforce_row_limit:
+                                # Undo refuses tables with their own triggers, so this write could not be undone.
+                                raise HoldForApproval(f"Table {schema}.{table} has its own triggers, so this write can't be undone.")
                                 
                             if tgattr and str(tgattr) != '' and str(tgattr) != 'b\'\'':
                                 raise Exception(f"Trigger column restrictions (UPDATE OF) are not allowed on {schema}.{table}.")

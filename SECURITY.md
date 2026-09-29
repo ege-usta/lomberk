@@ -37,7 +37,7 @@ The agent never receives a database credential or the admin key. **Deploy the ga
 - **Database superusers** can disable triggers and rewrite the whole hash chain. Export the `verify-ledger` head hash to an external system (SIEM, WORM storage) to detect this.
 - **Read access** is governed by the agent role's grants. Rowback masks secret-looking columns by name only; use PostgreSQL column privileges or RLS for real data classification.
 - **Sequences are not rewound** by undo, which is intentional (ADR-005).
-- **Undo scope**: single-column primary keys only. Tables with rules, inheritance, or user triggers are refused. Identity and generated columns are supported. DDL is blocked, not reversible.
+- **Undo scope**: single-column primary keys only. Agent writes to tables with rewrite rules or inheritance are refused before they run, because some rows would bypass capture. A write to a table with its own triggers (e.g. `updated_at`) can't be undone, so it waits for a person, who sees why. Identity and generated columns are supported. DDL is blocked, not reversible.
 - **TLS** is not terminated by the gateway. Run it behind a TLS reverse proxy or service mesh.
 - **Optional LLM sentinel** (`OPENAI_API_KEY`) sends SQL text to a third party and is advisory only. Leave it unset if SQL may contain regulated data.
 - **Throughput**: checkpoint creation is serialized by one ledger lock.

@@ -147,18 +147,21 @@ def test_undo_unsupported_schema(control_dsn, runtime_dsn, dsn, setup_db, monkey
     
     stmt2 = ClassifiedStatement(sql="INSERT INTO public.test_rule VALUES (1, 'val');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     res_rule = executor.execute(StatementEvaluation(statement=stmt2, decision=PolicyDecision.ALLOW, reason=""))
-    
+
     stmt3 = ClassifiedStatement(sql="INSERT INTO public.test_trigger VALUES (1, 'val');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     res_trig = executor.execute(StatementEvaluation(statement=stmt3, decision=PolicyDecision.ALLOW, reason=""))
 
-    # Foreign keys are supported; rules and user triggers still refuse
+    # Foreign keys are supported
     undo_fk = executor.execute_undo(res_fk.public_id)
     assert undo_fk.status == "undone", undo_fk.message
 
-    undo_rule = executor.execute_undo(res_rule.public_id)
-    assert undo_rule.status == "failed"
-    assert "Rules" in undo_rule.message
+    # Rules move writes past capture, so the write itself is refused (nothing to undo)
+    assert res_rule.status == "failed" and "rewrite rules" in res_rule.message
 
+    # A table with its own triggers can't be undone: the write waits for a person,
+    # and if they accept it, undo still refuses rather than guess.
+    assert res_trig.status == "approval_required" and "can't be undone" in res_trig.message
+    assert executor.execute_pending(res_trig.public_id, actor="cli:ops").status == "applied"
     undo_trig = executor.execute_undo(res_trig.public_id)
     assert undo_trig.status == "failed"
     assert "Triggers" in undo_trig.message

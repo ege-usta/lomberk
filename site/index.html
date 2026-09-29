@@ -268,7 +268,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
     <ul class="limit-list">
       <li><strong>Infrastructure tokens</strong>Rowback guards the SQL path. An agent holding a cloud or hosting API token can still delete a volume. Keep those tokens away from agents.</li>
       <li><strong>Database superusers</strong>They can disable triggers and rewrite the ledger. Ship the ledger's head hash to your SIEM.</li>
-      <li><strong>Some tables, for now</strong>Composite primary keys, and tables with rules, inheritance or their own triggers, are refused rather than guessed at.</li>
+      <li><strong>Some tables, for now</strong>Composite primary keys, rules and inheritance are refused rather than guessed at. Writes to tables with their own triggers can't be undone, so a person approves them first.</li>
       <li><strong>Schema changes</strong>DDL is blocked, not reversible. It goes through your normal migrations.</li>
     </ul>
   </div>

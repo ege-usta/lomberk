@@ -69,22 +69,12 @@ def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypa
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(control_dsn, runtime_dsn)
     
-    # We create a temporary trigger that throws an error when id = 3.
-    # This guarantees execution starts, the first row (id=2) is written (and captured), 
-    # but the transaction fails on id=3.
+    # A CHECK constraint fails on id = 3, so execution starts, the first row (id=2) is
+    # written (and captured), and then the statement fails. (A user trigger would make the
+    # table non-undoable, and such writes are now held for a person instead of running.)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("""
-            CREATE OR REPLACE FUNCTION public.fail_on_3() RETURNS TRIGGER AS $$
-            BEGIN
-                IF NEW.id = 3 THEN
-                    RAISE EXCEPTION 'Simulated error on id 3';
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql;
-            CREATE TRIGGER fail_on_3_trigger BEFORE INSERT ON public.test_fail FOR EACH ROW EXECUTE FUNCTION public.fail_on_3();
-        """)
-        
+        cur.execute("ALTER TABLE public.test_fail ADD CONSTRAINT simulated_error_on_3 CHECK (id <> 3)")
+
     sql = "INSERT INTO public.test_fail (id, val) VALUES (2, 'fail'), (3, 'error');"
     from rowback.models import ClassifiedStatement, StatementClass
     from rowback.policy import StatementEvaluation, PolicyDecision
@@ -93,7 +83,7 @@ def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypa
     
     res = executor.execute(eval_result, agent_label="test")
     assert res.status == "failed"
-    assert "Simulated error on id 3" in res.message
+    assert "simulated_error_on_3" in res.message
     
     # Data is not inserted
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
@@ -111,8 +101,7 @@ def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypa
         assert cur.fetchone()[0] == 'failed'
         
         # Cleanup
-        cur.execute("DROP TRIGGER fail_on_3_trigger ON public.test_fail")
-        cur.execute("DROP FUNCTION public.fail_on_3()")
+        cur.execute("ALTER TABLE public.test_fail DROP CONSTRAINT simulated_error_on_3")
 
 def test_p0_commit_network_loss(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
 
