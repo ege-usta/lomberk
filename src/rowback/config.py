@@ -31,6 +31,11 @@ class SlackConfig(_Strict):
     # Off by default: SQL literals may contain regulated data that must not leave for Slack.
     include_sql: bool = False
 
+class ApprovalsConfig(_Strict):
+    # Distinct people who must approve a held write before it runs (the two-person rule).
+    # Counts identities: SSO emails, Slack users, CLI users. The shared admin key is one person.
+    required: int = Field(1, ge=1, le=5)
+
 class SsoConfig(_Strict):
     # OIDC approvers (Enterprise). Unset issuer = approvals use the admin key only.
     issuer: str | None = None
@@ -55,6 +60,7 @@ class RowbackConfig(_Strict):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
     sso: SsoConfig = Field(default_factory=SsoConfig)
+    approvals: ApprovalsConfig = Field(default_factory=ApprovalsConfig)
 
 def load_config(path: str = "rowback.yaml") -> RowbackConfig:
     if not os.path.exists(path):

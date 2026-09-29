@@ -182,3 +182,20 @@ async def test_slack_shutdown_resolver_race(mock_callbacks):
     await asyncio.sleep(0.02)
     assert mock_callbacks.approve_calls == 0
     assert len(mock_callbacks.update_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_slack_keeps_buttons_while_more_approvals_are_needed(mock_callbacks):
+    async def first_of_two(public_id):  # two-person rule: the checkpoint stays pending
+        return {"status": "awaiting_approval"}
+
+    adapter = SlackInteractionAdapter({"U123"}, {"T1"}, mock_callbacks.resolve_target, first_of_two, mock_callbacks.reject, mock_callbacks.status, mock_callbacks.update)
+    payload = {
+        "team": {"id": "T1"}, "user": {"id": "U123"},
+        "container": {"channel_id": "valid_chan", "message_ts": "valid_ts"},
+        "actions": [{"action_id": "approve_button", "value": "cp_123"}]
+    }
+    await adapter.handle_interaction(payload)
+    if adapter._active_tasks: await asyncio.gather(*adapter._active_tasks)
+    await adapter.shutdown()
+    assert mock_callbacks.update_calls == []  # an update would replace the message and drop the buttons

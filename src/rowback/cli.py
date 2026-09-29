@@ -101,10 +101,13 @@ def approve(token: str):
     """Approve and execute a pending SQL statement."""
     control, runtime = get_dsns()
     config = load_config()
-    executor = RowbackExecutor(control, runtime, approval_timeout_minutes=config.agent.approval_timeout_minutes)
+    executor = RowbackExecutor(control, runtime, approval_timeout_minutes=config.agent.approval_timeout_minutes,
+                                required_approvals=config.approvals.required)
     res = executor.execute_pending(token, actor=cli_actor())
     if res.status == "applied":
         console.print(f"[green]Approved and executed successfully. Rows affected: {res.rows_affected}. Undo with: rowback undo {res.public_id}[/green]")
+    elif res.status == "awaiting_approval":
+        console.print(f"[yellow]{res.message}[/yellow]")
     else:
         console.print(f"[red]Failed to approve/execute: {res.message}[/red]")
         raise typer.Exit(1)

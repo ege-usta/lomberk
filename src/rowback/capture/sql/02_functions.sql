@@ -220,6 +220,33 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
 
 
+-- Records one person's approval of a pending checkpoint; returns how many distinct
+-- people have approved it. The row lock serializes concurrent approvers.
+CREATE OR REPLACE FUNCTION rowback.record_approval(p_public_id TEXT, p_actor TEXT) RETURNS INTEGER AS $$
+DECLARE
+    v_status TEXT;
+    v_count INTEGER;
+BEGIN
+    SELECT status INTO v_status FROM rowback.checkpoints WHERE public_id = p_public_id FOR UPDATE;
+    IF NOT FOUND OR v_status <> 'pending' THEN
+        RAISE EXCEPTION 'Checkpoint % not found or not in pending state.', p_public_id;
+    END IF;
+    INSERT INTO rowback.approvals (public_id, actor) VALUES (p_public_id, p_actor) ON CONFLICT DO NOTHING;
+    SELECT count(*) INTO v_count FROM rowback.approvals WHERE public_id = p_public_id;
+    RETURN v_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+
+CREATE OR REPLACE FUNCTION rowback.guard_approvals_immutability() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Rowback approvals are append-only.';
+END;
+$$ LANGUAGE plpgsql SET search_path = rowback, pg_temp;
+
+DROP TRIGGER IF EXISTS rowback_approvals_immutable ON rowback.approvals;
+CREATE TRIGGER rowback_approvals_immutable BEFORE UPDATE OR DELETE ON rowback.approvals
+    FOR EACH ROW EXECUTE FUNCTION rowback.guard_approvals_immutability();
+
 CREATE OR REPLACE FUNCTION rowback.get_pending_checkpoint(
     p_public_id TEXT
 ) RETURNS TABLE (id BIGINT, sql_text TEXT, status TEXT) AS $$
@@ -279,6 +306,8 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.claim_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.finish_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.get_pending_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.record_approval TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT ON rowback.approvals TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.register_table TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.lock_table_for_undo TO %I', p_control_role);
     

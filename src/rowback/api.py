@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
         if runtime_super:
             raise ValueError("Startup Refusal: Agent role must not be a superuser.")
             
-        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms)
+        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required)
         _policy_engine_instance = PolicyEngine(config)
         
         # Production Slack Transport Wiring
@@ -414,6 +414,9 @@ def approve_checkpoint(
         res = executor.execute_pending(public_id, actor=actor)
         if res.status == "applied":
             return {"status": "approved", "rows_affected": res.rows_affected}
+        elif res.status == "awaiting_approval":
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=202, content={"status": "awaiting_approval", "message": res.message})
         elif res.status == "denied":
             return {"status": "denied", "message": res.message}
         elif res.status == "unknown":

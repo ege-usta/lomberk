@@ -133,8 +133,9 @@ async def test_slack_adapter_db_concurrency_and_auth(setup_db, auth_and_config, 
         if bad_adapter._active_tasks: await asyncio.gather(*bad_adapter._active_tasks)
         await bad_adapter.shutdown()
         
-        assert any("status is pending" in msg for msg in update_calls)
-        update_calls.clear()
+        # Still pending after a failed click: the message (and its buttons) stay untouched.
+        assert update_calls == []
+        assert await status_cb(public_id) == "pending"
 
         # Test True Concurrency
         await asyncio.gather(adapter.handle_interaction(payload), adapter.handle_interaction(payload))

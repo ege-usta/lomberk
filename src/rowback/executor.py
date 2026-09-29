@@ -126,7 +126,7 @@ class RowbackExecutor:
             fetched_data.append(row_dict)
         return fetched_data
 
-    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000):
+    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1):
         if not dsn or not runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required")
         self.dsn = dsn
@@ -136,6 +136,7 @@ class RowbackExecutor:
         self.approval_timeout_minutes = approval_timeout_minutes
         self.protected_tables = set(protected_tables or ())
         self.statement_timeout_ms = int(statement_timeout_ms)
+        self.required_approvals = int(required_approvals)  # distinct people per held write
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str, principal: str = "system", operation_id: str | None = None) -> str:
         import psycopg
@@ -444,6 +445,13 @@ class RowbackExecutor:
                         audit("rejected", actor="hard_gate", public_id=public_id, sql=sql_to_execute, reason=reason)
                         # Transaction context manager will commit
                         return ExecutionResult(operation_id=None, status="denied", message=f"Hard Gate Denied: {reason}")
+
+                    cur.execute("SELECT rowback.record_approval(%s, %s)", (public_id, actor))
+                    approvals = cur.fetchone()[0]
+                    if approvals < self.required_approvals:
+                        audit("approval_recorded", actor=actor, public_id=public_id, approvals=approvals, required=self.required_approvals)
+                        return ExecutionResult(operation_id=None, status="awaiting_approval", public_id=public_id,
+                                               message=f"Approval {approvals} of {self.required_approvals} recorded. Another person must approve.")
 
                     cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                     exec_token = cur.fetchone()[0]

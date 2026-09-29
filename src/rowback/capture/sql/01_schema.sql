@@ -114,3 +114,12 @@ CREATE TABLE IF NOT EXISTS rowback.slack_messages (
     claimed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (channel_id, message_ts)
 );
+
+-- Who approved what: one row per (checkpoint, person). Append-only (see 02_functions.sql).
+-- With approvals.required > 1, a held write runs only after that many distinct people.
+CREATE TABLE IF NOT EXISTS rowback.approvals (
+    public_id   TEXT NOT NULL REFERENCES rowback.checkpoints(public_id),
+    actor       TEXT NOT NULL,
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (public_id, actor)
+);

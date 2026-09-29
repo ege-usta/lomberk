@@ -129,6 +129,8 @@ class SlackInteractionAdapter:
                             break
                         await asyncio.sleep(SETTLE_INTERVAL)
                         final_state = await self.status_callback(public_id)
+                    if final_state == "pending":
+                        return  # two-person rule: keep the buttons for the next approver
                     if final_state == "applied": msg = f":white_check_mark: Checkpoint {public_id} successfully applied."
                     elif final_state == "approved": msg = f":white_check_mark: Checkpoint {public_id} approved, pending execution verification."
                     elif final_state in ("denied", "rejected"): msg = f":x: Checkpoint {public_id} was rejected."
