@@ -124,7 +124,10 @@ figcaption { font-size: 14px; color: var(--muted); margin-top: 12px; }
 .amount { font-weight: 850; font-variation-settings: "wdth" 62; font-size: clamp(56px, 6vw, 96px); line-height: .9; margin-bottom: 18px; }
 .amount small { font: 500 16px var(--sans); color: var(--muted); }
 .tier p { margin: 0; color: var(--muted); font-size: 16px; }
-.tier.team .amount { color: var(--allow); }
+.tier.pro .amount { color: var(--allow); }
+.tier-btn { margin-top: 24px; background: var(--allow); color: var(--ink) !important; }
+.tier-btn:hover { background: var(--paper); }
+.tier-cta { display: inline-block; margin-top: 24px; color: var(--paper); font-weight: 600; }
 .partner { margin: 44px 0 0; font-size: 19px; max-width: 70ch; }
 .partner strong { color: var(--allow); }
 
@@ -169,7 +172,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
         <a href="#how">How undo works</a>
         <a href="#pricing">Pricing</a>
         <a href="https://github.com/ege-usta/rowback">GitHub</a>
-        <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Rowback%20design%20partner">Become a design partner</a>
+        <a class="btn" href="https://github.com/ege-usta/rowback#1-start-the-stack">Start free</a>
       </div>
     </nav>
   </div>
@@ -178,8 +181,8 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
       <h1 class="display">Every agent write, reversible.</h1>
       <p class="sub">Agents never hold your database password. Destructive SQL is blocked, risky writes wait for a person, and every write can be undone.</p>
       <div class="ctas">
-        <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Rowback%20design%20partner">Become a design partner</a>
-        <a href="https://github.com/ege-usta/rowback">Read the code</a>
+        <a class="btn" href="https://github.com/ege-usta/rowback#1-start-the-stack">Start free</a>
+        <a href="#pricing">See pricing</a>
       </div>
     </div>
 
@@ -274,20 +277,20 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <section id="pricing">
   <div class="wrap">
     <h2 class="display">Pricing.</h2>
-    <p class="lede">The whole safety path is open source. You pay for team features, and for us.</p>
+    <p class="lede">The whole safety path is free and open source. Pro adds what a team needs to share it.</p>
     <div class="tiers">
-      <div class="tier"><h3>Community</h3><div class="amount">Free</div><p>Apache-2.0, self-hosted. Hard gate, holds, capture, undo, ledger, approvals from the API or CLI.</p></div>
-      <div class="tier team"><h3>Team</h3><div class="amount">$199<small> / month</small></div><p>Up to 3 production databases. Slack approvals, approver SSO (OIDC), email support, and help with setup.</p></div>
-      <div class="tier"><h3>Enterprise</h3><div class="amount">Custom</div><p>Unlimited databases, audit export, support for your security review, and an SLA.</p></div>
+      <div class="tier"><h3>Free</h3><div class="amount">$0</div><p>Apache-2.0, self-hosted, unlimited databases. Hard gate, holds, capture, undo, ledger, approvals from the API or CLI.</p><a class="tier-cta" href="https://github.com/ege-usta/rowback#1-start-the-stack">Start free</a></div>
+      <div class="tier pro"><h3>Pro</h3><div class="amount">$99<small> / month</small></div><p>Or $990 a year. Up to 3 production databases. Web approval panel, two-person rule, Slack approvals, approver SSO, audit export.</p><a class="btn tier-btn" href="REPLACE_WITH_POLAR_CHECKOUT_URL">Buy Pro</a></div>
+      <div class="tier"><h3>Enterprise</h3><div class="amount"><small>from </small>$3,000<small> / year</small></div><p>Unlimited databases, an annual invoice, email answers within 2 business days, and help with your security questionnaire.</p><a class="tier-cta" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Rowback%20Enterprise">Email us</a></div>
     </div>
-    <p class="partner"><strong>Design partners</strong> get Team free for 3 months, then half price for the first year. In exchange: honest feedback every two weeks. We set it up with you on a call.</p>
+    <p class="partner">Self-hosted, so <strong>your data never reaches us</strong>. Pay by card through Polar and the license key arrives by email. No calls needed: <code>rowback doctor</code> checks your setup and tells you how to fix each problem.</p>
   </div>
 </section>
 
 <section class="close">
   <div class="wrap">
-    <h2 class="display">Looking for three to five teams whose agents write to Postgres.</h2>
-    <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Rowback%20design%20partner">Become a design partner</a>
+    <h2 class="display">Make your agent's next DELETE undoable.</h2>
+    <a class="btn" href="https://github.com/ege-usta/rowback#1-start-the-stack">Start free</a>
     <footer>
       <span>Rowback. Open core: Apache-2.0, with <code>ee/</code> under the <a href="https://github.com/ege-usta/rowback/blob/main/src/rowback/ee/LICENSE">Enterprise license</a>.</span>
       <nav aria-label="Footer"><a href="https://github.com/ege-usta/rowback">GitHub</a><a href="https://github.com/ege-usta/rowback/blob/main/SECURITY.md">Security model</a></nav>
