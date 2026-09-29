@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Rowback panel</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <span class="brand">Rowback</span>
+  <span class="who" id="who"></span>
+  <button class="link" id="logout" type="button" hidden>Sign out</button>
+</header>
+
+<main>
+  <section id="signin" hidden>
+    <h1>Sign in to approve</h1>
+    <p class="muted">Approvals are recorded under the name you sign in with.</p>
+    <a class="btn" id="sso" href="sso/login" hidden>Sign in with SSO</a>
+    <form id="keyform" hidden>
+      <label for="key">Admin key</label>
+      <input id="key" type="password" autocomplete="current-password" required>
+      <button class="btn" type="submit">Sign in with the admin key</button>
+      <p class="muted small">The admin key is shared, so every approval made with it counts as the same person.</p>
+    </form>
+    <p class="error" id="signin-error" role="alert"></p>
+  </section>
+
+  <section id="app" hidden>
+    <div class="head">
+      <h1>Waiting for approval</h1>
+      <span class="muted" id="rule"></span>
+    </div>
+    <p class="muted" id="empty">Nothing is waiting. Held writes appear here within 10 seconds.</p>
+    <ul class="pending" id="pending"></ul>
+
+    <div class="head">
+      <h2>History</h2>
+      <span class="exports">Export: <a href="api/export?format=csv">CSV</a> <a href="api/export?format=jsonl">JSON Lines</a></span>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>When</th><th>Status</th><th>Agent</th><th>SQL</th><th>Approved by</th><th>Rows</th><th></th></tr></thead>
+        <tbody id="history"></tbody>
+      </table>
+    </div>
+  </section>
+  <p class="toast" id="toast" role="status" aria-live="polite"></p>
+</main>
+</body>
+</html>

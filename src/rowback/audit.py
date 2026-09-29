@@ -18,7 +18,8 @@ logger.addHandler(handler)
 def audit(event: str, *, actor: str, public_id: str | None = None, **fields) -> None:
     """One JSON line per security-relevant decision, for shipping to a SIEM.
 
-    event: denied | held | applied | failed | approved | rejected | expired | undone | undo_failed
+    event: denied | held | applied | failed | approval_recorded | approved | rejected | expired | undone |
+           undo_failed | exported | panel_login | panel_login_failed
     actor: who caused it (agent principal, or approver such as "cli:alice" / "api_admin").
     """
     record = {

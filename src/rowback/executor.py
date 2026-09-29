@@ -53,6 +53,19 @@ class RowbackExecutor:
                 "rows_affected, created_at FROM rowback.checkpoints WHERE public_id = %s", (public_id,))
             return cur.fetchone()
 
+    def list_checkpoints(self, since=None, limit: int | None = None) -> list[dict]:
+        """Newest first, with who approved each one. limit None = all (for exports)."""
+        with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT c.public_id, c.created_at, c.status, c.classification, c.agent_label, c.principal, "
+                "c.sql_text, c.rows_affected, c.chain_seq, c.hash, "
+                "coalesce(array_agg(a.actor ORDER BY a.approved_at) FILTER (WHERE a.actor IS NOT NULL), '{}') AS approved_by "
+                "FROM rowback.checkpoints c LEFT JOIN rowback.approvals a USING (public_id) "
+                "WHERE %(since)s::timestamptz IS NULL OR c.created_at >= %(since)s "
+                "GROUP BY c.id ORDER BY c.id DESC LIMIT %(limit)s",
+                {"since": since, "limit": limit})
+            return cur.fetchall()
+
     def reject(self, public_id: str, actor: str) -> bool:
         """Reject a pending checkpoint. Returns False if it is not pending."""
         try:

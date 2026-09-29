@@ -3,6 +3,7 @@ import hmac
 import inspect
 import logging
 import os
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
+from rowback.audit import audit
 from rowback.config import load_config
 from rowback.executor import RowbackExecutor
 from rowback.policy import PolicyEngine
@@ -478,6 +480,56 @@ def undo_checkpoint(
     return JSONResponse(status_code=_UNDO_HTTP_STATUS.get(res.status, 502), content={"status": res.status, "message": res.message})
 
 
+def _require_pro(feature: str) -> None:
+    if not _PRO:
+        raise HTTPException(status_code=403, detail=f"{feature} is a Rowback Pro feature: set ROWBACK_LICENSE_KEY.")
+
+
+@app.get("/v1/audit/export")
+def export_audit(
+    format: str = "csv",
+    since: datetime | None = None,
+    actor: str = Depends(verify_approver),
+    executor: RowbackExecutor = Depends(get_executor)
+):
+    """Every checkpoint with who approved it (Pro)."""
+    _require_pro("Audit export")
+    from fastapi.responses import Response
+
+    from rowback.ee.export import FORMATS, render
+    if format not in FORMATS:
+        raise HTTPException(status_code=422, detail=f"format must be one of {sorted(FORMATS)}")
+    rows = executor.list_checkpoints(since=since)
+    audit("exported", actor=actor, rows=len(rows), format=format)
+    return Response(render(rows, format), media_type=FORMATS[format],
+                    headers={"Content-Disposition": f'attachment; filename="rowback-audit.{format}"'})
+
+
+class _PanelGate:
+    """Mounts the web panel (ee) lazily, so the core never imports it at module load."""
+
+    def __init__(self):
+        self.inner = None
+
+    async def __call__(self, scope, receive, send):
+        if not _PRO or _executor_instance is None:
+            from starlette.responses import HTMLResponse
+            await HTMLResponse(_PRO_ONLY_PAGE, status_code=403)(scope, receive, send)
+            return
+        if self.inner is None:
+            from rowback.ee.panel import build_panel
+            self.inner = build_panel()
+        await self.inner(scope, receive, send)
+
+
+_PRO_ONLY_PAGE = """<!doctype html><meta charset="utf-8"><title>Rowback</title>
+<body style="font-family: system-ui, sans-serif; padding: 2rem; max-width: 40rem">
+<h1>Rowback</h1><p>The web approval panel is a Rowback Pro feature. Set <code>ROWBACK_LICENSE_KEY</code>
+and restart the gateway, or approve from the API or CLI.</p></body>"""
+
+app.mount("/panel", _PanelGate())
+
+
 @app.get("/healthz", include_in_schema=False)
 def healthz():
     """Liveness: the process is up."""
@@ -507,8 +559,8 @@ def dashboard():
     <html>
         <head><title>Rowback</title></head>
         <body style="font-family: sans-serif; padding: 2rem;">
-            <h1>Rowback Enterprise Gateway</h1>
-            <p style="color: #666;">UI Disabled for security. Please use the API or CLI.</p>
+            <h1>Rowback gateway</h1>
+            <p style="color: #666;">Approve from the <a href="/panel/">web panel</a> (Pro), the API or the CLI.</p>
         </body>
     </html>
     """

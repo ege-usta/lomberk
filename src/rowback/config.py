@@ -50,6 +50,10 @@ class SsoConfig(_Strict):
     # Shared admin key next to SSO. Default: on without SSO, off with SSO (the CLI
     # remains the break-glass path if the IdP is down).
     allow_admin_key: bool | None = None
+    # Public https URL of this gateway, e.g. https://rowback.corp.com. Turns on "Sign in
+    # with SSO" in the web panel; register <panel_url>/panel/sso/callback at the IdP.
+    # The client secret, if the IdP needs one, comes from ROWBACK_SSO_CLIENT_SECRET.
+    panel_url: str | None = None
 
 class RowbackConfig(_Strict):
     version: int = 1

@@ -1,5 +1,6 @@
 """OIDC approvers: an approval carries a person's ID token from the company IdP
 (Okta, Entra ID, Google...), so the audit trail names a human, not a shared key."""
+import hmac
 import json
 import threading
 import time
@@ -65,8 +66,10 @@ class OidcVerifier:
                 self._refresh()  # the IdP rotated its keys
             return self._keys.get(kid)
 
-    def verify(self, token: str) -> str:
-        """Returns the audited actor ("oidc:<identity>") or raises SsoError."""
+    def verify(self, token: str, nonce: str | None = None) -> str:
+        """Returns the audited actor ("oidc:<identity>") or raises SsoError.
+
+        nonce: set for tokens from the panel's login flow, so a replayed token is refused."""
         try:
             key = self._key(jwt.get_unverified_header(token).get("kid"))
             if key is None:
@@ -78,6 +81,8 @@ class OidcVerifier:
             raise
         except Exception as e:  # noqa: BLE001 - any parse/verify/fetch failure means "not authenticated"
             raise SsoError(type(e).__name__) from None
+        if nonce is not None and not hmac.compare_digest(str(claims.get("nonce", "")), nonce):
+            raise SsoError("nonce mismatch")
         # Fail closed: IdPs that omit email_verified (e.g. Entra ID) must use another
         # identity_claim, since their email attribute may be user-editable.
         if self.cfg.identity_claim == "email" and claims.get("email_verified") is not True:
