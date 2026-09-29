@@ -81,3 +81,16 @@ def test_constraint_errors_never_show_the_failing_row(db, sql):
     res = run(ex, sql)
     assert res.status == "failed" and "violates" in res.message
     assert "SECRETHASH" not in res.message and "Failing row" not in res.message
+
+
+def test_registered_secret_columns_are_hidden_by_the_database(db):
+    # Column privileges: PostgreSQL itself refuses, whatever the SQL looks like.
+    url, ex = db
+    with psycopg.connect(url, autocommit=True) as c:
+        c.execute("SELECT rowback.register_table('public', 'people', 'id', 'mcp_agent', ARRAY['password_hash'])")
+        assert c.execute("SELECT has_column_privilege('mcp_agent', 'public.people', 'password_hash', 'SELECT'), "
+                         "has_column_privilege('mcp_agent', 'public.people', 'name', 'SELECT')").fetchone() == (False, True)
+    res = run(ex, "SELECT * FROM public.people")
+    assert res.status == "failed" and "permission denied" in res.message and "name the columns" in res.message
+    assert run(ex, "SELECT id, name FROM public.people WHERE id = 1").data == [{"id": 1, "name": "a"}]
+    assert run(ex, "UPDATE public.people SET age = 31 WHERE id = 1").status == "applied"

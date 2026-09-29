@@ -60,6 +60,10 @@ class RowbackConfig(_Strict):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     protected_tables: list[str] = Field(default_factory=list)
+    # Column names (any table) treated like `password`: never readable by the agent, and
+    # hidden by the database itself on tables you `rowback register`. Use it for secrets the
+    # built-in name list can't guess (`pass`, `pin`) and for JSON columns that hold secrets.
+    sensitive_columns: list[str] = Field(default_factory=list)
     deny_patterns: list[str] = Field(default_factory=list)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
@@ -74,6 +78,21 @@ class RowbackConfig(_Strict):
         if bare:
             raise ValueError(f"protected_tables entries must be schema.table, e.g. public.{bare[0]}")
         return tables
+
+
+DEMO_KEYS = ("demo-agent-key", "demo-admin-key")
+MIN_KEY_LENGTH = 32
+
+
+def weak_key_reason(key: str) -> str | None:
+    """Why a gateway key is guessable, or None. Guessing a 32+ character random key is not feasible."""
+    if key in DEMO_KEYS:
+        return "is a public demo key"
+    if len(key) < MIN_KEY_LENGTH:
+        return f"is shorter than {MIN_KEY_LENGTH} characters"
+    if len(set(key)) < 8:
+        return "repeats too few characters to be random"
+    return None
 
 
 def load_config(path: str = "rowback.yaml") -> RowbackConfig:

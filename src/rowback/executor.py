@@ -23,9 +23,32 @@ class ExecutionResult(BaseModel):
 def _agent_message(e: Exception) -> str:
     """The part of an error the agent may see. Never PostgreSQL's DETAIL: for NOT NULL and
     CHECK violations it prints the whole failing row, secret columns included."""
+    if isinstance(e, psycopg.errors.InsufficientPrivilege):
+        return (f"{e.diag.message_primary}. Some columns are hidden from agents; "
+                "name the columns you need instead of *.")
     if isinstance(e, psycopg.Error):
         return e.diag.message_primary or str(e).split("\n")[0]
     return str(e)
+
+
+MASK = "***MASKED***"
+
+
+def _mask_json(value, secret):
+    """JSON (dicts/lists, or text that parses as JSON) with every secret-looking key masked."""
+    if isinstance(value, dict):
+        return {k: (MASK if secret(k) and v not in (None, "") else _mask_json(v, secret)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_json(v, secret) for v in value]
+    if isinstance(value, str) and value[:1] in ("{", "["):
+        import json
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return value
+        masked = _mask_json(parsed, secret)
+        return value if masked == parsed else json.dumps(masked)
+    return value
 
 
 class HoldForApproval(Exception):
@@ -135,19 +158,24 @@ class RowbackExecutor:
             val_str = re.sub(r'(?i)system:\s*override', '[SANITIZED_OVERRIDE]', val_str)
             return val_str
 
-        from rowback.sql.classify import SENSITIVE_KEYWORDS
+        from rowback.sql.classify import is_secret
+
+        def secret(name) -> bool:
+            return is_secret(name, self.sensitive_columns)
         fetched_data = []
         for row in rows:
             row_dict = dict(zip(columns, row))
             for col in columns:
-                if any(sens in col.lower() for sens in SENSITIVE_KEYWORDS) and row_dict[col]:
-                    row_dict[col] = "***MASKED***"
-                elif isinstance(row_dict[col], str):
+                if secret(col) and row_dict[col]:
+                    row_dict[col] = MASK
+                    continue
+                row_dict[col] = _mask_json(row_dict[col], secret)
+                if isinstance(row_dict[col], str):
                     row_dict[col] = sanitize_payload(row_dict[col])
             fetched_data.append(row_dict)
         return fetched_data
 
-    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1):
+    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1, sensitive_columns: list[str] | None = None):
         if not dsn or not runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required")
         self.dsn = dsn
@@ -158,6 +186,7 @@ class RowbackExecutor:
         self.protected_tables = set(protected_tables or ())
         self.statement_timeout_ms = int(statement_timeout_ms)
         self.required_approvals = int(required_approvals)  # distinct people per held write
+        self.sensitive_columns = tuple(sensitive_columns or ())  # config names treated like `password`
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str, principal: str = "system", operation_id: str | None = None) -> str:
         import psycopg
@@ -221,7 +250,7 @@ class RowbackExecutor:
 
                             from rowback.sql.classify import check_sensitive_columns
                             ast = pglast.parse_sql(eval_result.statement.sql)
-                            sens_cols = check_sensitive_columns(ast)
+                            sens_cols = check_sensitive_columns(ast, self.sensitive_columns)
                             if sens_cols:
                                 raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
                             
@@ -268,7 +297,7 @@ class RowbackExecutor:
                         ast = pglast.parse_sql(sql_to_execute)
                         tables = extract_tables_from_ast(ast)
                         
-                        sens_cols = check_sensitive_columns(ast)
+                        sens_cols = check_sensitive_columns(ast, self.sensitive_columns)
                         if sens_cols:
                             raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
                         

@@ -39,6 +39,9 @@ services:
       ROWBACK_AGENT_DSN: postgresql://rowback_agent:agent-demo@db:5432/pocketos
       ROWBACK_API_KEY: ${ROWBACK_API_KEY:-demo-agent-key}
       ROWBACK_ADMIN_KEY: ${ROWBACK_ADMIN_KEY:-demo-admin-key}
+      # The demo keys above are public, so the gateway only accepts them with this flag.
+      # Outside a laptop: set real keys (openssl rand -hex 32) and remove this line.
+      ROWBACK_ALLOW_WEAK_KEYS: "true"
     volumes:
       - ./rowback.yaml:/etc/rowback/rowback.yaml:ro
     ports:

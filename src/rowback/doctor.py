@@ -5,10 +5,9 @@ import psycopg
 import yaml
 from pydantic import ValidationError
 
-from rowback.config import load_config, pro_features
+from rowback.config import load_config, pro_features, weak_key_reason
 
 OK, WARN, FAIL = "ok", "warn", "fail"
-MIN_KEY_LENGTH = 32
 CONNECT_TIMEOUT_SECONDS = 5
 
 
@@ -49,8 +48,12 @@ def _env_checks(config, add):
     for env, value in (("ROWBACK_API_KEY", agent_key), ("ROWBACK_ADMIN_KEY", admin_key)):
         if not value:
             add(FAIL, f"{env} is not set", "Generate one with: openssl rand -hex 32")
-        elif len(value) < MIN_KEY_LENGTH:
-            add(WARN, f"{env} is shorter than {MIN_KEY_LENGTH} characters", "Use a random key: openssl rand -hex 32")
+        elif reason := weak_key_reason(value):
+            if os.environ.get("ROWBACK_ALLOW_WEAK_KEYS", "").lower() == "true":
+                add(WARN, f"{env} {reason}; accepted only because ROWBACK_ALLOW_WEAK_KEYS=true",
+                    "Fine on a laptop demo. Anywhere else: openssl rand -hex 32, and unset ROWBACK_ALLOW_WEAK_KEYS.")
+            else:
+                add(FAIL, f"{env} {reason}, so the gateway refuses to start", "Use a random key: openssl rand -hex 32")
     if agent_key and agent_key == admin_key:
         add(FAIL, "the agent key and the admin key are the same", "Give the agent its own key; it must never be able to approve.")
     elif agent_key and admin_key:
@@ -90,6 +93,7 @@ def _db_checks(config, control: str, agent: str, add) -> None:
             add(FAIL, "the Rowback schema is from an older version", "Re-run rowback init; it is safe to repeat and upgrades in place.")
             return
         registered = {f"{s}.{t}" for s, t in conn.execute("SELECT schema_name, table_name FROM rowback.registered_tables")}
+        _secret_column_checks(config, conn, roles["agent"][0], add)
         checked, broken, _ = conn.execute("SELECT * FROM rowback.verify_ledger()").fetchone()
 
     if registered:
@@ -105,6 +109,46 @@ def _db_checks(config, control: str, agent: str, add) -> None:
         add(FAIL, f"the ledger is broken at checkpoint {broken}", "Someone edited history in the database. Investigate before trusting it.")
     else:
         add(OK, f"ledger intact ({checked} checkpoints)")
+
+
+# Words that often mean a secret but are too short to match inside other names (passenger, spinner).
+SUSPECT_WORDS = {"pass", "pin", "otp", "totp", "mfa", "salt", "cvv", "cvc", "iban", "key", "jwt", "session",
+                 "cookie", "auth", "seed", "mnemonic", "passphrase", "signature"}
+LIST_LIMIT = 8
+
+
+def _secret_column_checks(config, conn, agent_role: str, add) -> None:
+    """Columns the agent role can SELECT in the database: secret ones should be hidden there too."""
+    import re
+
+    from rowback.sql.classify import is_secret
+    rows = conn.execute(
+        "SELECT n.nspname || '.' || c.relname || '.' || a.attname, a.attname, format_type(a.atttypid, NULL) "
+        "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND a.attnum > 0 AND NOT a.attisdropped "
+        "AND n.nspname NOT LIKE 'pg\\_%%' AND n.nspname NOT IN ('information_schema', 'rowback', 'rowback_trash') "
+        "AND has_column_privilege(%s, c.oid, a.attnum, 'SELECT') ORDER BY 1", (agent_role,)).fetchall()
+    extra = config.sensitive_columns
+
+    def listed(items):
+        return ", ".join(items[:LIST_LIMIT]) + (f" and {len(items) - LIST_LIMIT} more" if len(items) > LIST_LIMIT else "")
+    readable = [full for full, name, _ in rows if is_secret(name, extra)]
+    if readable:
+        add(WARN, f"the agent role can read secret columns in the database: {listed(readable)}. "
+                  "Rowback's name filter still refuses them, but the database doesn't",
+            "Re-run rowback register for each table (it hides them), or REVOKE SELECT on those columns.")
+    suspect = [full for full, name, _ in rows if not is_secret(name, extra)
+               and set(re.split(r"[^a-z0-9]+", name.lower())) & SUSPECT_WORDS]
+    if suspect:
+        add(WARN, f"columns that may hold secrets under a name Rowback doesn't know: {listed(suspect)}",
+            "If they do, add their names to sensitive_columns in rowback.yaml and re-run rowback register.")
+    json_cols = [full for full, name, typ in rows if typ in ("json", "jsonb") and not is_secret(name, extra)]
+    if json_cols:
+        add(WARN, f"the agent can read JSON columns: {listed(json_cols)}. Secret-looking keys are masked, "
+                  "but JSON can hide a secret under any key",
+            "If one holds secrets, add its name to sensitive_columns and re-run rowback register.")
+    if not (readable or suspect or json_cols):
+        add(OK, "no secret-looking column is readable by the agent role")
 
 
 def _pro_checks(config, add) -> None:

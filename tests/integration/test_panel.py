@@ -191,6 +191,23 @@ def test_sso_sign_in_then_two_people_apply(gateway, idp):
         fake["email"] = "alice@corp.com"
 
 
+def test_sso_session_ends_with_the_token_and_the_allowlist(gateway, idp):
+    from rowback import api
+    start, _ = gateway
+    _, fake = idp
+    with start(SSO_YAML) as c:
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(
+            c.get("/panel/sso/login", follow_redirects=False).headers["location"]).query))
+        fake["challenge"], fake["nonce"] = q["code_challenge"], q["nonce"]
+        r = c.get("/panel/sso/callback", params={"code": "good-code", "state": q["state"]}, follow_redirects=False)
+        cookie = next(h for h in r.headers.get_list("set-cookie") if h.startswith("rowback_session="))
+        assert 290 <= int(cookie.split("Max-Age=")[1].split(";")[0]) <= 300  # the ID token's 5 minutes, not 8 hours
+        assert c.get("/panel/api/session").json()["actor"] == "oidc:alice@corp.com"
+        api._SSO.cfg.allowed_groups = ["someone-else"]  # the group is removed from the config
+        assert c.get("/panel/api/session").json()["actor"] is None
+        assert c.get("/panel/api/checkpoints").status_code == 401
+
+
 def test_sso_token_with_another_nonce_is_refused(gateway, idp):
     start, _ = gateway
     _, fake = idp

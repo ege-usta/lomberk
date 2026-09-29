@@ -8,7 +8,7 @@ import rowback.ee.license as lic
 from rowback.capture.install import install_rowback
 from rowback.cli import app
 
-KEYS = {"ROWBACK_API_KEY": "a" * 40, "ROWBACK_ADMIN_KEY": "b" * 40}
+KEYS = {"ROWBACK_API_KEY": "3f9c2a7e1b8d4065c7a9e2f1d3b5a8c6", "ROWBACK_ADMIN_KEY": "8e1d7c4b2a9f6035e1c8b7a4d2f9e6c3"}
 
 
 @pytest.fixture(scope="module")
@@ -77,3 +77,20 @@ def test_pro_feature_without_or_with_bad_key(db, monkeypatch, tmp_path):
     monkeypatch.setattr(lic, "validate_key", lambda key: "invalid")
     r = doctor(monkeypatch, tmp_path, {**env, "ROWBACK_LICENSE_KEY": "bad"}, "approvals:\n  required: 2\n")
     assert r.exit_code == 1 and "invalid, expired or cancelled" in r.output
+
+
+def test_secret_columns_the_database_still_shows(db, monkeypatch, tmp_path):
+    control, agent = db
+    install = control.replace("rowback_control:secret", "test:test")
+    with psycopg.connect(install, autocommit=True) as conn:
+        conn.execute("CREATE TABLE public.members (id INT PRIMARY KEY, password_hash TEXT, card_pin TEXT, prefs JSONB)")
+        conn.execute("SELECT rowback.register_table('public', 'members', 'id', 'mcp_agent')")
+    env = {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS}
+    out = " ".join(doctor(monkeypatch, tmp_path, env).output.split())  # the console wraps lines
+    assert "can read secret columns in the database: public.members.password_hash" in out, out
+    assert "public.members.card_pin" in out and "JSON columns: public.members.prefs" in out
+    with psycopg.connect(install, autocommit=True) as conn:
+        conn.execute("SELECT rowback.register_table('public', 'members', 'id', 'mcp_agent', "
+                     "ARRAY['password_hash', 'card_pin', 'prefs'])")
+    out = " ".join(doctor(monkeypatch, tmp_path, env, "sensitive_columns: [card_pin, prefs]\n").output.split())
+    assert "no secret-looking column is readable" in out, out

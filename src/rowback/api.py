@@ -14,7 +14,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel
 
 from rowback.audit import audit
-from rowback.config import load_config, pro_features
+from rowback.config import load_config, pro_features, weak_key_reason
 from rowback.executor import RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sentinel import AISentinel
@@ -60,6 +60,12 @@ async def lifespan(app: FastAPI):
         raise ValueError("Startup Refusal: Both ROWBACK_API_KEY and ROWBACK_ADMIN_KEY must be configured.")
     if agent_key == admin_key:
         raise ValueError("Startup Refusal: Agent and Admin keys must NOT be identical.")
+    # A guessable key is the one thing a rate limit would have to save; a random 32+ character
+    # key can't be brute-forced, so refuse anything else. Demos opt out explicitly.
+    if os.environ.get("ROWBACK_ALLOW_WEAK_KEYS", "").lower() != "true":
+        for env, key in (("ROWBACK_API_KEY", agent_key), ("ROWBACK_ADMIN_KEY", admin_key)):
+            if reason := weak_key_reason(key):
+                raise ValueError(f"Startup Refusal: {env} {reason}. Generate one with: openssl rand -hex 32")
         
     _API_KEY = agent_key
     _ADMIN_KEY = admin_key
@@ -101,7 +107,7 @@ async def lifespan(app: FastAPI):
         if runtime_super:
             raise ValueError("Startup Refusal: Agent role must not be a superuser.")
             
-        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required)
+        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns)
         _policy_engine_instance = PolicyEngine(config)
         
         # Production Slack Transport Wiring

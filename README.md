@@ -102,12 +102,15 @@ limits:
   statement_timeout_ms: 15000
 protected_tables:                 # any write, or FK cascade, reaching these is held
   - public.users
+sensitive_columns:                # like `password`: never shown to the agent, hidden by the DB on register
+  - pass
+  - settings                      # a JSON column that holds secrets
 agent:
   approval_timeout_minutes: 30
 ```
 Unknown keys fail startup, so a typo can never silently turn protection off.
 
-Environment: `ROWBACK_ADMIN_DSN` (control role), `ROWBACK_AGENT_DSN` (agent role), `ROWBACK_API_KEY` (agent), `ROWBACK_ADMIN_KEY` (approvers), `ROWBACK_AUDIT_LOG` (JSONL path), `ROWBACK_LICENSE_KEY` (Pro).
+Environment: `ROWBACK_ADMIN_DSN` (control role), `ROWBACK_AGENT_DSN` (agent role), `ROWBACK_API_KEY` (agent), `ROWBACK_ADMIN_KEY` (approvers), `ROWBACK_AUDIT_LOG` (JSONL path), `ROWBACK_LICENSE_KEY` (Pro). Keys must be 32+ random characters (`openssl rand -hex 32`); the gateway refuses weak or demo keys unless `ROWBACK_ALLOW_WEAK_KEYS=true` (laptop demos only).
 
 ## Installing on your own database
 ```bash

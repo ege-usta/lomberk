@@ -71,6 +71,7 @@ def build_executor() -> tuple[RowbackExecutor, PolicyEngine]:
         approval_timeout_minutes=config.agent.approval_timeout_minutes,
         protected_tables=config.protected_tables,
         statement_timeout_ms=config.limits.statement_timeout_ms,
+        sensitive_columns=config.sensitive_columns,
     )
     return executor, PolicyEngine(config)
 

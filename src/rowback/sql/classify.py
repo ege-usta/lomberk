@@ -1,4 +1,6 @@
 
+import re
+
 import pglast
 from pglast import enums
 from pglast.visitors import Visitor, referenced_relations
@@ -126,7 +128,29 @@ SENSITIVE_KEYWORDS = ("password", "passwd", "pwd", "token", "secret", "ssn", "ha
                       "api_key", "apikey", "private_key", "credential")
 
 
-def check_sensitive_columns(ast) -> list[str]:
+# JSON operators whose right side names a key or path: settings->>'api_key', settings ? 'token'.
+JSON_KEY_OPERATORS = {"->", "->>", "#>", "#>>", "?", "?|", "?&", "@>", "<@", "#-"}
+
+
+def is_secret(name, extra=()) -> bool:
+    """A secret-looking column name: a built-in keyword inside it, or exactly a configured name."""
+    if not isinstance(name, str):
+        return False
+    low = name.lower()
+    return any(k in low for k in SENSITIVE_KEYWORDS) or low in {e.lower() for e in extra}
+
+
+def _secret_literal(node, extra) -> bool:
+    """A string constant (possibly cast) naming a secret key, e.g. 'api_key' or '{auth,token}'."""
+    while isinstance(node, dict) and node.get("@") == "TypeCast":
+        node = node.get("arg")
+    if not (isinstance(node, dict) and node.get("@") == "A_Const"):
+        return False
+    val = node.get("val") or {}
+    return val.get("@") == "String" and any(is_secret(t, extra) for t in re.split(r"[^\w]+", val.get("sval", "")) if t)
+
+
+def check_sensitive_columns(ast, extra=()) -> list[str]:
     """Reasons the statement could expose a secret-looking column, or [] if it can't.
 
     Results are masked by output column name, so a secret must never reach the output
@@ -156,7 +180,7 @@ def check_sensitive_columns(ast) -> list[str]:
                 collect(v)
 
     def secret(name) -> bool:
-        return isinstance(name, str) and any(k in name.lower() for k in SENSITIVE_KEYWORDS)
+        return is_secret(name, extra)
 
     def walk(node, star_ok: bool = False) -> None:
         if isinstance(node, (list, tuple)):
@@ -178,7 +202,14 @@ def check_sensitive_columns(ast) -> list[str]:
                 found.append(f"whole-row reference {fields[0]['sval']}")
             walk(fields, star_ok)
             return
+        json_op = kind == "A_Expr" and any(n.get("sval") in JSON_KEY_OPERATORS for n in node.get("name", ()) if isinstance(n, dict))
+        if json_op and (_secret_literal(node.get("lexpr"), extra) or _secret_literal(node.get("rexpr"), extra)):
+            found.append("a secret-looking JSON key")
         if kind == "A_Indirection":
+            for ind in node.get("indirection", ()):
+                if isinstance(ind, dict) and ind.get("@") == "A_Indices" and (
+                        _secret_literal(ind.get("uidx"), extra) or _secret_literal(ind.get("lidx"), extra)):
+                    found.append("a secret-looking JSON key")
             walk(node.get("arg"))
             walk(node.get("indirection"), star_ok)
             return

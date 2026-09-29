@@ -70,6 +70,15 @@ class OidcVerifier:
         """Returns the audited actor ("oidc:<identity>") or raises SsoError.
 
         nonce: set for tokens from the panel's login flow, so a replayed token is refused."""
+        return self.verify_claims(token, nonce)[0]
+
+    def allowed(self, identity: str, groups) -> list[str] | None:
+        """The allowed groups that admit this person ([] if listed by identity), or None if not allowed."""
+        matched = sorted(set(groups) & set(self.cfg.allowed_groups)) if isinstance(groups, list) else []
+        return matched if matched or identity in self.cfg.allowed_identities else None
+
+    def verify_claims(self, token: str, nonce: str | None = None) -> tuple[str, dict]:
+        """verify(), plus the token's claims (the panel ties its session to their exp and groups)."""
         try:
             key = self._key(jwt.get_unverified_header(token).get("kid"))
             if key is None:
@@ -90,8 +99,6 @@ class OidcVerifier:
         identity = claims.get(self.cfg.identity_claim)
         if not isinstance(identity, str) or not identity:
             raise SsoError(f"token has no {self.cfg.identity_claim}")
-        groups = claims.get(self.cfg.groups_claim)
-        in_group = isinstance(groups, list) and bool(set(groups) & set(self.cfg.allowed_groups))
-        if not in_group and identity not in self.cfg.allowed_identities:
+        if self.allowed(identity, claims.get(self.cfg.groups_claim)) is None:
             raise SsoError("not an allowed approver")
-        return f"oidc:{identity}"
+        return f"oidc:{identity}", claims

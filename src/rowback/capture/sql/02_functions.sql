@@ -267,10 +267,13 @@ CREATE OR REPLACE FUNCTION rowback.register_table(
     p_schema TEXT,
     p_table TEXT,
     p_pk_column TEXT,
-    p_agent_role TEXT
+    p_agent_role TEXT,
+    p_secret_columns TEXT[] DEFAULT '{}'  -- the agent may never SELECT these; enforced by PostgreSQL
 ) RETURNS VOID AS $$
 DECLARE
     v_table_oid OID;
+    v_all TEXT;
+    v_visible TEXT;
 BEGIN
     SELECT c.oid INTO v_table_oid
     FROM pg_class c
@@ -289,7 +292,22 @@ BEGIN
     EXECUTE format('DROP TRIGGER IF EXISTS rowback_capture ON %I.%I', p_schema, p_table);
     EXECUTE format('CREATE TRIGGER rowback_capture AFTER INSERT OR UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION rowback.capture_row_change()', p_schema, p_table);
 
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.%I TO %I', p_schema, p_table, p_agent_role);
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON %I.%I TO %I', p_schema, p_table, p_agent_role);
+    IF coalesce(cardinality(p_secret_columns), 0) = 0 THEN
+        EXECUTE format('GRANT SELECT ON %I.%I TO %I', p_schema, p_table, p_agent_role);
+    ELSE
+        -- Column privileges: no query trick (pg_stats, error details, JSON casts) can read a
+        -- column the role can't SELECT. Start from nothing, so re-registering also hides.
+        SELECT string_agg(quote_ident(attname), ', '),
+               string_agg(quote_ident(attname), ', ') FILTER (WHERE NOT attname = ANY (p_secret_columns))
+          INTO v_all, v_visible
+          FROM pg_attribute WHERE attrelid = v_table_oid AND attnum > 0 AND NOT attisdropped;
+        EXECUTE format('REVOKE SELECT ON %I.%I FROM %I', p_schema, p_table, p_agent_role);
+        EXECUTE format('REVOKE SELECT (%s) ON %I.%I FROM %I', v_all, p_schema, p_table, p_agent_role);
+        IF v_visible IS NOT NULL THEN
+            EXECUTE format('GRANT SELECT (%s) ON %I.%I TO %I', v_visible, p_schema, p_table, p_agent_role);
+        END IF;
+    END IF;
     EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_agent_role);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;

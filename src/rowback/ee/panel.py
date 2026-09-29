@@ -26,7 +26,8 @@ from rowback.ee.sso import SsoError, _get_json, _require_https
 
 SESSION_COOKIE = "rowback_session"
 OIDC_COOKIE = "rowback_oidc"
-# ponytail: a session outlives an IdP group removal by up to 8 hours; shorten if that matters.
+# Admin-key sessions; SSO sessions end sooner, when the IdP's ID token expires (usually 1 hour),
+# so removing someone at the IdP signs them out of the panel then.
 SESSION_SECONDS = 8 * 3600
 OIDC_SECONDS = 600
 HISTORY_LIMIT = 200
@@ -83,8 +84,8 @@ def _secure(request: Request) -> bool:
     return request.headers.get("x-forwarded-proto") == "https" or request.url.hostname not in ("localhost", "127.0.0.1")
 
 
-def _set_session(resp: Response, request: Request, actor: str) -> None:
-    resp.set_cookie(SESSION_COOKIE, sign("session", {"actor": actor}, SESSION_SECONDS), max_age=SESSION_SECONDS,
+def _set_session(resp: Response, request: Request, actor: str, ttl: int = SESSION_SECONDS, groups=()) -> None:
+    resp.set_cookie(SESSION_COOKIE, sign("session", {"actor": actor, "groups": list(groups)}, ttl), max_age=ttl,
                     httponly=True, secure=_secure(request), samesite="strict", path="/panel")
 
 
@@ -97,8 +98,11 @@ def _session_actor(request: Request) -> str | None:
     # Re-check against today's config: a session must not outlive the sign-in method it used.
     if actor == "api_admin" and not api._ALLOW_ADMIN_KEY:
         return None
-    if actor.startswith("oidc:") and api._SSO is None:
-        return None
+    if actor.startswith("oidc:"):
+        # Today's allowlist decides, so removing a person or group from the config takes effect now.
+        groups = data.get("groups")
+        if api._SSO is None or api._SSO.allowed(actor[len("oidc:"):], groups if isinstance(groups, list) else []) is None:
+            return None
     return actor
 
 
@@ -227,13 +231,17 @@ def build_panel() -> FastAPI:
         if error or not code or not data or not hmac.compare_digest(state, data["state"]):
             raise HTTPException(status_code=400, detail="Sign-in failed or expired. Start again from the panel.")
         try:
-            actor = _api()._SSO.verify(_exchange_code(cfg, doc, code, data["v"]), nonce=data["nonce"])
+            sso = _api()._SSO
+            actor, claims = sso.verify_claims(_exchange_code(cfg, doc, code, data["v"]), nonce=data["nonce"])
+            ttl = min(SESSION_SECONDS, int(claims["exp"]) - int(time.time()))
+            if ttl <= 0:
+                raise SsoError("token already expired")
         except SsoError as e:
             audit("panel_login_failed", actor="oidc", reason=str(e))
             raise HTTPException(status_code=403, detail="Your account is not an allowed approver.") from None
         resp = RedirectResponse("/panel/", status_code=303)
         resp.delete_cookie(OIDC_COOKIE, path="/panel/sso")
-        _set_session(resp, request, actor)
+        _set_session(resp, request, actor, ttl, sso.allowed(actor[len("oidc:"):], claims.get(sso.cfg.groups_claim)))
         audit("panel_login", actor=actor)
         return resp
 

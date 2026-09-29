@@ -84,14 +84,22 @@ def register(
     if not sep or not name:
         console.print("[red]Error: table must be schema-qualified, e.g. public.users[/red]")
         raise typer.Exit(1)
+    from rowback.sql.classify import is_secret
+    extra = load_config().sensitive_columns
     try:
         with psycopg.connect(install_dsn, autocommit=True) as conn:
-            conn.execute("SELECT rowback.register_table(%s, %s, %s, %s)", (schema, name, pk, agent_role))
+            columns = [r[0] for r in conn.execute(
+                "SELECT attname FROM pg_attribute WHERE attrelid = %s::regclass AND attnum > 0 AND NOT attisdropped",
+                (f'"{schema}"."{name}"',))]
+            hidden = [c for c in columns if is_secret(c, extra)]
+            conn.execute("SELECT rowback.register_table(%s, %s, %s, %s, %s)", (schema, name, pk, agent_role, hidden))
             unprotected = conn.execute("SELECT rowback.unprotected_cascade_child(%s::regclass)", (f'"{schema}"."{name}"',)).fetchone()[0]
     except psycopg.Error as e:
         console.print(f"[red]Failed to register {table}: {str(e).splitlines()[0]}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]{table} is now protected.[/green]")
+    if hidden:
+        console.print(f"Hidden from the agent by the database itself: {', '.join(hidden)}")
     if unprotected:
         console.print(f"[yellow]Note: deletes on {table} cascade into {unprotected}; register it too or those writes will be refused.[/yellow]")
 
@@ -102,7 +110,7 @@ def approve(token: str):
     control, runtime = get_dsns()
     config = load_config()
     executor = RowbackExecutor(control, runtime, approval_timeout_minutes=config.agent.approval_timeout_minutes,
-                                required_approvals=config.approvals.required)
+                                required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns)
     res = executor.execute_pending(token, actor=cli_actor())
     if res.status == "applied":
         console.print(f"[green]Approved and executed successfully. Rows affected: {res.rows_affected}. Undo with: rowback undo {res.public_id}[/green]")

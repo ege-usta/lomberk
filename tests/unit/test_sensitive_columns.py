@@ -42,6 +42,11 @@ LEAKS = [
     "SELECT DISTINCT ON (4) * FROM public.users",
     "SELECT * FROM public.users NATURAL JOIN public.guesses",         # joins on columns never named
     "UPDATE public.t SET a = 1 FROM public.users NATURAL JOIN public.g WHERE t.id = 1",
+    "SELECT settings->>'api_key' FROM public.users",                  # secrets inside JSON
+    "SELECT settings #>> '{auth,token}' FROM public.users",
+    "SELECT settings['stripe_secret'] FROM public.users",
+    "SELECT id FROM public.users WHERE settings ? 'password'",
+    "SELECT id FROM public.users WHERE settings @> '{\"pwd\": \"x\"}'::jsonb",
 ]
 
 ALLOWED = [
@@ -55,6 +60,7 @@ ALLOWED = [
     "SELECT id, name FROM public.users ORDER BY 2, 1",
     "SELECT * FROM public.users ORDER BY id",
     "SELECT DISTINCT * FROM public.users",
+    "SELECT settings->>'theme' FROM public.users WHERE settings ? 'beta'",
     "UPDATE public.users SET name = 'x' WHERE id = 1 RETURNING *",
     "DELETE FROM public.users WHERE id = 1",
     "SELECT o.id, c.name FROM public.orders o JOIN public.customers c ON c.id = o.customer_id",
@@ -69,3 +75,23 @@ def test_every_route_to_a_secret_is_refused(sql):
 @pytest.mark.parametrize("sql", ALLOWED)
 def test_ordinary_queries_still_pass(sql):
     assert not refused(sql), check_sensitive_columns(pglast.parse_sql(sql))
+
+
+def test_configured_names_are_secrets_too():
+    # sensitive_columns: exact names the keyword list can't guess.
+    ast = pglast.parse_sql("SELECT pass, profile FROM public.users")
+    assert check_sensitive_columns(ast) == []
+    assert set(check_sensitive_columns(ast, ["PASS", "profile"])) == {"pass", "profile"}
+    assert not check_sensitive_columns(pglast.parse_sql("SELECT passenger FROM public.trips"), ["pass"])
+
+
+def test_secret_json_keys_are_masked_in_results():
+    from rowback.executor import RowbackExecutor
+    ex = RowbackExecutor("x", "y", sensitive_columns=["pin"])
+    rows = ex._mask_and_sanitize_rows(
+        ["id", "settings", "raw", "pin"],
+        [(1, {"theme": "dark", "api_key": "K", "nested": [{"token": "T", "pin": "1234"}]},
+          '{"password": "p", "ok": 1}', "9999")])
+    assert rows == [{"id": 1, "settings": {"theme": "dark", "api_key": "***MASKED***",
+                                          "nested": [{"token": "***MASKED***", "pin": "***MASKED***"}]},
+                     "raw": '{"password": "***MASKED***", "ok": 1}', "pin": "***MASKED***"}]
