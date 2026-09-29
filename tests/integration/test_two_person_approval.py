@@ -124,3 +124,19 @@ def test_api_shared_admin_key_counts_as_one_person(dsn, monkeypatch):
     finally:
         app.dependency_overrides.clear()
     assert _val(dsn) == before
+
+
+def test_gateway_refuses_to_start_without_a_valid_license(dsn, monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    import rowback.ee.license as lic
+    from rowback.api import app
+    control, runtime = _roles(dsn)
+    for k, v in {"ROWBACK_AGENT_DSN": runtime, "ROWBACK_ADMIN_DSN": control,
+                 "ROWBACK_API_KEY": "agent-k", "ROWBACK_ADMIN_KEY": "admin-k"}.items():
+        monkeypatch.setenv(k, v)
+    (tmp_path / "rowback.yaml").write_text("approvals:\n  required: 2\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(lic, "validate_key", lambda key: "invalid")
+    with pytest.raises(lic.LicenseError, match="two-person approval"), TestClient(app):
+        pass

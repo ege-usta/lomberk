@@ -30,10 +30,11 @@ _API_KEY = None
 _ADMIN_KEY = None
 _SSO = None  # ee OidcVerifier when sso.issuer is set
 _ALLOW_ADMIN_KEY = True
+_PRO = False  # a valid Rowback Pro license is present
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY
+    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY, _PRO
     
     # Local registry ownership for safe and strict shutdown drainage
     local_db_workers = set()
@@ -60,6 +61,14 @@ async def lifespan(app: FastAPI):
         
     _API_KEY = agent_key
     _ADMIN_KEY = admin_key
+    slack_enabled = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
+    pro_features = [name for name, on in (("SSO", bool(config.sso.issuer)), ("Slack approvals", slack_enabled),
+                                          ("two-person approval", config.approvals.required > 1)) if on]
+    license_key = os.environ.get("ROWBACK_LICENSE_KEY")
+    _PRO = False
+    if pro_features or license_key:
+        from rowback.ee.license import check_license
+        _PRO = await asyncio.to_thread(check_license, license_key, pro_features)
     _SSO, _ALLOW_ADMIN_KEY = None, True
     if config.sso.issuer:
         from rowback.ee.sso import OidcVerifier
@@ -95,7 +104,6 @@ async def lifespan(app: FastAPI):
         _policy_engine_instance = PolicyEngine(config)
         
         # Production Slack Transport Wiring
-        slack_enabled = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
         if slack_enabled:
             app_token = os.environ.get("ROWBACK_SLACK_APP_TOKEN")
             bot_token = os.environ.get("ROWBACK_SLACK_BOT_TOKEN")
