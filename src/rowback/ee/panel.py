@@ -79,7 +79,8 @@ def unsign(purpose: str, token: str | None) -> dict | None:
 
 
 def _secure(request: Request) -> bool:
-    return request.url.hostname not in ("localhost", "127.0.0.1")
+    # A TLS proxy may reach us as http://127.0.0.1; its X-Forwarded-Proto only ever adds Secure.
+    return request.headers.get("x-forwarded-proto") == "https" or request.url.hostname not in ("localhost", "127.0.0.1")
 
 
 def _set_session(resp: Response, request: Request, actor: str) -> None:

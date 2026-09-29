@@ -45,6 +45,17 @@ MUST_BLOCK = [
     "WITH m AS (UPDATE public.orders SET total = 0 WHERE true RETURNING id) SELECT count(*) FROM m",
     "WITH m AS (INSERT INTO public.orders (id) VALUES (1) RETURNING id) DELETE FROM public.x WHERE id IN (SELECT id FROM m)",
     "INSERT INTO users (name) VALUES ('x')",
+    # system catalogs hold copies of data: pg_stats samples column values, secrets included
+    "SELECT attname, histogram_bounds::text FROM pg_stats WHERE tablename = 'users'",
+    "SELECT most_common_vals::text FROM pg_catalog.pg_stats",
+    "SELECT prosrc FROM pg_proc",
+    "SELECT * FROM PG_CATALOG.PG_STATS_EXT",
+    "UPDATE public.notes SET body = 'x' WHERE id IN (SELECT 1 FROM pg_stats)",
+    "SELECT * FROM information_schema.user_mapping_options",
+    "SELECT * FROM information_schema._pg_user_mappings",
+    # Trojan Source: bidi controls make the approver read different SQL than what runs
+    "DELETE FROM public.orders WHERE id = 1 /* \u202e */ OR id > 0",
+    "SELECT '\u2066' FROM public.users",
     # malformed input fails closed
     "DELETE FROM public.users WHERE",
 ]
@@ -53,6 +64,8 @@ MUST_ALLOW = [
     "SELECT count(*) FROM public.users",
     "SELECT lower(name), coalesce(plan, 'free') FROM public.users WHERE id = 1",
     "SELECT pg_catalog.now()",
+    "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'",
+    "SELECT 1 FROM public.pg_notes",
     "UPDATE public.users SET plan = 'pro' WHERE id = 1",
     "DELETE FROM public.users WHERE id = 1",
     "INSERT INTO public.users (name, email) VALUES ('a', 'a@x.io')",

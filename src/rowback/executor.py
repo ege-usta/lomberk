@@ -20,6 +20,14 @@ class ExecutionResult(BaseModel):
     message: str
     error_code: str | None = None
 
+def _agent_message(e: Exception) -> str:
+    """The part of an error the agent may see. Never PostgreSQL's DETAIL: for NOT NULL and
+    CHECK violations it prints the whole failing row, secret columns included."""
+    if isinstance(e, psycopg.Error):
+        return e.diag.message_primary or str(e).split("\n")[0]
+    return str(e)
+
+
 class HoldForApproval(Exception):
     """Auto-approved write must be rolled back and sent to a human instead."""
 
@@ -225,7 +233,7 @@ class RowbackExecutor:
                                 rows = cur.fetchmany(100)
                                 fetched_data = self._mask_and_sanitize_rows(columns, rows)
             except Exception as e:
-                error_msg = str(e)
+                error_msg = _agent_message(e)
                 
             if error_msg:
                 return ExecutionResult(operation_id=operation_id, status="failed", message=error_msg)
@@ -396,7 +404,7 @@ class RowbackExecutor:
             audit("held", actor=actor, public_id=public_id, sql=sql_to_execute, reason=str(e))
             return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="approval_required", message=f"{e} Write was rolled back and requires explicit approval.")
         except Exception as e:
-            error_msg = str(e)
+            error_msg = _agent_message(e)
             
         if error_msg:
             if execution_completed:

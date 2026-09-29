@@ -33,7 +33,10 @@ def db():
                       "$$ BEGIN NEW.updated_at := now(); RETURN NEW; END $$")
             c.execute("CREATE TRIGGER touch BEFORE UPDATE ON public.stamped FOR EACH ROW EXECUTE FUNCTION public.touch()")
             c.execute("INSERT INTO public.stamped VALUES (1, 'a', NULL)")
-            for t in ("parent", "ruled", "stamped"):
+            c.execute("CREATE TABLE public.people (id INT PRIMARY KEY, name TEXT NOT NULL, age INT CHECK (age >= 0), "
+                      "password_hash TEXT)")
+            c.execute("INSERT INTO public.people VALUES (1, 'a', 30, 'SECRETHASH_1')")
+            for t in ("parent", "ruled", "stamped", "people"):
                 c.execute("SELECT rowback.register_table('public', %s, 'id', 'mcp_agent')", (t,))
         host = url.split("@", 1)[1]
         yield url, RowbackExecutor(f"postgresql://rowback_control:secret@{host}",
@@ -68,3 +71,13 @@ def test_write_to_a_table_with_its_own_triggers_waits_for_a_person(db):
     with psycopg.connect(url) as c:
         assert c.execute("SELECT v FROM public.stamped").fetchone()[0] == "a"
     assert ex.execute_pending(res.public_id, actor="cli:ops").status == "applied"  # a person accepted it
+
+
+@pytest.mark.parametrize("sql", ["UPDATE public.people SET name = NULL WHERE id = 1",
+                                 "UPDATE public.people SET age = -1 WHERE id = 1"])
+def test_constraint_errors_never_show_the_failing_row(db, sql):
+    # PostgreSQL's DETAIL prints the whole row, secret columns included.
+    _, ex = db
+    res = run(ex, sql)
+    assert res.status == "failed" and "violates" in res.message
+    assert "SECRETHASH" not in res.message and "Failing row" not in res.message

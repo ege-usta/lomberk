@@ -71,3 +71,10 @@ def test_config_typo_is_rejected_not_silently_ignored(tmp_path):
     cfg.write_text("limits:\n  max_row_without_approval: 5\n")
     with pytest.raises(ValidationError):
         load_config(str(cfg))
+
+
+def test_protected_tables_must_name_a_schema():
+    # A bare name never matches the schema.table a write names, so it would protect nothing.
+    import pydantic
+    with pytest.raises(pydantic.ValidationError, match="schema.table"):
+        RowbackConfig(protected_tables=["orders"])

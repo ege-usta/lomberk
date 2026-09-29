@@ -3,6 +3,8 @@ import os
 import urllib.error
 import urllib.request
 
+BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
 
 class AISentinel:
     def __init__(self):
@@ -51,6 +53,16 @@ class AISentinel:
                     if relation and isinstance(relation, dict) and relation.get('schemaname') is None:
                         violations.append(f"Unqualified relation write in {node_type} (missing schema)")
                         
+                if node_type == 'RangeVar':
+                    # System catalogs hold copies of table data: pg_stats keeps sampled column
+                    # values (secrets included), pg_proc function sources, user mappings passwords.
+                    # Unqualified pg_* names resolve to pg_catalog first. information_schema
+                    # stays readable for schema discovery, minus its user-mapping views.
+                    schema, rel = node.get('schemaname'), node.get('relname') or ''
+                    if ((schema or '').startswith('pg_') or (schema is None and rel.startswith('pg_'))
+                            or (schema == 'information_schema' and (rel.startswith('_pg_') or 'user_mapping' in rel))):
+                        violations.append(f"System catalog {schema + '.' if schema else ''}{rel} is not readable")
+
                 if node_type == 'FuncCall':
                     parts = [p.get('sval') for p in node.get('funcname', ()) if isinstance(p, dict)]
                     schema_ok = len(parts) == 1 or (len(parts) == 2 and parts[0] == 'pg_catalog')
@@ -69,6 +81,10 @@ class AISentinel:
                     # Do not silently pass errors during AST traversal
                     violations.append("AST traversal encountered an unsupported structure")
 
+        if BIDI_CONTROLS.intersection(sql):
+            # Trojan Source: these reorder how the SQL displays to an approver, so the text
+            # they read is not the text that runs.
+            return False, "AST Firewall: Invisible text-direction characters are not allowed in SQL."
         try:
             ast = pglast.parse_sql(sql)
             if len(ast) > 1:

@@ -36,6 +36,12 @@ LEAKS = [
     "SELECT row(u.id, u.passwd) FROM public.users u",
     "SELECT stripe_api_key FROM public.accounts",
     "SELECT private_key_pem FROM public.certs",
+    "SELECT * FROM public.users ORDER BY 4",                          # sorts by a masked column unnamed
+    "SELECT * FROM public.users ORDER BY 4 DESC, 1",
+    "SELECT u.* FROM public.users u GROUP BY 1, 2, 3, 4",
+    "SELECT DISTINCT ON (4) * FROM public.users",
+    "SELECT * FROM public.users NATURAL JOIN public.guesses",         # joins on columns never named
+    "UPDATE public.t SET a = 1 FROM public.users NATURAL JOIN public.g WHERE t.id = 1",
 ]
 
 ALLOWED = [
@@ -46,6 +52,9 @@ ALLOWED = [
     "SELECT id FROM public.t WHERE EXISTS (SELECT * FROM public.users WHERE users.id = t.id)",
     "SELECT 'password' AS label, 'my token' FROM public.t",           # string literals are data
     "SELECT a, b FROM (VALUES (1, 2)) v(a, b)",
+    "SELECT id, name FROM public.users ORDER BY 2, 1",
+    "SELECT * FROM public.users ORDER BY id",
+    "SELECT DISTINCT * FROM public.users",
     "UPDATE public.users SET name = 'x' WHERE id = 1 RETURNING *",
     "DELETE FROM public.users WHERE id = 1",
     "SELECT o.id, c.name FROM public.orders o JOIN public.customers c ON c.id = o.customer_id",

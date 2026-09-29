@@ -184,6 +184,8 @@ def check_sensitive_columns(ast) -> list[str]:
             return
         if kind in ("RangeVar", "JoinExpr") and (node.get("alias") or {}).get("colnames"):
             found.append("renaming a table's columns with an alias list")
+        if kind == "JoinExpr" and node.get("isNatural"):
+            found.append("NATURAL JOIN, which compares columns the query never names")
         if kind == "SubLink":
             exists = (node.get("subLinkType") or {}).get("name") == "EXISTS_SUBLINK"
             walk(node.get("testexpr"))
@@ -195,9 +197,21 @@ def check_sensitive_columns(ast) -> list[str]:
         for v in node.values():
             walk(v)
 
+    def has_star(node) -> bool:
+        if isinstance(node, dict):
+            return node.get("@") == "A_Star" or any(has_star(v) for v in node.values())
+        return isinstance(node, (list, tuple)) and any(has_star(v) for v in node)
+
     def walk_stmt(stmt, top: bool) -> None:
         if not isinstance(stmt, dict):
             return
+        if stmt.get("@") == "SelectStmt" and has_star(stmt.get("targetList")):
+            # `SELECT * ... ORDER BY 4` sorts by a masked column without naming it: an oracle.
+            for key in ("sortClause", "groupClause", "distinctClause"):
+                for item in stmt.get(key) or ():
+                    node = item.get("node", item) if isinstance(item, dict) else None
+                    if isinstance(node, dict) and node.get("@") == "A_Const" and (node.get("val") or {}).get("@") == "Integer":
+                        found.append("ordering or grouping by column position next to *")
         plain_select = (stmt.get("op") or {}).get("name", "SETOP_NONE") == "SETOP_NONE"
         for key, value in stmt.items():
             if key == "returningClause" and isinstance(value, dict):

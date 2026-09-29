@@ -245,7 +245,8 @@ async def lifespan(app: FastAPI):
         _executor_instance = None
         _policy_engine_instance = None
 
-app = FastAPI(title="Rowback Enterprise API", lifespan=lifespan)
+# No /docs or /openapi.json: they map every endpoint for anyone who can reach the port.
+app = FastAPI(title="Rowback Enterprise API", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 

@@ -1,7 +1,7 @@
 import os
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class _Strict(BaseModel):
@@ -65,6 +65,16 @@ class RowbackConfig(_Strict):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     sso: SsoConfig = Field(default_factory=SsoConfig)
     approvals: ApprovalsConfig = Field(default_factory=ApprovalsConfig)
+
+    @field_validator("protected_tables")
+    @classmethod
+    def _schema_qualified(cls, tables: list[str]) -> list[str]:
+        # Writes name schema.table; a bare "orders" would never match and silently protect nothing.
+        bare = [t for t in tables if "." not in t]
+        if bare:
+            raise ValueError(f"protected_tables entries must be schema.table, e.g. public.{bare[0]}")
+        return tables
+
 
 def load_config(path: str = "rowback.yaml") -> RowbackConfig:
     if not os.path.exists(path):
