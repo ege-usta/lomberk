@@ -82,6 +82,7 @@ Environment: `UNDOGATE_ADMIN_DSN` (control role), `UNDOGATE_AGENT_DSN` (agent ro
 
 ## Installing on your own database
 ```bash
+pip install "undogate @ git+https://github.com/ege-usta/undogate"   # or: docker build -t undogate .
 export UNDOGATE_INSTALL_DSN=postgresql://owner@db/app       # used only for install
 undogate init --control-role undogate_control --agent-role undogate_agent
 undogate register public.orders --agent-role undogate_agent  # repeat per table (and FK children)
