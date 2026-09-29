@@ -127,12 +127,12 @@ class RowbackExecutor:
             val_str = re.sub(r'(?i)system:\s*override', '[SANITIZED_OVERRIDE]', val_str)
             return val_str
 
-        SENSITIVE_COLUMNS = {"password", "ssn", "credit_card", "secret", "token", "hash"}
+        from rowback.sql.classify import SENSITIVE_KEYWORDS
         fetched_data = []
         for row in rows:
             row_dict = dict(zip(columns, row))
             for col in columns:
-                if any(sens in col.lower() for sens in SENSITIVE_COLUMNS) and row_dict[col]:
+                if any(sens in col.lower() for sens in SENSITIVE_KEYWORDS) and row_dict[col]:
                     row_dict[col] = "***MASKED***"
                 elif isinstance(row_dict[col], str):
                     row_dict[col] = sanitize_payload(row_dict[col])

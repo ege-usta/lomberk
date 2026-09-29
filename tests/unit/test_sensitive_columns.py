@@ -32,6 +32,10 @@ LEAKS = [
     "SELECT concat(u.*) FROM public.users u",
     "SELECT id FROM public.users u WHERE u::text LIKE '%a%'",
     "SELECT a FROM public.t WHERE a IN (SELECT * FROM public.users)",
+    "SELECT u.pwd FROM public.users u",                               # other common secret names
+    "SELECT row(u.id, u.passwd) FROM public.users u",
+    "SELECT stripe_api_key FROM public.accounts",
+    "SELECT private_key_pem FROM public.certs",
 ]
 
 ALLOWED = [

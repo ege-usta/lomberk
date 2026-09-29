@@ -121,7 +121,9 @@ def extract_tables_from_ast(ast):
     return list(dict.fromkeys(visitor.tables))
 
 
-SENSITIVE_KEYWORDS = ("password", "token", "secret", "ssn", "hash", "credit_card")
+# Substring match on column names, case-insensitive. A false hit only refuses or masks.
+SENSITIVE_KEYWORDS = ("password", "passwd", "pwd", "token", "secret", "ssn", "hash", "credit_card",
+                      "api_key", "apikey", "private_key", "credential")
 
 
 def check_sensitive_columns(ast) -> list[str]:

@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: test
       POSTGRES_DB: pocketos
     ports:
-      - "${ROWBACK_DEMO_DB_PORT:-5439}:5432"
+      - "127.0.0.1:${ROWBACK_DEMO_DB_PORT:-5439}:5432"  # superuser test/test: never expose it beyond this machine
     volumes:
       - ./demo/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
