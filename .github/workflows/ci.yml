@@ -56,3 +56,39 @@ jobs:
           name: pytest-results
           path: test-results/junit.xml
           retention-days: 7
+
+  core-without-enterprise:
+    # Open-core promise: everything outside src/undogate/ee/ works on its own.
+    name: Core tests without ee/
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.1.1
+      - uses: actions/setup-python@v5.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v2.2.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --frozen --all-groups
+      - name: Remove Enterprise code and its tests, run the rest
+        env:
+          PYTHONPATH: src
+        run: |
+          rm -rf src/undogate/ee
+          grep -rL "undogate\.ee" tests --include='test_*.py' | xargs uv run --no-sync pytest -q --strict-markers
+
+  dependency-audit:
+    name: Known vulnerabilities in dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.1.1
+      - uses: astral-sh/setup-uv@v2.2.0
+        with:
+          version: "0.11.18"
+      - run: |
+          uv export --frozen --no-dev --no-hashes --no-emit-project > requirements.txt
+          uvx pip-audit -r requirements.txt --disable-pip --no-deps
