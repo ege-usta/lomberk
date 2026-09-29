@@ -22,5 +22,5 @@ MCP gateway that puts AI agents' SQL behind a firewall, human approval and undo.
   - No `git stash`.
   - No push, and no merge to main, without the owner.
   - Work on feature branches.
-- The owner's uncommitted WIP is theirs. Do not edit, stage or commit it unless asked: `.gitignore`, `pyproject.toml`, `uv.lock`, `docs/Phase_3B_*`, `src/rowback/offline_pilot.py`, `tests/integration/test_slack_integration.py`, `poc/`, `graphify-out/`, `.mcp.json`. Check `git status` first.
-- `pyjwt` (used by `ee/sso.py`) comes in transitively via `mcp[crypto]`. Declare it in pyproject once the owner's pyproject WIP is resolved.
+- Uncommitted changes you didn't make are the owner's. Do not edit, stage or commit them unless asked. Check `git status` first.
+- Graphify (`graphify-out/`, `.mcp.json`, `.graphifyignore`) and `.impeccable/review/` are local tools, hidden by `.git/info/exclude`. Never commit them.
