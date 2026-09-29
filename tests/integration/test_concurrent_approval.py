@@ -2,8 +2,8 @@ import pytest
 import psycopg
 import threading
 from testcontainers.community.postgres import PostgresContainer
-from undogate.capture.install import install_undogate
-from undogate.executor import UndogateExecutor
+from rowback.capture.install import install_rowback
+from rowback.executor import RowbackExecutor
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -24,15 +24,15 @@ def runtime_dsn(dsn):
 @pytest.fixture(scope="module")
 def setup_db(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("DROP ROLE IF EXISTS undogate_control")
-        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS rowback_control")
+        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
-    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_race (id SERIAL PRIMARY KEY, val INT);")
         cur.execute("INSERT INTO public.test_race (val) VALUES (0);")
-        cur.execute("SELECT undogate.register_table('public', 'test_race', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_race', 'id', 'mcp_agent');")
 
 def test_concurrent_approval(dsn, runtime_dsn, setup_db):
     # Insert a pending checkpoint manually
@@ -43,7 +43,7 @@ def test_concurrent_approval(dsn, runtime_dsn, setup_db):
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO undogate.checkpoints (public_id, agent_label, sql_text, classification, decision, status) VALUES (%s, %s, %s, %s, %s, %s)",
+                "INSERT INTO rowback.checkpoints (public_id, agent_label, sql_text, classification, decision, status) VALUES (%s, %s, %s, %s, %s, %s)",
                 (public_id, "test_agent", sql_text, "DML_WRITE", "REQUIRE_APPROVAL", "pending")
             )
             
@@ -55,7 +55,7 @@ def test_concurrent_approval(dsn, runtime_dsn, setup_db):
     def worker():
         try:
             barrier.wait(timeout=5)
-            executor = UndogateExecutor(dsn, runtime_dsn)
+            executor = RowbackExecutor(dsn, runtime_dsn)
             res = executor.execute_pending(public_id)
             results.append(res)
         except Exception as e:

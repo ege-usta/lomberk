@@ -1,13 +1,13 @@
 import pytest
 
-from undogate.config import LimitsConfig, UndogateConfig
-from undogate.models import ClassifiedStatement, PolicyDecision, StatementClass
-from undogate.policy import PolicyEngine
+from rowback.config import LimitsConfig, RowbackConfig
+from rowback.models import ClassifiedStatement, PolicyDecision, StatementClass
+from rowback.policy import PolicyEngine
 
 
 @pytest.fixture
 def policy_engine():
-    config = UndogateConfig(
+    config = RowbackConfig(
         limits=LimitsConfig(max_rows_without_approval=50),
         protected_tables=["public.users"],
         deny_patterns=["DROP_SCHEMA"]
@@ -63,8 +63,8 @@ def test_config_typo_is_rejected_not_silently_ignored(tmp_path):
     import pytest
     from pydantic import ValidationError
 
-    from undogate.config import load_config
-    cfg = tmp_path / "undogate.yaml"
+    from rowback.config import load_config
+    cfg = tmp_path / "rowback.yaml"
     cfg.write_text("protected_table:\n  - public.users\n")
     with pytest.raises(ValidationError):
         load_config(str(cfg))

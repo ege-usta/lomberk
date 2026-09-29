@@ -6,11 +6,11 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from undogate.capture.install import install_undogate
-from undogate.config import UndogateConfig
-from undogate.executor import UndogateExecutor
-from undogate.policy import PolicyEngine
-from undogate.sql.classify import classify_sql
+from rowback.capture.install import install_rowback
+from rowback.config import RowbackConfig
+from rowback.executor import RowbackExecutor
+from rowback.policy import PolicyEngine
+from rowback.sql.classify import classify_sql
 
 
 @pytest.fixture(scope="module")
@@ -23,18 +23,18 @@ def dsns():
             return urlunparse((p.scheme, f"{role}:secret@{p.hostname}:{p.port}", p.path, "", "", ""))
 
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute("CREATE ROLE undogate_control LOGIN PASSWORD 'secret'")
+            cur.execute("CREATE ROLE rowback_control LOGIN PASSWORD 'secret'")
             cur.execute("CREATE ROLE mcp_agent LOGIN PASSWORD 'secret'")
-        install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+        install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("CREATE TABLE public.payments (id INT PRIMARY KEY, amount INT, card_token TEXT)")
             cur.execute("INSERT INTO public.payments SELECT g, 100, 'tok_secret_' || g FROM generate_series(1, 20) g")
-            cur.execute("SELECT undogate.register_table('public', 'payments', 'id', 'mcp_agent')")
-        yield dsn, as_role("undogate_control"), as_role("mcp_agent")
+            cur.execute("SELECT rowback.register_table('public', 'payments', 'id', 'mcp_agent')")
+        yield dsn, as_role("rowback_control"), as_role("mcp_agent")
 
 
 def run(executor, sql):
-    engine = PolicyEngine(UndogateConfig())
+    engine = PolicyEngine(RowbackConfig())
     return executor.execute(engine.evaluate(classify_sql(sql)[0]), principal="attacker")
 
 
@@ -45,9 +45,9 @@ def amounts(dsn):
 
 
 def test_mass_update_is_held_then_approved_then_undone(dsns, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
     admin, control, agent = dsns
-    ex = UndogateExecutor(control, agent, max_rows_without_approval=5)
+    ex = RowbackExecutor(control, agent, max_rows_without_approval=5)
 
     res = run(ex, "UPDATE public.payments SET amount = 0 WHERE 1=1")
     assert res.status == "approval_required", res.message
@@ -62,17 +62,17 @@ def test_mass_update_is_held_then_approved_then_undone(dsns, monkeypatch):
 
 
 def test_small_write_under_limit_applies(dsns, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
     _, control, agent = dsns
-    ex = UndogateExecutor(control, agent, max_rows_without_approval=5)
+    ex = RowbackExecutor(control, agent, max_rows_without_approval=5)
     res = run(ex, "UPDATE public.payments SET amount = 100 WHERE id = 1")
     assert res.status == "applied", res.message
 
 
 def test_expired_pending_checkpoint_cannot_be_approved(dsns, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
     _, control, agent = dsns
-    ex = UndogateExecutor(control, agent, max_rows_without_approval=0, approval_timeout_minutes=0)
+    ex = RowbackExecutor(control, agent, max_rows_without_approval=0, approval_timeout_minutes=0)
     res = run(ex, "UPDATE public.payments SET amount = 1 WHERE id = 2")
     assert res.status == "approval_required"
     out = ex.execute_pending(res.public_id)
@@ -82,7 +82,7 @@ def test_expired_pending_checkpoint_cannot_be_approved(dsns, monkeypatch):
 
 def test_secret_columns_leak_nothing(dsns):
     _, control, agent = dsns
-    ex = UndogateExecutor(control, agent)
+    ex = RowbackExecutor(control, agent)
     res = run(ex, "SELECT * FROM public.payments WHERE id = 3")
     assert res.status == "applied", res.message
     assert res.data[0]["card_token"] == "***MASKED***"
@@ -91,10 +91,10 @@ def test_secret_columns_leak_nothing(dsns):
 def test_row_limit_counts_captured_rows_not_outer_rowcount(dsns, monkeypatch):
     """Defense in depth: even if a hidden write got past the hard gate, the limit is
     enforced on rows the capture trigger actually recorded (cascades included)."""
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    monkeypatch.setattr("undogate.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
     admin, control, agent = dsns
-    ex = UndogateExecutor(control, agent, max_rows_without_approval=5)
+    ex = RowbackExecutor(control, agent, max_rows_without_approval=5)
     before = amounts(admin)
     res = run(ex, "WITH m AS (UPDATE public.payments SET amount = 0 WHERE true RETURNING id) "
                   "UPDATE public.payments SET amount = 0 WHERE id = (SELECT min(id) FROM m)")
@@ -105,25 +105,25 @@ def test_row_limit_counts_captured_rows_not_outer_rowcount(dsns, monkeypatch):
 def test_audit_trail_records_who_did_what(dsns, monkeypatch, caplog):
     import json
     import logging
-    monkeypatch.setattr("undogate.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
     _, control, agent = dsns
-    ex = UndogateExecutor(control, agent, max_rows_without_approval=1)
-    with caplog.at_level(logging.INFO, logger="undogate_audit"):
+    ex = RowbackExecutor(control, agent, max_rows_without_approval=1)
+    with caplog.at_level(logging.INFO, logger="rowback_audit"):
         denied = run(ex, "DELETE FROM public.payments")
         held = run(ex, "UPDATE public.payments SET amount = 7 WHERE id < 5")
         ex.execute_pending(held.public_id, actor="cli:alice")
         ex.execute_undo(held.public_id, agent_label="cli:bob")
         rejected = run(ex, "UPDATE public.payments SET amount = 8 WHERE id < 5")
         ex.reject(rejected.public_id, actor="api_admin")
-    events = [json.loads(r.getMessage()) for r in caplog.records if r.name == "undogate_audit"]
+    events = [json.loads(r.getMessage()) for r in caplog.records if r.name == "rowback_audit"]
     trail = [(e["event_type"], e["actor"]) for e in events]
     assert denied.status == "denied"
     assert trail == [
-        ("undogate.denied", "attacker"),
-        ("undogate.held", "attacker"),
-        ("undogate.approved", "cli:alice"),
-        ("undogate.applied", "cli:alice"),
-        ("undogate.undone", "cli:bob"),
-        ("undogate.held", "attacker"),
-        ("undogate.rejected", "api_admin"),
+        ("rowback.denied", "attacker"),
+        ("rowback.held", "attacker"),
+        ("rowback.approved", "cli:alice"),
+        ("rowback.applied", "cli:alice"),
+        ("rowback.undone", "cli:bob"),
+        ("rowback.held", "attacker"),
+        ("rowback.rejected", "api_admin"),
     ], trail

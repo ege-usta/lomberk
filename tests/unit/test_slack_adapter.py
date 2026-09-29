@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from undogate.ee.slack import SlackInteractionAdapter, UnauthorizedUserError, InvalidPayloadError, TaskCapacityExceededError
+from rowback.ee.slack import SlackInteractionAdapter, UnauthorizedUserError, InvalidPayloadError, TaskCapacityExceededError
 
 @pytest.fixture
 def mock_callbacks():

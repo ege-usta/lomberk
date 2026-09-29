@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Undogate Pilot",
-    "description": "Undogate isolated test workspace bot",
+    "name": "Rowback Pilot",
+    "description": "Rowback isolated test workspace bot",
     "background_color": "#0a0a0a"
   },
   "features": {
     "bot_user": {
-      "display_name": "Undogate",
+      "display_name": "Rowback",
       "always_online": false
     }
   },

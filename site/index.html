@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Undogate: Ctrl+Z for AI agents</title>
+<title>Rowback: every agent write, reversible</title>
 <meta name="description" content="An MCP gateway for PostgreSQL. Agents never hold the database password, destructive SQL is blocked, risky writes wait for a person, and every write can be undone.">
 <meta name="theme-color" content="#cf2e22">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -164,22 +164,22 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <header class="hero" id="top" data-state="deleted">
   <div class="wrap">
     <nav aria-label="Main">
-      <a class="mark" href="#top">Undogate</a>
+      <a class="mark" href="#top">Rowback</a>
       <div class="navlinks">
         <a href="#how">How undo works</a>
         <a href="#pricing">Pricing</a>
-        <a href="https://github.com/ege-usta/undogate">GitHub</a>
-        <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Undogate%20design%20partner">Become a design partner</a>
+        <a href="https://github.com/ege-usta/rowback">GitHub</a>
+        <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Rowback%20design%20partner">Become a design partner</a>
       </div>
     </nav>
   </div>
   <div class="wrap hero-grid">
     <div>
-      <h1 class="display">Ctrl+Z for AI&nbsp;agents.</h1>
+      <h1 class="display">Every agent write, reversible.</h1>
       <p class="sub">Agents never hold your database password. Destructive SQL is blocked, risky writes wait for a person, and every write can be undone.</p>
       <div class="ctas">
-        <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Undogate%20design%20partner">Become a design partner</a>
-        <a href="https://github.com/ege-usta/undogate">Read the code</a>
+        <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Rowback%20design%20partner">Become a design partner</a>
+        <a href="https://github.com/ege-usta/rowback">Read the code</a>
       </div>
     </div>
 
@@ -229,7 +229,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
       <div><h3>The database records every change</h3><p>A trigger inside PostgreSQL captures each changed row, cascades included, and refuses agent writes that don't carry a single-use token.</p></div>
       <div><h3>Undo goes parents first</h3><p>Deleted rows come back in foreign-key order, then updates revert, then inserts disappear. That's why the users returned before their payments.</p></div>
       <div><h3>It refuses to overwrite</h3><p>If a row changed after the checkpoint, or the schema drifted, undo stops and names the row. It never guesses.</p></div>
-      <div><h3>The ledger can be checked</h3><p>Checkpoints are append-only and SHA-256 hash-chained. <code>undogate verify-ledger</code> finds the first altered entry.</p></div>
+      <div><h3>The ledger can be checked</h3><p>Checkpoints are append-only and SHA-256 hash-chained. <code>rowback verify-ledger</code> finds the first altered entry.</p></div>
     </div>
   </div>
 </section>
@@ -239,13 +239,13 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
     <div>
       <h2 class="display">One command for your agent.</h2>
       <p class="lede">Claude Code, Cursor, or your own agent over MCP. It gets a URL and a key, nothing else.</p>
-      <pre>claude mcp add --transport http undogate \
+      <pre>claude mcp add --transport http rowback \
   https://your-gateway/mcp \
   --header "Authorization: Bearer $AGENT_KEY"</pre>
       <table class="perf">
         <tbody>
           <tr><td>A captured, undoable write</td><td><strong>18.3</strong> ms</td></tr>
-          <tr><td>A read through Undogate</td><td><strong>5.4</strong> ms</td></tr>
+          <tr><td>A read through Rowback</td><td><strong>5.4</strong> ms</td></tr>
           <tr><td>A plain write, new connection</td><td><strong>4.8</strong> ms</td></tr>
         </tbody>
       </table>
@@ -261,9 +261,9 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <section class="limits">
   <div class="wrap">
     <h2 class="display">What it doesn't cover.</h2>
-    <p class="lede">Your security team will ask, so here it is up front. The full model is in <a href="https://github.com/ege-usta/undogate/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+    <p class="lede">Your security team will ask, so here it is up front. The full model is in <a href="https://github.com/ege-usta/rowback/blob/main/SECURITY.md">SECURITY.md</a>.</p>
     <ul class="limit-list">
-      <li><strong>Infrastructure tokens</strong>Undogate guards the SQL path. An agent holding a cloud or hosting API token can still delete a volume. Keep those tokens away from agents.</li>
+      <li><strong>Infrastructure tokens</strong>Rowback guards the SQL path. An agent holding a cloud or hosting API token can still delete a volume. Keep those tokens away from agents.</li>
       <li><strong>Database superusers</strong>They can disable triggers and rewrite the ledger. Ship the ledger's head hash to your SIEM.</li>
       <li><strong>Some tables, for now</strong>Composite primary keys, and tables with rules, inheritance or their own triggers, are refused rather than guessed at.</li>
       <li><strong>Schema changes</strong>DDL is blocked, not reversible. It goes through your normal migrations.</li>
@@ -287,10 +287,10 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <section class="close">
   <div class="wrap">
     <h2 class="display">Looking for three to five teams whose agents write to Postgres.</h2>
-    <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Undogate%20design%20partner">Become a design partner</a>
+    <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Rowback%20design%20partner">Become a design partner</a>
     <footer>
-      <span>Undogate. Open core: Apache-2.0, with <code>ee/</code> under the <a href="https://github.com/ege-usta/undogate/blob/main/src/undogate/ee/LICENSE">Enterprise license</a>.</span>
-      <nav aria-label="Footer"><a href="https://github.com/ege-usta/undogate">GitHub</a><a href="https://github.com/ege-usta/undogate/blob/main/SECURITY.md">Security model</a></nav>
+      <span>Rowback. Open core: Apache-2.0, with <code>ee/</code> under the <a href="https://github.com/ege-usta/rowback/blob/main/src/rowback/ee/LICENSE">Enterprise license</a>.</span>
+      <nav aria-label="Footer"><a href="https://github.com/ege-usta/rowback">GitHub</a><a href="https://github.com/ege-usta/rowback/blob/main/SECURITY.md">Security model</a></nav>
     </footer>
   </div>
 </section>

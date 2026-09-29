@@ -12,11 +12,11 @@ from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from undogate.config import load_config
-from undogate.executor import UndogateExecutor
-from undogate.policy import PolicyEngine
-from undogate.sentinel import AISentinel
-from undogate.sql.classify import classify_sql
+from rowback.config import load_config
+from rowback.executor import RowbackExecutor
+from rowback.policy import PolicyEngine
+from rowback.sentinel import AISentinel
+from rowback.sql.classify import classify_sql
 
 # Global references for lifespan
 _executor_instance = None
@@ -48,13 +48,13 @@ async def lifespan(app: FastAPI):
     config = load_config()
     dsn = os.environ.get(config.database.agent_dsn_env)
     
-    agent_key = os.environ.get("UNDOGATE_API_KEY")
-    admin_key = os.environ.get("UNDOGATE_ADMIN_KEY")
+    agent_key = os.environ.get("ROWBACK_API_KEY")
+    admin_key = os.environ.get("ROWBACK_ADMIN_KEY")
     
     if not dsn:
         raise ValueError(f"Startup Refusal: Database DSN must be provided via {config.database.agent_dsn_env}.")
     if not agent_key or not admin_key:
-        raise ValueError("Startup Refusal: Both UNDOGATE_API_KEY and UNDOGATE_ADMIN_KEY must be configured.")
+        raise ValueError("Startup Refusal: Both ROWBACK_API_KEY and ROWBACK_ADMIN_KEY must be configured.")
     if agent_key == admin_key:
         raise ValueError("Startup Refusal: Agent and Admin keys must NOT be identical.")
         
@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
     _ADMIN_KEY = admin_key
     _SSO, _ALLOW_ADMIN_KEY = None, True
     if config.sso.issuer:
-        from undogate.ee.sso import OidcVerifier
+        from rowback.ee.sso import OidcVerifier
         _SSO = await asyncio.to_thread(OidcVerifier, config.sso)
         _ALLOW_ADMIN_KEY = bool(config.sso.allow_admin_key)
     elif config.sso.allow_admin_key is False:
@@ -91,17 +91,17 @@ async def lifespan(app: FastAPI):
         if runtime_super:
             raise ValueError("Startup Refusal: Agent role must not be a superuser.")
             
-        _executor_instance = UndogateExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms)
+        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms)
         _policy_engine_instance = PolicyEngine(config)
         
         # Production Slack Transport Wiring
-        slack_enabled = os.environ.get("UNDOGATE_SLACK_ENABLED", "").lower() == "true"
+        slack_enabled = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
         if slack_enabled:
-            app_token = os.environ.get("UNDOGATE_SLACK_APP_TOKEN")
-            bot_token = os.environ.get("UNDOGATE_SLACK_BOT_TOKEN")
+            app_token = os.environ.get("ROWBACK_SLACK_APP_TOKEN")
+            bot_token = os.environ.get("ROWBACK_SLACK_BOT_TOKEN")
             
             if not app_token or not bot_token:
-                raise ValueError("Startup Refusal: UNDOGATE_SLACK_APP_TOKEN and UNDOGATE_SLACK_BOT_TOKEN are required when Slack is enabled.")
+                raise ValueError("Startup Refusal: ROWBACK_SLACK_APP_TOKEN and ROWBACK_SLACK_BOT_TOKEN are required when Slack is enabled.")
                 
             if not hasattr(config, "slack") or not config.slack.admin_allowlist:
                 raise ValueError("Startup Refusal: config.slack.admin_allowlist is missing or empty.")
@@ -122,8 +122,8 @@ async def lifespan(app: FastAPI):
                 from slack_sdk.socket_mode.aiohttp import SocketModeClient
                 from slack_sdk.web.async_client import AsyncWebClient
 
-                from undogate.ee.slack import SlackInteractionAdapter, slack_actor
-                from undogate.ee.slack_transport import SlackTransport
+                from rowback.ee.slack import SlackInteractionAdapter, slack_actor
+                from rowback.ee.slack_transport import SlackTransport
                 # Bind local registry to callbacks
                 def make_callbacks(executor, policy, resolver, updater, workers_set, shutdown_evt):
                     async def resolve_cb(team, channel, ts):
@@ -131,10 +131,10 @@ async def lifespan(app: FastAPI):
                     
                     async def _run_tracked(func, *args):
                         if shutdown_evt.is_set():
-                            from undogate.ee.slack import TaskCapacityExceededError
+                            from rowback.ee.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("Server is shutting down. Rejecting new DB workers.")
                         if len(workers_set) >= 50:
-                            from undogate.ee.slack import TaskCapacityExceededError
+                            from rowback.ee.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("DB worker capacity exceeded. Server is busy.")
                         
                         t = asyncio.create_task(asyncio.to_thread(func, *args))
@@ -164,7 +164,7 @@ async def lifespan(app: FastAPI):
                 
                 web_factory = getattr(app.state, "slack_web_client_factory", None) or AsyncWebClient
                 if use_publisher:
-                    from undogate.ee.slack_publisher import SlackPublisher
+                    from rowback.ee.slack_publisher import SlackPublisher
                     publisher = SlackPublisher(
                         admin_dsn, web_factory(token=bot_token), config.slack.channel_id,
                         set(config.slack.team_allowlist), include_sql=config.slack.include_sql,
@@ -200,7 +200,7 @@ async def lifespan(app: FastAPI):
                 await _slack_transport_instance.connect()
             except Exception as e:
                 import logging
-                logging.getLogger("undogate.api").error(f"Failed to start Slack transport: {e}")
+                logging.getLogger("rowback.api").error(f"Failed to start Slack transport: {e}")
                 # We don't crash the server if connect fails, but we don't swallow validation errors
                 # Wait! The user says "Eksik dependency => bağlantı öncesi ret. Startup hatasının API'yi açık bırakması seçilecekse Slack readiness... log yazmak başarılı başlangıç değildir."
                 # The ValueError checks happen BEFORE the try/except! So validation fails fast.
@@ -236,7 +236,7 @@ async def lifespan(app: FastAPI):
         _executor_instance = None
         _policy_engine_instance = None
 
-app = FastAPI(title="Undogate Enterprise API", lifespan=lifespan)
+app = FastAPI(title="Rowback Enterprise API", lifespan=lifespan)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -274,7 +274,7 @@ def _mcp_deps():
 
 from starlette.routing import Route
 
-from undogate.server import build_mcp
+from rowback.server import build_mcp
 
 _mcp_gate = _AgentKeyGate()
 app.router.routes.append(Route("/mcp", endpoint=_mcp_gate))
@@ -305,7 +305,7 @@ def verify_approver(api_key: str = Security(api_key_header),
                     cred: HTTPAuthorizationCredentials | None = Security(_bearer)) -> str:
     """Who is approving: a person via SSO ("oidc:<email>"), or the shared admin key."""
     if _SSO is not None and cred is not None:
-        from undogate.ee.sso import SsoError
+        from rowback.ee.sso import SsoError
         try:
             return _SSO.verify(cred.credentials)
         except SsoError:
@@ -335,7 +335,7 @@ class ExecuteRequest(BaseModel):
 def execute_query(
     req: ExecuteRequest, 
     api_key: str = Depends(verify_api_key),
-    executor: UndogateExecutor = Depends(get_executor),
+    executor: RowbackExecutor = Depends(get_executor),
     policy_engine: PolicyEngine = Depends(get_policy_engine)
 ):
     # Step 1: Prevent multi-statement at the API boundary
@@ -376,12 +376,12 @@ def execute_query(
 @app.get("/v1/checkpoints/pending")
 def list_pending_checkpoints(
     actor: str = Depends(verify_approver),
-    executor: UndogateExecutor = Depends(get_executor)
+    executor: RowbackExecutor = Depends(get_executor)
 ):
     import psycopg
     with psycopg.connect(executor.dsn) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, public_id, sql_text, agent_label, created_at FROM undogate.list_pending_checkpoints()")
+            cur.execute("SELECT id, public_id, sql_text, agent_label, created_at FROM rowback.list_pending_checkpoints()")
             rows = cur.fetchall()
             return [{"id": r[0], "public_id": r[1], "sql": r[2], "agent": r[3], "created_at": r[4]} for r in rows]
 
@@ -390,7 +390,7 @@ def list_pending_checkpoints(
 def check_checkpoint_status(
     public_id: str,
     actor: str = Depends(verify_approver),
-    executor: UndogateExecutor = Depends(get_executor)
+    executor: RowbackExecutor = Depends(get_executor)
 ):
     try:
         status = executor.check_status(public_id)
@@ -408,7 +408,7 @@ def check_checkpoint_status(
 def approve_checkpoint(
     public_id: str, 
     actor: str = Depends(verify_approver),
-    executor: UndogateExecutor = Depends(get_executor)
+    executor: RowbackExecutor = Depends(get_executor)
 ):
     try:
         res = executor.execute_pending(public_id, actor=actor)
@@ -432,7 +432,7 @@ def approve_checkpoint(
 def reject_checkpoint(
     public_id: str, 
     actor: str = Depends(verify_approver),
-    executor: UndogateExecutor = Depends(get_executor)
+    executor: RowbackExecutor = Depends(get_executor)
 ):
     if not executor.reject(public_id, actor=actor):
         raise HTTPException(status_code=404, detail="Token not found or not pending")
@@ -445,7 +445,7 @@ _UNDO_HTTP_STATUS = {"already_undone": 409, "conflict": 409, "busy": 423, "denie
 def get_checkpoint(
     public_id: str,
     actor: str = Depends(verify_approver),
-    executor: UndogateExecutor = Depends(get_executor)
+    executor: RowbackExecutor = Depends(get_executor)
 ):
     """What an approver reviews before deciding: the exact SQL and who sent it."""
     cp = executor.get_checkpoint(public_id)
@@ -458,7 +458,7 @@ def get_checkpoint(
 def undo_checkpoint(
     public_id: str,
     actor: str = Depends(verify_approver),
-    executor: UndogateExecutor = Depends(get_executor)
+    executor: RowbackExecutor = Depends(get_executor)
 ):
     res = executor.execute_undo(public_id, agent_label=actor)
     if res.status == "undone":
@@ -494,9 +494,9 @@ def dashboard():
     from fastapi.responses import HTMLResponse
     html = """
     <html>
-        <head><title>Undogate</title></head>
+        <head><title>Rowback</title></head>
         <body style="font-family: sans-serif; padding: 2rem;">
-            <h1>Undogate Enterprise Gateway</h1>
+            <h1>Rowback Enterprise Gateway</h1>
             <p style="color: #666;">UI Disabled for security. Please use the API or CLI.</p>
         </body>
     </html>

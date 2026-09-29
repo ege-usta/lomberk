@@ -1,7 +1,7 @@
 import pytest
 
-from undogate.models import StatementClass
-from undogate.sql.classify import classify_sql
+from rowback.models import StatementClass
+from rowback.sql.classify import classify_sql
 
 
 @pytest.mark.parametrize("sql, expected_class, expected_tables", [
@@ -39,11 +39,11 @@ from undogate.sql.classify import classify_sql
     ("CREATE ROLE hacker;", StatementClass.BLOCKED, []),
     ("ALTER SYSTEM SET work_mem = '1GB';", StatementClass.BLOCKED, []),
     
-    # BLOCKED (Undogate schemas)
-    ("SELECT * FROM undogate.checkpoints;", StatementClass.BLOCKED, ["undogate.checkpoints"]),
-    ("DELETE FROM undogate.row_changes;", StatementClass.BLOCKED, ["undogate.row_changes"]),
-    ("TRUNCATE undogate_trash.some_table;", StatementClass.BLOCKED, ["undogate_trash.some_table"]),
-    ("UPDATE undogate.checkpoints SET status = 'undone';", StatementClass.BLOCKED, ["undogate.checkpoints"]),
+    # BLOCKED (Rowback schemas)
+    ("SELECT * FROM rowback.checkpoints;", StatementClass.BLOCKED, ["rowback.checkpoints"]),
+    ("DELETE FROM rowback.row_changes;", StatementClass.BLOCKED, ["rowback.row_changes"]),
+    ("TRUNCATE rowback_trash.some_table;", StatementClass.BLOCKED, ["rowback_trash.some_table"]),
+    ("UPDATE rowback.checkpoints SET status = 'undone';", StatementClass.BLOCKED, ["rowback.checkpoints"]),
     
     # UNKNOWN
     ("DO $$ BEGIN RAISE NOTICE 'hello'; END; $$;", StatementClass.UNKNOWN, []),
@@ -99,9 +99,9 @@ def test_classify_multi_statement():
     ("DROP ROLE admin;", StatementClass.BLOCKED, []),
     ("ALTER SYSTEM RESET ALL;", StatementClass.BLOCKED, []),
     
-    # More BLOCKED (undogate schema variants)
-    ("SELECT * FROM undogate.checkpoints JOIN public.users ON 1=1;", StatementClass.BLOCKED, ["undogate.checkpoints", "public.users"]),
-    ("INSERT INTO undogate_trash.some_table VALUES(1);", StatementClass.BLOCKED, ["undogate_trash.some_table"]),
+    # More BLOCKED (rowback schema variants)
+    ("SELECT * FROM rowback.checkpoints JOIN public.users ON 1=1;", StatementClass.BLOCKED, ["rowback.checkpoints", "public.users"]),
+    ("INSERT INTO rowback_trash.some_table VALUES(1);", StatementClass.BLOCKED, ["rowback_trash.some_table"]),
     
     # More UNKNOWN
     ("CREATE FUNCTION my_func() RETURNS void AS $$ BEGIN END; $$ LANGUAGE plpgsql;", StatementClass.UNKNOWN, []),

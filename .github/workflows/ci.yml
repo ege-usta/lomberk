@@ -47,7 +47,7 @@ jobs:
             --strict-markers
 
       - name: Build container image
-        run: docker build -t undogate:ci .
+        run: docker build -t rowback:ci .
 
       - name: Upload Test Results
         if: always()
@@ -58,7 +58,7 @@ jobs:
           retention-days: 7
 
   core-without-enterprise:
-    # Open-core promise: everything outside src/undogate/ee/ works on its own.
+    # Open-core promise: everything outside src/rowback/ee/ works on its own.
     name: Core tests without ee/
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -77,8 +77,8 @@ jobs:
         env:
           PYTHONPATH: src
         run: |
-          rm -rf src/undogate/ee
-          grep -rL "undogate\.ee" tests --include='test_*.py' | xargs uv run --no-sync pytest -q --strict-markers
+          rm -rf src/rowback/ee
+          grep -rL "rowback\.ee" tests --include='test_*.py' | xargs uv run --no-sync pytest -q --strict-markers
 
   dependency-audit:
     name: Known vulnerabilities in dependencies

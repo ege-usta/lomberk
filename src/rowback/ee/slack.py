@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import Any
 
-logger = logging.getLogger("undogate.ee.slack")
+logger = logging.getLogger("rowback.ee.slack")
 
 # "slack:<user_id>" of the approver while an approve/reject callback runs, for the
 # audit trail. A context variable keeps callback signatures unchanged.

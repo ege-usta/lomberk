@@ -1,7 +1,7 @@
 # Architecture Decision Record (ADR): Phase 3A - Slack Human-in-the-Loop Adapter
 
 **Status:** Proposed (Awaiting Approval)
-**Context:** Undogate requires a secure, out-of-band approval mechanism for database mutations that trigger `REQUIRE_APPROVAL`. The mechanism must bridge asynchronous human decisions in a Slack workspace with the strictly serializable, idempotent PostgreSQL execution engine.
+**Context:** Rowback requires a secure, out-of-band approval mechanism for database mutations that trigger `REQUIRE_APPROVAL`. The mechanism must bridge asynchronous human decisions in a Slack workspace with the strictly serializable, idempotent PostgreSQL execution engine.
 
 This ADR defines the architectural constraints and operational flow for a single-workspace Slack adapter, ensuring absolute isolation, zero-PII leakage, and protection against network tampering or race conditions.
 
@@ -13,7 +13,7 @@ This ADR defines the architectural constraints and operational flow for a single
 **Mechanism:**
 - When a payload arrives, it extracts `user.id` and `team.id`.
 - If either does not match the server-side configuration, the action is aggressively rejected with a 403 / ignored.
-- The Slack ID is treated as metadata, while execution relies strictly on the `undogate_control` API credentials.
+- The Slack ID is treated as metadata, while execution relies strictly on the `rowback_control` API credentials.
 
 ## 2. Strict Target Binding & Immutable Payloads
 

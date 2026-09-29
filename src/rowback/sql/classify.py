@@ -3,7 +3,7 @@ import pglast
 from pglast import enums
 from pglast.visitors import Visitor, referenced_relations
 
-from undogate.models import ClassifiedStatement, StatementClass
+from rowback.models import ClassifiedStatement, StatementClass
 
 
 class StatementTypeVisitor(Visitor):
@@ -79,7 +79,7 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
 
         # Check for blocked schemas
         for table in tables:
-            if table.startswith("undogate.") or table.startswith("undogate_trash.") or table == "undogate" or table == "undogate_trash":
+            if table.startswith("rowback.") or table.startswith("rowback_trash.") or table == "rowback" or table == "rowback_trash":
                 stmt_class = StatementClass.BLOCKED
                 
         results.append(ClassifiedStatement(

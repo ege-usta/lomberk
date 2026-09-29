@@ -4,9 +4,9 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from testcontainers.community.postgres import PostgresContainer
 
-from undogate.capture.install import install_undogate
-from undogate.executor import UndogateExecutor
-from undogate.models import (
+from rowback.capture.install import install_rowback
+from rowback.executor import RowbackExecutor
+from rowback.models import (
     ClassifiedStatement,
     PolicyDecision,
     StatementClass,
@@ -35,9 +35,9 @@ def setup_db(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
-        cur.execute("DROP ROLE IF EXISTS undogate_control")
-        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+        cur.execute("DROP ROLE IF EXISTS rowback_control")
+        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
                 CREATE TABLE public.prop_users (
@@ -45,7 +45,7 @@ def setup_db(dsn):
                     val INT NOT NULL
                 );
             """)
-        cur.execute("SELECT undogate.register_table('public', 'prop_users', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'prop_users', 'id', 'mcp_agent');")
 
 def get_checksum(dsn):
     with psycopg.connect(dsn) as conn:
@@ -64,7 +64,7 @@ def get_checksum(dsn):
     )
 )
 def test_undo_property(dsn, runtime_dsn, setup_db, ops):
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    executor = RowbackExecutor(dsn, runtime_dsn)
     
     
     # 1. Capture initial state

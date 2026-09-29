@@ -1,10 +1,10 @@
 import pytest
 import psycopg
 from testcontainers.community.postgres import PostgresContainer
-from undogate.capture.install import install_undogate
-from undogate.executor import UndogateExecutor
-from undogate.models import ClassifiedStatement, StatementClass
-from undogate.policy import StatementEvaluation, PolicyDecision
+from rowback.capture.install import install_rowback
+from rowback.executor import RowbackExecutor
+from rowback.models import ClassifiedStatement, StatementClass
+from rowback.policy import StatementEvaluation, PolicyDecision
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -26,26 +26,26 @@ def runtime_dsn(dsn):
 def control_dsn(dsn):
     from urllib.parse import urlparse, urlunparse
     parsed = urlparse(dsn)
-    return urlunparse((parsed.scheme, f"undogate_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return urlunparse((parsed.scheme, f"rowback_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 @pytest.fixture(scope="module")
 def setup_db(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
-    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_fail (id INT PRIMARY KEY, val TEXT);")
-        cur.execute("SELECT undogate.register_table('public', 'test_fail', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_fail', 'id', 'mcp_agent');")
 
 def test_p0_connection_open_failure(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
     # DML_WRITE with a broken runtime_dsn
     from urllib.parse import urlparse, urlunparse
     p = urlparse(runtime_dsn)
     broken_dsn = urlunparse((p.scheme, f"{p.username}:{p.password}@{p.hostname}:9999", p.path, p.params, p.query, p.fragment))
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(dsn, broken_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(dsn, broken_dsn)
     
     sql = "INSERT INTO public.test_fail (id, val) VALUES (1, 'fail');"
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
@@ -57,7 +57,7 @@ def test_p0_connection_open_failure(dsn, control_dsn, runtime_dsn, setup_db, mon
     
     # Ledger must say failed
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (res.public_id,))
+        cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         assert cur.fetchone()[0] == 'failed'
         
     # Table must be empty
@@ -66,8 +66,8 @@ def test_p0_connection_open_failure(dsn, control_dsn, runtime_dsn, setup_db, mon
         assert cur.fetchone()[0] == 0
 
 def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     
     # We create a temporary trigger that throws an error when id = 3.
     # This guarantees execution starts, the first row (id=2) is written (and captured), 
@@ -86,8 +86,8 @@ def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypa
         """)
         
     sql = "INSERT INTO public.test_fail (id, val) VALUES (2, 'fail'), (3, 'error');"
-    from undogate.models import ClassifiedStatement, StatementClass
-    from undogate.policy import StatementEvaluation, PolicyDecision
+    from rowback.models import ClassifiedStatement, StatementClass
+    from rowback.policy import StatementEvaluation, PolicyDecision
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
     
@@ -102,12 +102,12 @@ def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypa
         
         # Verify NO capture record was left behind for id=2 either!
         # Because we rollback the entire transaction!
-        cur.execute("SELECT COUNT(*) FROM undogate.row_changes WHERE pk->>'id' = '2'")
+        cur.execute("SELECT COUNT(*) FROM rowback.row_changes WHERE pk->>'id' = '2'")
         assert cur.fetchone()[0] == 0
     
     # Ledger must say failed
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (res.public_id,))
+        cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         assert cur.fetchone()[0] == 'failed'
         
         # Cleanup
@@ -116,8 +116,8 @@ def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypa
 
 def test_p0_commit_network_loss(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
 
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     
     # We mock Transaction.__exit__ to raise an error during commit, ONLY for runtime_dsn
     original_exit = psycopg.Transaction.__exit__
@@ -129,8 +129,8 @@ def test_p0_commit_network_loss(dsn, control_dsn, runtime_dsn, setup_db, monkeyp
     monkeypatch.setattr(psycopg.Transaction, "__exit__", mock_exit)
     
     sql = "INSERT INTO public.test_fail (id, val) VALUES (3, 'unknown');"
-    from undogate.models import ClassifiedStatement, StatementClass
-    from undogate.policy import StatementEvaluation, PolicyDecision
+    from rowback.models import ClassifiedStatement, StatementClass
+    from rowback.policy import StatementEvaluation, PolicyDecision
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
     
@@ -140,20 +140,20 @@ def test_p0_commit_network_loss(dsn, control_dsn, runtime_dsn, setup_db, monkeyp
     assert "Network failure" in res.message
     
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (res.public_id,))
+        cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         assert cur.fetchone()[0] == 'approved'
 
 def test_p0_status_check(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     
     # 1. Test not found
     assert executor.check_status("cp_invalid123") == "not_found"
     
     # 2. Test execution success state (applied)
     sql = "INSERT INTO public.test_fail (id, val) VALUES (10, 'success');"
-    from undogate.models import ClassifiedStatement, StatementClass
-    from undogate.policy import StatementEvaluation, PolicyDecision
+    from rowback.models import ClassifiedStatement, StatementClass
+    from rowback.policy import StatementEvaluation, PolicyDecision
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
     
@@ -167,17 +167,17 @@ def test_p0_status_check(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
     # to simulate another backend actively running it.
     
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM undogate.begin_checkpoint('SELECT 1', 'WRITE_DML', 'test', 'system', 'system')")
+        cur.execute("SELECT * FROM rowback.begin_checkpoint('SELECT 1', 'WRITE_DML', 'test', 'system', 'system')")
         row = cur.fetchone()
         cp_id, pub_id = row[0], row[1]
         
         # Approve it
-        cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (pub_id,))
+        cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (pub_id,))
         token = cur.fetchone()[0]
         conn.commit()
         
         # Claim it (sets it to executing and locks the row if we don't commit)
-        cur.execute("SELECT undogate.claim_checkpoint(%s)", (token,))
+        cur.execute("SELECT rowback.claim_checkpoint(%s)", (token,))
         
         # Now, in a separate connection, check_status should see it as 'executing' 
         # because it will hit LockNotAvailable
@@ -188,8 +188,8 @@ def test_p0_status_check(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
         assert executor.check_status(pub_id) == "executing"
 
 def test_p0_commit_network_loss_after_commit(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     
     # We patch Transaction.__exit__ to call original_exit successfully,
     # and THEN raise OperationalError to simulate the connection dropping 
@@ -209,8 +209,8 @@ def test_p0_commit_network_loss_after_commit(dsn, control_dsn, runtime_dsn, setu
     monkeypatch.setattr(psycopg.Transaction, "__exit__", mocked_exit)
     
     sql = "INSERT INTO public.test_fail (id, val) VALUES (4, 'commit_loss_after');"
-    from undogate.models import ClassifiedStatement, StatementClass
-    from undogate.policy import StatementEvaluation, PolicyDecision
+    from rowback.models import ClassifiedStatement, StatementClass
+    from rowback.policy import StatementEvaluation, PolicyDecision
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
     
@@ -230,10 +230,10 @@ def test_p0_commit_network_loss_after_commit(dsn, control_dsn, runtime_dsn, setu
         
         # Verify exact capture record exists for this operation
         # We need the checkpoint_id. We can get it from public_id.
-        cur.execute("SELECT id FROM undogate.checkpoints WHERE public_id = %s", (res.public_id,))
+        cur.execute("SELECT id FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         cp_id = cur.fetchone()[0]
         
-        cur.execute("SELECT op, pk, old_row, new_row FROM undogate.row_changes WHERE checkpoint_id = %s", (cp_id,))
+        cur.execute("SELECT op, pk, old_row, new_row FROM rowback.row_changes WHERE checkpoint_id = %s", (cp_id,))
         changes = cur.fetchall()
         assert len(changes) == 1
         assert changes[0][0] == 'I'

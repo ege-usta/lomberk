@@ -1,5 +1,5 @@
 {
-  "description": "Undogate Seatbelt: ask before destructive database commands",
+  "description": "Rowback Seatbelt: ask before destructive database commands",
   "hooks": {
     "PreToolUse": [
       {

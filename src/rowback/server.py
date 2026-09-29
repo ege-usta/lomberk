@@ -6,11 +6,11 @@ from collections.abc import Callable
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
-from undogate.config import load_config
-from undogate.executor import ExecutionResult, UndogateExecutor
-from undogate.policy import PolicyEngine
-from undogate.sentinel import AISentinel
-from undogate.sql.classify import classify_sql
+from rowback.config import load_config
+from rowback.executor import ExecutionResult, RowbackExecutor
+from rowback.policy import PolicyEngine
+from rowback.sentinel import AISentinel
+from rowback.sql.classify import classify_sql
 
 
 def format_result(res: ExecutionResult) -> str:
@@ -26,7 +26,7 @@ def format_result(res: ExecutionResult) -> str:
     return f"FAILED: {res.message}"
 
 
-def run_agent_sql(executor: UndogateExecutor, policy_engine: PolicyEngine, sql: str, operation_id: str | None, principal: str) -> str:
+def run_agent_sql(executor: RowbackExecutor, policy_engine: PolicyEngine, sql: str, operation_id: str | None, principal: str) -> str:
     """Single agent entrypoint shared by the stdio and HTTP MCP transports."""
     try:
         safe, reason = AISentinel()._ast_firewall(sql)
@@ -44,28 +44,28 @@ def run_agent_sql(executor: UndogateExecutor, policy_engine: PolicyEngine, sql: 
         return f"Error executing SQL: {e}"
 
 
-def build_mcp(get_deps: Callable[[], tuple[UndogateExecutor, PolicyEngine]], principal: str = "mcp_agent") -> MCPServer:
-    app = MCPServer("undogate")
+def build_mcp(get_deps: Callable[[], tuple[RowbackExecutor, PolicyEngine]], principal: str = "mcp_agent") -> MCPServer:
+    app = MCPServer("rowback")
 
     @app.tool()
     def execute_sql(
         sql: str = Field(description="One PostgreSQL statement. Writes must be schema-qualified and have a WHERE clause."),
         operation_id: str | None = Field(default=None, description="Optional idempotency key (client-generated UUID). Retries with the same operation_id are safely idempotent."),
     ) -> str:
-        """Executes a SQL statement with Undogate protection. Large or sensitive writes are held for human approval; every applied write can be undone."""
+        """Executes a SQL statement with Rowback protection. Large or sensitive writes are held for human approval; every applied write can be undone."""
         executor, policy_engine = get_deps()
         return run_agent_sql(executor, policy_engine, sql, operation_id, principal)
 
     return app
 
 
-def build_executor() -> tuple[UndogateExecutor, PolicyEngine]:
+def build_executor() -> tuple[RowbackExecutor, PolicyEngine]:
     config = load_config()
     dsn = os.environ.get(config.database.agent_dsn_env)
     admin_dsn = os.environ.get(config.database.admin_dsn_env)
     if not dsn or not admin_dsn:
         raise ValueError(f"Database DSNs must be provided via {config.database.agent_dsn_env} and {config.database.admin_dsn_env}")
-    executor = UndogateExecutor(
+    executor = RowbackExecutor(
         admin_dsn, dsn,
         max_rows_without_approval=config.limits.max_rows_without_approval,
         approval_timeout_minutes=config.agent.approval_timeout_minutes,

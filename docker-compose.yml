@@ -1,4 +1,4 @@
-# Demo stack: a "production" Postgres, a one-shot installer, and the Undogate gateway.
+# Demo stack: a "production" Postgres, a one-shot installer, and the Rowback gateway.
 # Agents connect to http://localhost:8000/mcp with the agent key ONLY.
 # Replace every secret below before using this outside a laptop.
 services:
@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: test
       POSTGRES_DB: pocketos
     ports:
-      - "${UNDOGATE_DEMO_DB_PORT:-5439}:5432"
+      - "${ROWBACK_DEMO_DB_PORT:-5439}:5432"
     volumes:
       - ./demo/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -17,32 +17,32 @@ services:
       interval: 2s
       retries: 30
 
-  undogate-init:
+  rowback-init:
     build: .
     depends_on:
       db: { condition: service_healthy }
     environment:
-      UNDOGATE_INSTALL_DSN: postgresql://test:test@db:5432/pocketos
+      ROWBACK_INSTALL_DSN: postgresql://test:test@db:5432/pocketos
     command: >
-      sh -c "undogate init --control-role undogate_control --agent-role undogate_agent &&
-             undogate register public.payments --agent-role undogate_agent &&
-             undogate register public.users --agent-role undogate_agent"
+      sh -c "rowback init --control-role rowback_control --agent-role rowback_agent &&
+             rowback register public.payments --agent-role rowback_agent &&
+             rowback register public.users --agent-role rowback_agent"
     restart: "no"
 
   gateway:
     build: .
     depends_on:
-      undogate-init: { condition: service_completed_successfully }
+      rowback-init: { condition: service_completed_successfully }
     environment:
-      UNDOGATE_ADMIN_DSN: postgresql://undogate_control:control-demo@db:5432/pocketos
-      UNDOGATE_AGENT_DSN: postgresql://undogate_agent:agent-demo@db:5432/pocketos
-      UNDOGATE_API_KEY: ${UNDOGATE_API_KEY:-demo-agent-key}
-      UNDOGATE_ADMIN_KEY: ${UNDOGATE_ADMIN_KEY:-demo-admin-key}
+      ROWBACK_ADMIN_DSN: postgresql://rowback_control:control-demo@db:5432/pocketos
+      ROWBACK_AGENT_DSN: postgresql://rowback_agent:agent-demo@db:5432/pocketos
+      ROWBACK_API_KEY: ${ROWBACK_API_KEY:-demo-agent-key}
+      ROWBACK_ADMIN_KEY: ${ROWBACK_ADMIN_KEY:-demo-admin-key}
     volumes:
-      - ./undogate.yaml:/etc/undogate/undogate.yaml:ro
+      - ./rowback.yaml:/etc/rowback/rowback.yaml:ro
     ports:
-      - "127.0.0.1:${UNDOGATE_PORT:-8000}:8000"
+      - "127.0.0.1:${ROWBACK_PORT:-8000}:8000"
     read_only: true
-    tmpfs: ["/tmp", "/var/log/undogate:uid=10001"]
+    tmpfs: ["/tmp", "/var/log/rowback:uid=10001"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

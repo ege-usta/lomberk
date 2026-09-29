@@ -1,18 +1,18 @@
-# Undogate Seatbelt
+# Rowback Seatbelt
 
 **Your agent stops and asks before it drops your database.**
 
 A free Claude Code plugin. When an agent is about to run a destructive database command, Seatbelt pauses it and asks you first, even if you've already allowed the agent to use the shell.
 
 ```
-Undogate Seatbelt: this looks destructive (DELETE with no real WHERE clause (every row)).
+Rowback Seatbelt: this looks destructive (DELETE with no real WHERE clause (every row)).
 Check the target database before allowing it.
 ```
 
 ## Install
 ```bash
-claude plugin marketplace add ege-usta/undogate
-claude plugin install seatbelt@undogate
+claude plugin marketplace add ege-usta/rowback
+claude plugin install seatbelt@rowback
 ```
 It needs only Python 3 (standard library), no other dependencies. Restart Claude Code after installing.
 
@@ -30,7 +30,7 @@ To hard-block instead of asking, set `SEATBELT_MODE=deny` in your environment.
 ## What it is not
 Seatbelt pattern-matches commands, so a determined or obfuscated command can get past it: SQL built at runtime, a file run with `psql -f`, or an API call made with `curl`. It's a seatbelt for honest mistakes, not a security boundary.
 
-For production, **[Undogate](https://github.com/ege-usta/undogate)** is the real gate:
+For production, **[Rowback](https://github.com/ege-usta/rowback)** is the real gate:
 - Agents never hold database credentials.
 - SQL is checked by PostgreSQL's own parser.
 - Risky writes wait for a human, over Slack, SSO or the CLI.

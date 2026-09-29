@@ -15,11 +15,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-from undogate import api
-from undogate.config import SsoConfig
-from undogate.ee.sso import OidcVerifier, SsoError
+from rowback import api
+from rowback.config import SsoConfig
+from rowback.ee.sso import OidcVerifier, SsoError
 
-AUD = "undogate-approvals"
+AUD = "rowback-approvals"
 
 
 def _rsa():

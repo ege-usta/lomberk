@@ -6,7 +6,7 @@ import socket
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from undogate.recovery import execute_with_recovery, TransientError, RecoveryBudgetExhausted
+from rowback.recovery import execute_with_recovery, TransientError, RecoveryBudgetExhausted
 
 app = FastAPI()
 health_check_passed = False

@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Dict, Tuple
 
-logger = logging.getLogger("undogate.offline_pilot")
+logger = logging.getLogger("rowback.offline_pilot")
 
 class InMemoryBindingStore:
     def __init__(self):
@@ -56,7 +56,7 @@ class OfflineUpdater:
 
 
 async def run_standalone_demo():
-    print("--- Undogate Offline Pilot ---")
+    print("--- Rowback Offline Pilot ---")
     print("Initializing offline binding store and publisher...")
     store = InMemoryBindingStore()
     publisher = OfflinePublisher(store)

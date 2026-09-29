@@ -1,8 +1,8 @@
 import pytest
 import psycopg
 from testcontainers.community.postgres import PostgresContainer
-from undogate.capture.install import install_undogate
-from undogate.executor import UndogateExecutor
+from rowback.capture.install import install_rowback
+from rowback.executor import RowbackExecutor
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -24,14 +24,14 @@ def runtime_dsn(dsn):
 def control_dsn(dsn):
     from urllib.parse import urlparse, urlunparse
     parsed = urlparse(dsn)
-    return urlunparse((parsed.scheme, f"undogate_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return urlunparse((parsed.scheme, f"rowback_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 @pytest.fixture(scope="module")
 def setup_db(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
-    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.read_users (id INT, name TEXT, password TEXT);")
@@ -51,12 +51,12 @@ def setup_db(dsn):
         cur.execute("GRANT EXECUTE ON FUNCTION public.attempt_write TO mcp_agent;")
 
 def test_p0_read_only_path(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
 
-    from undogate.sql.classify import classify_sql
-    from undogate.policy import PolicyEngine
-    from undogate.config import load_config
+    from rowback.sql.classify import classify_sql
+    from rowback.policy import PolicyEngine
+    from rowback.config import load_config
     policy = PolicyEngine(config=load_config())
     
     # We will verify that transaction_read_only is 'on'
@@ -79,10 +79,10 @@ def test_p0_read_only_db_level_enforcement(dsn, control_dsn, runtime_dsn, setup_
     # Bypass AST completely to prove DB-level enforcement
     # We construct a fake StatementEvaluation that is classified as READ,
     # but the SQL actually calls a function that does an INSERT.
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
-    from undogate.models import ClassifiedStatement, StatementClass
-    from undogate.policy import StatementEvaluation, PolicyDecision
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
+    from rowback.models import ClassifiedStatement, StatementClass
+    from rowback.policy import StatementEvaluation, PolicyDecision
     
     stmt = ClassifiedStatement(sql="SELECT public.attempt_write();", stmt_class=StatementClass.READ, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Bypassed AST")

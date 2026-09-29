@@ -1,6 +1,6 @@
 # Security Model
 
-Undogate sits between AI agents and PostgreSQL. This document states what it defends against, how, and what it does **not** cover, so a security team can evaluate it honestly.
+Rowback sits between AI agents and PostgreSQL. This document states what it defends against, how, and what it does **not** cover, so a security team can evaluate it honestly.
 
 ## Reporting a vulnerability
 
@@ -15,7 +15,7 @@ Please use GitHub's **private vulnerability reporting** ("Security" tab → "Rep
 | Human approver | **admin key** (or Slack allowlist) | list, approve, reject, undo |
 | DB owner / installer | install DSN (used once) | install schema, register tables |
 
-The agent never receives a database credential or the admin key. **Deploy the gateway as its own service** (see `Dockerfile` / `docker-compose.yml`). The stdio mode (`undogate serve`) puts DSNs on the agent's machine and is meant for local development only: an agent with shell access there can approve its own requests.
+The agent never receives a database credential or the admin key. **Deploy the gateway as its own service** (see `Dockerfile` / `docker-compose.yml`). The stdio mode (`rowback serve`) puts DSNs on the agent's machine and is meant for local development only: an agent with shell access there can approve its own requests.
 
 ## Defenses
 
@@ -26,13 +26,13 @@ The agent never receives a database credential or the admin key. **Deploy the ga
 5. **Approvals**: human-only (OIDC SSO, admin key, CLI, or Slack allowlist), constant-time key comparison, expiry after `agent.approval_timeout_minutes`, with the hard gate re-checked at approval time.
    Slack: the bot has only the `chat:write` scope and uses Socket Mode (no inbound URL). A click counts only when the team and user are allowlisted **and** the `(team, channel, message_ts)` matches the durable binding the gateway recorded when it posted. The checkpoint ID in the button is never trusted on its own. A post whose outcome is unknown is never re-sent, and SQL is not sent to Slack unless `slack.include_sql` is set.
 6. **Undo**: undoes rows in an order that respects foreign keys. It refuses when a row changed after the checkpoint, when the schema drifted, or when the undo would cascade into rows it did not create.
-7. **Tamper-evident ledger**: checkpoints are append-only (UPDATE/DELETE of recorded fields is blocked) and SHA-256 hash-chained. `undogate verify-ledger` finds the first altered entry and prints the head hash.
+7. **Tamper-evident ledger**: checkpoints are append-only (UPDATE/DELETE of recorded fields is blocked) and SHA-256 hash-chained. `rowback verify-ledger` finds the first altered entry and prints the head hash.
 8. **Data minimisation**: columns named like `password`, `token`, `secret`, `ssn`, `hash`, `credit_card` cannot be referenced and are fully masked in results. The audit log is owner-only (`0600`) and never written to `/tmp`.
 
 ## Residual risks (known, documented)
 
 - **Database superusers** can disable triggers and rewrite the whole hash chain. Export the `verify-ledger` head hash to an external system (SIEM, WORM storage) to detect this.
-- **Read access** is governed by the agent role's grants. Undogate masks secret-looking columns by name only; use PostgreSQL column privileges or RLS for real data classification.
+- **Read access** is governed by the agent role's grants. Rowback masks secret-looking columns by name only; use PostgreSQL column privileges or RLS for real data classification.
 - **Sequences are not rewound** by undo, which is intentional (ADR-005).
 - **Undo scope**: single-column primary keys only. Tables with rules, inheritance, or user triggers are refused. Identity and generated columns are supported. DDL is blocked, not reversible.
 - **TLS** is not terminated by the gateway. Run it behind a TLS reverse proxy or service mesh.
@@ -45,6 +45,6 @@ The agent never receives a database credential or the admin key. **Deploy the ga
 - [ ] Gateway runs as a separate service; agents get only the URL + agent key.
 - [ ] Keys are 32+ random bytes, distinct, and rotated; held in a secret manager.
 - [ ] TLS in front of the gateway; `/v1/checkpoints/*` reachable only from approver networks.
-- [ ] Every table the agent may write is registered (`undogate register`), including FK children.
+- [ ] Every table the agent may write is registered (`rowback register`), including FK children.
 - [ ] `protected_tables` and `limits.max_rows_without_approval` reviewed. Config typos fail startup by design.
 - [ ] `verify-ledger` head hash exported on a schedule; audit log shipped to your SIEM.

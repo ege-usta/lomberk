@@ -1,14 +1,14 @@
-Undogate Enterprise License
+Rowback Enterprise License
 
 Copyright (c) 2026 Yusuf Ege Usta. All rights reserved.
 
-This license applies to all files in the "src/undogate/ee/" directory (the
+This license applies to all files in the "src/rowback/ee/" directory (the
 "Enterprise Software"). Everything outside that directory is licensed under the
 Apache License 2.0 (see the LICENSE file at the repository root).
 
 1. You may read, copy and modify the Enterprise Software, and use it for
    development, testing and evaluation.
-2. Any other use, including use in production, requires a valid, paid Undogate
+2. Any other use, including use in production, requires a valid, paid Rowback
    Enterprise subscription or a separate written agreement with the copyright
    holder, and is limited to the scope of that subscription.
 3. You may not sell, sublicense, redistribute, or offer the Enterprise Software

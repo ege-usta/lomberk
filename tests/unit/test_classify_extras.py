@@ -1,7 +1,7 @@
 import pytest
 
-from undogate.models import StatementClass
-from undogate.sql.classify import classify_sql
+from rowback.models import StatementClass
+from rowback.sql.classify import classify_sql
 
 
 @pytest.mark.parametrize("sql, expected_class", [

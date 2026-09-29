@@ -5,9 +5,9 @@ from fastapi.testclient import TestClient
 import psycopg
 from testcontainers.postgres import PostgresContainer
 
-from undogate.api import app, _API_KEY
-from undogate.config import load_config
-from undogate.capture.install import install_undogate
+from rowback.api import app, _API_KEY
+from rowback.config import load_config
+from rowback.capture.install import install_rowback
 
 @pytest.fixture(scope="module")
 def dsn():
@@ -26,20 +26,20 @@ def runtime_dsn(dsn):
 @pytest.fixture(scope="function", autouse=True)
 def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("DROP SCHEMA IF EXISTS undogate CASCADE")
-        cur.execute("DROP SCHEMA IF EXISTS undogate_trash CASCADE")
+        cur.execute("DROP SCHEMA IF EXISTS rowback CASCADE")
+        cur.execute("DROP SCHEMA IF EXISTS rowback_trash CASCADE")
         try:
             cur.execute("DROP OWNED BY mcp_agent CASCADE")
         except psycopg.errors.UndefinedObject: pass
         try:
-            cur.execute("DROP OWNED BY undogate_control CASCADE")
+            cur.execute("DROP OWNED BY rowback_control CASCADE")
         except psycopg.errors.UndefinedObject: pass
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
-        cur.execute("DROP ROLE IF EXISTS undogate_control")
-        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS rowback_control")
+        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
     
-    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
@@ -52,20 +52,20 @@ def setup_db(dsn, runtime_dsn):
         cur.execute("GRANT ALL PRIVILEGES ON SCHEMA public TO mcp_agent")
         cur.execute("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mcp_agent")
         cur.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO mcp_agent")
-        cur.execute("SELECT undogate.register_table('public', 'api_users', 'id', 'mcp_agent')")
+        cur.execute("SELECT rowback.register_table('public', 'api_users', 'id', 'mcp_agent')")
 
 @pytest.fixture
 def client(dsn, runtime_dsn, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    monkeypatch.setenv("UNDOGATE_ADMIN_DSN", dsn.replace('test:test', 'undogate_control:secret'))
-    monkeypatch.setenv("UNDOGATE_AGENT_DSN", runtime_dsn)
-    monkeypatch.setenv("UNDOGATE_API_KEY", "test-agent-key")
-    monkeypatch.setenv("UNDOGATE_ADMIN_KEY", "test-admin-key")
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    monkeypatch.setenv("ROWBACK_ADMIN_DSN", dsn.replace('test:test', 'rowback_control:secret'))
+    monkeypatch.setenv("ROWBACK_AGENT_DSN", runtime_dsn)
+    monkeypatch.setenv("ROWBACK_API_KEY", "test-agent-key")
+    monkeypatch.setenv("ROWBACK_ADMIN_KEY", "test-admin-key")
     
     # Reload config
-    from undogate.api import _executor_instance, _policy_engine_instance
-    monkeypatch.setattr("undogate.api._executor_instance", None)
-    monkeypatch.setattr("undogate.api._policy_engine_instance", None)
+    from rowback.api import _executor_instance, _policy_engine_instance
+    monkeypatch.setattr("rowback.api._executor_instance", None)
+    monkeypatch.setattr("rowback.api._policy_engine_instance", None)
     
     # Trigger lifespan
     with TestClient(app) as client:

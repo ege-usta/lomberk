@@ -7,7 +7,7 @@ import urllib.request
 class AISentinel:
     def __init__(self):
         self.api_key = os.environ.get("OPENAI_API_KEY")
-        self.model = os.environ.get("UNDOGATE_SENTINEL_MODEL", "gpt-4o-mini")
+        self.model = os.environ.get("ROWBACK_SENTINEL_MODEL", "gpt-4o-mini")
 
     def _ast_firewall(self, sql: str) -> tuple[bool, str]:
         import pglast

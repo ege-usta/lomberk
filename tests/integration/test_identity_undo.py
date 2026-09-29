@@ -7,9 +7,9 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from undogate.capture.install import install_undogate
-from undogate.executor import UndogateExecutor
-from undogate.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
+from rowback.capture.install import install_rowback
+from rowback.executor import RowbackExecutor
+from rowback.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
 
 TABLES = ("accounts", "ledger")
 
@@ -24,9 +24,9 @@ def db():
             return urlunparse((p.scheme, f"{role}:secret@{p.hostname}:{p.port}", p.path, "", "", ""))
 
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute("CREATE ROLE undogate_control LOGIN PASSWORD 'secret'")
+            cur.execute("CREATE ROLE rowback_control LOGIN PASSWORD 'secret'")
             cur.execute("CREATE ROLE mcp_agent LOGIN PASSWORD 'secret'")
-        install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+        install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("""
                 -- Supabase dashboard / Django default
@@ -46,13 +46,13 @@ def db():
                 INSERT INTO public.ledger (account_id, cents) VALUES (1, 500), (1, 700), (2, 50);
             """)
             for t in TABLES:
-                cur.execute("SELECT undogate.register_table('public', %s, 'id', 'mcp_agent')", (t,))
-        yield dsn, UndogateExecutor(as_role("undogate_control"), as_role("mcp_agent"))
+                cur.execute("SELECT rowback.register_table('public', %s, 'id', 'mcp_agent')", (t,))
+        yield dsn, RowbackExecutor(as_role("rowback_control"), as_role("mcp_agent"))
 
 
 @pytest.fixture(autouse=True)
 def no_llm(monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
 
 
 def run(ex, sql):

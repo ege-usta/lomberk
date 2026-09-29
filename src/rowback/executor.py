@@ -5,9 +5,9 @@ import psycopg
 from psycopg import sql
 from pydantic import BaseModel
 
-from undogate.audit import audit
+from rowback.audit import audit
 
-logger = logging.getLogger("undogate.executor")
+logger = logging.getLogger("rowback.executor")
 
 
 class ExecutionResult(BaseModel):
@@ -24,7 +24,7 @@ class HoldForApproval(Exception):
     """Auto-approved write must be rolled back and sent to a human instead."""
 
 
-class UndogateExecutor:
+class RowbackExecutor:
     # ponytail: a fresh connection per step (~5 ms each, ~18 ms p50 per captured write
     # on localhost) keeps outcome-unknown handling exact. Add psycopg_pool when the DB
     # is remote/TLS and latency matters; pooled conns must be discarded after errors.
@@ -32,7 +32,7 @@ class UndogateExecutor:
     def _resolve_duplicate(self, principal: str, operation_id: str, sql_to_execute: str):
         import psycopg
         with psycopg.connect(self.dsn) as check_conn, check_conn.cursor() as check_cur:
-            check_cur.execute("SELECT id, public_id, status, rows_affected, sql_text FROM undogate.checkpoints WHERE principal = %s AND operation_id = %s", (principal, operation_id))
+            check_cur.execute("SELECT id, public_id, status, rows_affected, sql_text FROM rowback.checkpoints WHERE principal = %s AND operation_id = %s", (principal, operation_id))
             existing = check_cur.fetchone()
             if existing:
                 if existing[4] != sql_to_execute:
@@ -40,7 +40,7 @@ class UndogateExecutor:
                 return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], operation_id=operation_id, status="approval_required" if existing[2] == "pending" else existing[2], rows_affected=existing[3] or 0, message="Idempotent replay")
         raise RuntimeError(f"UniqueViolation occurred but no existing record found for {principal}:{operation_id}")
 
-    def execute_undo(self, public_id: str, agent_label: str = "UNDOGATE_SYSTEM") -> ExecutionResult:
+    def execute_undo(self, public_id: str, agent_label: str = "ROWBACK_SYSTEM") -> ExecutionResult:
         res = self._execute_undo(public_id, agent_label)
         audit("undone" if res.status == "undone" else "undo_failed", actor=agent_label, public_id=public_id,
               status=res.status, rows_affected=res.rows_affected, message=res.message)
@@ -50,14 +50,14 @@ class UndogateExecutor:
         with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 "SELECT public_id, status, classification, decision, agent_label, principal, sql_text, "
-                "rows_affected, created_at FROM undogate.checkpoints WHERE public_id = %s", (public_id,))
+                "rows_affected, created_at FROM rowback.checkpoints WHERE public_id = %s", (public_id,))
             return cur.fetchone()
 
     def reject(self, public_id: str, actor: str) -> bool:
         """Reject a pending checkpoint. Returns False if it is not pending."""
         try:
             with psycopg.connect(self.dsn, autocommit=True) as conn:
-                conn.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+                conn.execute("SELECT rowback.reject_checkpoint(%s)", (public_id,))
         except psycopg.errors.RaiseException:
             return False
         audit("rejected", actor=actor, public_id=public_id)
@@ -69,7 +69,7 @@ class UndogateExecutor:
             with psycopg.connect(self.dsn, autocommit=False) as conn:
                 try:
                     with conn.transaction(), conn.cursor() as cur:
-                        cur.execute("SELECT undogate.execute_undo(%s, %s)", (public_id, agent_label))
+                        cur.execute("SELECT rowback.execute_undo(%s, %s)", (public_id, agent_label))
                         result = cur.fetchone()[0]
                         return ExecutionResult(
                             status='undone', 
@@ -142,7 +142,7 @@ class UndogateExecutor:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s, %s)",
+                    "SELECT * FROM rowback.begin_checkpoint(%s, %s, %s, %s, %s)",
                     (sql, stmt_class, agent_label, principal, operation_id)
                 )
                 row = cur.fetchone()
@@ -155,8 +155,8 @@ class UndogateExecutor:
         if not self.dsn or not self.runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required for execution.")
             
-        from undogate.policy import PolicyDecision
-        from undogate.sentinel import AISentinel
+        from rowback.policy import PolicyDecision
+        from rowback.sentinel import AISentinel
         
         
         safe, reason = AISentinel()._ast_firewall(eval_result.statement.sql)
@@ -197,7 +197,7 @@ class UndogateExecutor:
                         with conn.transaction(), conn.cursor() as cur:
                             import pglast
 
-                            from undogate.sql.classify import check_sensitive_columns
+                            from rowback.sql.classify import check_sensitive_columns
                             ast = pglast.parse_sql(eval_result.statement.sql)
                             sens_cols = check_sensitive_columns(ast)
                             if sens_cols:
@@ -232,14 +232,14 @@ class UndogateExecutor:
                 with runtime_conn.transaction():
                     with runtime_conn.cursor() as cur:
                         cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{self.statement_timeout_ms}ms",))
-                        cur.execute("SELECT undogate.claim_checkpoint(%s)", (exec_token,))
-                        cur.execute("SELECT set_config('undogate.checkpoint_id', %s, true)", (str(cp_id),))
-                        cur.execute("SELECT set_config('undogate.capability_token', %s, true)", (str(exec_token),))
-                        cur.execute("SELECT set_config('undogate.seq', '0', true)")
+                        cur.execute("SELECT rowback.claim_checkpoint(%s)", (exec_token,))
+                        cur.execute("SELECT set_config('rowback.checkpoint_id', %s, true)", (str(cp_id),))
+                        cur.execute("SELECT set_config('rowback.capability_token', %s, true)", (str(exec_token),))
+                        cur.execute("SELECT set_config('rowback.seq', '0', true)")
                         
                         import pglast
 
-                        from undogate.sql.classify import (
+                        from rowback.sql.classify import (
                             check_sensitive_columns,
                             extract_tables_from_ast,
                         )
@@ -251,7 +251,7 @@ class UndogateExecutor:
                             raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
                         
                         for schema, table in tables:
-                            if schema in ('undogate', 'undogate_trash', 'information_schema', 'pg_catalog'):
+                            if schema in ('rowback', 'rowback_trash', 'information_schema', 'pg_catalog'):
                                 raise Exception(f"Direct DML on system schema {schema} is forbidden.")
                             cur.execute(sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE;").format(sql.Identifier(schema), sql.Identifier(table)))
                             
@@ -275,9 +275,9 @@ class UndogateExecutor:
                                     ) AS actual_pk_column
                                 FROM pg_class c 
                                 JOIN pg_namespace n ON n.oid = c.relnamespace
-                                LEFT JOIN undogate.registered_tables r ON r.schema_name = n.nspname AND r.table_name = c.relname
-                                LEFT JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = 'undogate_capture'
-                                LEFT JOIN pg_proc p ON p.proname = 'capture_row_change' AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'undogate') AND p.pronargs = 0
+                                LEFT JOIN rowback.registered_tables r ON r.schema_name = n.nspname AND r.table_name = c.relname
+                                LEFT JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = 'rowback_capture'
+                                LEFT JOIN pg_proc p ON p.proname = 'capture_row_change' AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'rowback') AND p.pronargs = 0
                                 LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = r.pk_column AND a.attnum > 0 AND NOT a.attisdropped
                                 WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'
                             """, (schema, table))
@@ -318,10 +318,10 @@ class UndogateExecutor:
                             if tgattr and str(tgattr) != '' and str(tgattr) != 'b\'\'':
                                 raise Exception(f"Trigger column restrictions (UPDATE OF) are not allowed on {schema}.{table}.")
 
-                            cur.execute("SELECT undogate.unprotected_cascade_child(%s)", (c_oid,))
+                            cur.execute("SELECT rowback.unprotected_cascade_child(%s)", (c_oid,))
                             unprotected = cur.fetchone()[0]
                             if unprotected:
-                                raise Exception(f"Write on {schema}.{table} could cascade into {unprotected}, which is not registered with Undogate; its rows could not be undone.")
+                                raise Exception(f"Write on {schema}.{table} could cascade into {unprotected}, which is not registered with Rowback; its rows could not be undone.")
                             
                         if enforce_row_limit and self.protected_tables:
                             # FK cascades can reach a protected table the SQL never names.
@@ -351,17 +351,17 @@ class UndogateExecutor:
                         if enforce_row_limit and limit is not None:
                             # Count what the capture trigger recorded, not the outer command tag:
                             # includes FK cascades and anything nested in the statement.
-                            cur.execute("SELECT current_setting('undogate.seq')::bigint")
+                            cur.execute("SELECT current_setting('rowback.seq')::bigint")
                             changed = max(rows_affected, cur.fetchone()[0])
                             if changed > limit:
                                 # Leaving the with-block via exception rolls the write back.
                                 raise HoldForApproval(f"Rows changed ({changed}) exceeds limit ({limit}).")
-                        cur.execute("SELECT undogate.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
+                        cur.execute("SELECT rowback.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
                         execution_completed = True
         except HoldForApproval as e:
             try:
                 with psycopg.connect(self.dsn, autocommit=True) as rq_conn, rq_conn.cursor() as rq_cur:
-                    rq_cur.execute("SELECT undogate.requeue_checkpoint(%s)", (public_id,))
+                    rq_cur.execute("SELECT rowback.requeue_checkpoint(%s)", (public_id,))
             except psycopg.Error:
                 return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="unknown", message=f"{e} Write was rolled back but the checkpoint could not be re-queued.")
             audit("held", actor=actor, public_id=public_id, sql=sql_to_execute, reason=str(e))
@@ -376,7 +376,7 @@ class UndogateExecutor:
             try:
                 with psycopg.connect(self.dsn, autocommit=True) as fail_conn:
                     with fail_conn.cursor() as fail_cur:
-                        fail_cur.execute("SELECT undogate.fail_checkpoint(%s)", (public_id,))
+                        fail_cur.execute("SELECT rowback.fail_checkpoint(%s)", (public_id,))
             except Exception as e:
                 # The write itself failed; only the bookkeeping did too. Surface it so an operator can close the checkpoint.
                 logger.error("Could not mark checkpoint %s as failed: %s", public_id, type(e).__name__)
@@ -395,14 +395,14 @@ class UndogateExecutor:
                 try:
                     with conn.transaction(), conn.cursor() as cur:
                         cur.execute(
-                            "SELECT * FROM undogate.begin_checkpoint(%s, %s, %s, %s, %s)",
+                            "SELECT * FROM rowback.begin_checkpoint(%s, %s, %s, %s, %s)",
                             (sql_to_execute, classification, agent_label, principal, operation_id)
                         )
                         row = cur.fetchone()
                         cp_id = row[0]
                         public_id = row[1]
                     
-                        cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                        cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                         exec_token = cur.fetchone()[0]
                 except psycopg.errors.UniqueViolation as e:
                     if e.diag.constraint_name == 'idx_checkpoints_idempotency':
@@ -422,7 +422,7 @@ class UndogateExecutor:
         
             with psycopg.connect(self.dsn, autocommit=False) as conn:
                 with conn.transaction(), conn.cursor() as cur:
-                    cur.execute("SELECT id, sql_text, status FROM undogate.get_pending_checkpoint(%s)", (public_id,))
+                    cur.execute("SELECT id, sql_text, status FROM rowback.get_pending_checkpoint(%s)", (public_id,))
                     row = cur.fetchone()
                     if not row:
                         return ExecutionResult(operation_id=None, status="failed", message="Token not found.")
@@ -431,21 +431,21 @@ class UndogateExecutor:
                         return ExecutionResult(operation_id=None, status="failed", message=f"Checkpoint status is {status}, not pending.")
 
                     if self.approval_timeout_minutes is not None:
-                        cur.execute("SELECT created_at < now() - make_interval(mins => %s) FROM undogate.checkpoints WHERE id = %s", (self.approval_timeout_minutes, cp_id))
+                        cur.execute("SELECT created_at < now() - make_interval(mins => %s) FROM rowback.checkpoints WHERE id = %s", (self.approval_timeout_minutes, cp_id))
                         if cur.fetchone()[0]:
-                            cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+                            cur.execute("SELECT rowback.reject_checkpoint(%s)", (public_id,))
                             audit("expired", actor=actor, public_id=public_id, sql=sql_to_execute)
                             return ExecutionResult(operation_id=None, status="denied", message=f"Checkpoint expired: pending longer than {self.approval_timeout_minutes} minutes. Ask the agent to resubmit.")
 
-                    from undogate.sentinel import AISentinel
+                    from rowback.sentinel import AISentinel
                     safe, reason = AISentinel()._ast_firewall(sql_to_execute)
                     if not safe:
-                        cur.execute("SELECT undogate.reject_checkpoint(%s)", (public_id,))
+                        cur.execute("SELECT rowback.reject_checkpoint(%s)", (public_id,))
                         audit("rejected", actor="hard_gate", public_id=public_id, sql=sql_to_execute, reason=reason)
                         # Transaction context manager will commit
                         return ExecutionResult(operation_id=None, status="denied", message=f"Hard Gate Denied: {reason}")
 
-                    cur.execute("SELECT undogate.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                    cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                     exec_token = cur.fetchone()[0]
                     # Transaction context manager will commit
 
@@ -459,7 +459,7 @@ class UndogateExecutor:
         try:
             with psycopg.connect(self.dsn, autocommit=True) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT undogate.check_checkpoint_status(%s)", (public_id,))
+                    cur.execute("SELECT rowback.check_checkpoint_status(%s)", (public_id,))
                     return cur.fetchone()[0]
         except psycopg.OperationalError:
             # Never print: stdout is the MCP JSON-RPC channel.

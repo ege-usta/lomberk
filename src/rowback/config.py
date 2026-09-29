@@ -10,8 +10,8 @@ class _Strict(BaseModel):
 
 
 class DatabaseConfig(_Strict):
-    agent_dsn_env: str = "UNDOGATE_AGENT_DSN"
-    admin_dsn_env: str = "UNDOGATE_ADMIN_DSN"
+    agent_dsn_env: str = "ROWBACK_AGENT_DSN"
+    admin_dsn_env: str = "ROWBACK_ADMIN_DSN"
 
 class LimitsConfig(_Strict):
     max_rows_without_approval: int = 100
@@ -46,7 +46,7 @@ class SsoConfig(_Strict):
     # remains the break-glass path if the IdP is down).
     allow_admin_key: bool | None = None
 
-class UndogateConfig(_Strict):
+class RowbackConfig(_Strict):
     version: int = 1
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
@@ -56,9 +56,9 @@ class UndogateConfig(_Strict):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     sso: SsoConfig = Field(default_factory=SsoConfig)
 
-def load_config(path: str = "undogate.yaml") -> UndogateConfig:
+def load_config(path: str = "rowback.yaml") -> RowbackConfig:
     if not os.path.exists(path):
-        return UndogateConfig()
+        return RowbackConfig()
     with open(path, "r") as f:
         data = yaml.safe_load(f) or {}
-    return UndogateConfig(**data)
+    return RowbackConfig(**data)

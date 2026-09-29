@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code hooks for Undogate.
+"""Claude Code hooks for Rowback.
 
 post-edit: after Claude edits a .py file, catch real errors (syntax, undefined names) at once.
 stop:      if any .py was edited this turn, run the unit tests (~7s) before Claude may finish.

@@ -6,13 +6,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from undogate.capture.install import install_undogate
-from undogate.config import load_config
-from undogate.executor import UndogateExecutor
-from undogate.policy import PolicyEngine
-from undogate.sql.classify import classify_sql
+from rowback.capture.install import install_rowback
+from rowback.config import load_config
+from rowback.executor import RowbackExecutor
+from rowback.policy import PolicyEngine
+from rowback.sql.classify import classify_sql
 
-app = typer.Typer(help="Undogate: Ctrl+Z for AI agents", no_args_is_help=True)
+app = typer.Typer(help="Rowback: every agent write, reversible", no_args_is_help=True)
 
 
 def cli_actor() -> str:
@@ -58,27 +58,27 @@ def preview(sql: str, rows_affected: int = typer.Option(None, help="Mock rows af
 def init(
     control_role: str = typer.Option(..., help="Existing non-superuser role the gateway/CLI uses for approvals."),
     agent_role: str = typer.Option(..., help="Existing non-superuser role the AI agent's writes run as."),
-    install_dsn: str = typer.Option(None, envvar="UNDOGATE_INSTALL_DSN", help="DSN of a DB owner/superuser used only for installation."),
+    install_dsn: str = typer.Option(None, envvar="ROWBACK_INSTALL_DSN", help="DSN of a DB owner/superuser used only for installation."),
 ):
-    """Initialize Undogate in the database (run once, as a database owner)."""
+    """Initialize Rowback in the database (run once, as a database owner)."""
     if not install_dsn:
-        console.print("[red]Error: pass --install-dsn or set UNDOGATE_INSTALL_DSN (an owner/superuser connection, not the control or agent role).[/red]")
+        console.print("[red]Error: pass --install-dsn or set ROWBACK_INSTALL_DSN (an owner/superuser connection, not the control or agent role).[/red]")
         raise typer.Exit(1)
-    console.print("Installing Undogate schema and triggers...")
-    install_undogate(install_dsn, control_role=control_role, agent_role=agent_role)
-    console.print("[green]Undogate installed successfully![/green]")
+    console.print("Installing Rowback schema and triggers...")
+    install_rowback(install_dsn, control_role=control_role, agent_role=agent_role)
+    console.print("[green]Rowback installed successfully![/green]")
 
 @app.command()
 def register(
     table: str = typer.Argument(..., help="Schema-qualified table, e.g. public.users"),
-    agent_role: str = typer.Option(..., help="The agent role that may write to this table through Undogate."),
+    agent_role: str = typer.Option(..., help="The agent role that may write to this table through Rowback."),
     pk: str = typer.Option("id", help="Single-column primary key."),
-    install_dsn: str = typer.Option(None, envvar="UNDOGATE_INSTALL_DSN", help="Owner/superuser DSN."),
+    install_dsn: str = typer.Option(None, envvar="ROWBACK_INSTALL_DSN", help="Owner/superuser DSN."),
 ):
-    """Put a table under Undogate protection (capture trigger + agent grants)."""
+    """Put a table under Rowback protection (capture trigger + agent grants)."""
     import psycopg
     if not install_dsn:
-        console.print("[red]Error: pass --install-dsn or set UNDOGATE_INSTALL_DSN.[/red]")
+        console.print("[red]Error: pass --install-dsn or set ROWBACK_INSTALL_DSN.[/red]")
         raise typer.Exit(1)
     schema, sep, name = table.partition(".")
     if not sep or not name:
@@ -86,8 +86,8 @@ def register(
         raise typer.Exit(1)
     try:
         with psycopg.connect(install_dsn, autocommit=True) as conn:
-            conn.execute("SELECT undogate.register_table(%s, %s, %s, %s)", (schema, name, pk, agent_role))
-            unprotected = conn.execute("SELECT undogate.unprotected_cascade_child(%s::regclass)", (f'"{schema}"."{name}"',)).fetchone()[0]
+            conn.execute("SELECT rowback.register_table(%s, %s, %s, %s)", (schema, name, pk, agent_role))
+            unprotected = conn.execute("SELECT rowback.unprotected_cascade_child(%s::regclass)", (f'"{schema}"."{name}"',)).fetchone()[0]
     except psycopg.Error as e:
         console.print(f"[red]Failed to register {table}: {str(e).splitlines()[0]}[/red]")
         raise typer.Exit(1)
@@ -101,10 +101,10 @@ def approve(token: str):
     """Approve and execute a pending SQL statement."""
     control, runtime = get_dsns()
     config = load_config()
-    executor = UndogateExecutor(control, runtime, approval_timeout_minutes=config.agent.approval_timeout_minutes)
+    executor = RowbackExecutor(control, runtime, approval_timeout_minutes=config.agent.approval_timeout_minutes)
     res = executor.execute_pending(token, actor=cli_actor())
     if res.status == "applied":
-        console.print(f"[green]Approved and executed successfully. Rows affected: {res.rows_affected}. Undo with: undogate undo {res.public_id}[/green]")
+        console.print(f"[green]Approved and executed successfully. Rows affected: {res.rows_affected}. Undo with: rowback undo {res.public_id}[/green]")
     else:
         console.print(f"[red]Failed to approve/execute: {res.message}[/red]")
         raise typer.Exit(1)
@@ -113,7 +113,7 @@ def approve(token: str):
 def show(token: str):
     """Show exactly what a checkpoint will run (review before approving)."""
     control, runtime = get_dsns()
-    cp = UndogateExecutor(control, runtime).get_checkpoint(token)
+    cp = RowbackExecutor(control, runtime).get_checkpoint(token)
     if not cp:
         console.print(f"[red]Token {token} not found.[/red]")
         raise typer.Exit(1)
@@ -127,7 +127,7 @@ def show(token: str):
 def reject(token: str):
     """Reject a pending SQL statement."""
     control, runtime = get_dsns()
-    if not UndogateExecutor(control, runtime).reject(token, actor=cli_actor()):
+    if not RowbackExecutor(control, runtime).reject(token, actor=cli_actor()):
         console.print(f"[red]Token {token} not found or not pending.[/red]")
         raise typer.Exit(1)
     console.print(f"[green]Checkpoint {token} rejected.[/green]")
@@ -152,7 +152,7 @@ def undo(token: str):
     """Undo an applied SQL statement."""
     control, runtime = get_dsns()
             
-    executor = UndogateExecutor(control, runtime)
+    executor = RowbackExecutor(control, runtime)
     res = executor.execute_undo(token, agent_label=cli_actor())
     
     if res.status == "undone":
@@ -175,7 +175,7 @@ def verify_ledger():
     """Verify the tamper-evident (SHA-256 hash-chained) checkpoint ledger."""
     import psycopg
     with psycopg.connect(get_admin_dsn()) as conn:
-        checked, broken, head = conn.execute("SELECT * FROM undogate.verify_ledger()").fetchone()
+        checked, broken, head = conn.execute("SELECT * FROM rowback.verify_ledger()").fetchone()
     if broken:
         console.print(f"[red]TAMPERING DETECTED: ledger chain breaks at checkpoint {broken} (after {checked} valid entries).[/red]")
         raise typer.Exit(2)
@@ -190,9 +190,9 @@ def verify_ledger():
 def api(port: int = 8000, host: str = typer.Option("127.0.0.1", help="Bind address. Put a TLS reverse proxy in front before exposing beyond localhost.")):
     """(Enterprise) Start the REST gateway (Slack via Socket Mode when enabled)."""
     import uvicorn
-    console.print(f"[green]Starting Undogate API on {host}:{port}...[/green]")
+    console.print(f"[green]Starting Rowback API on {host}:{port}...[/green]")
     console.print(f"[dim]- Agent HTTP endpoint: POST http://{host}:{port}/v1/execute[/dim]")
-    uvicorn.run("undogate.api:app", host=host, port=port)
+    uvicorn.run("rowback.api:app", host=host, port=port)
 
 if __name__ == "__main__":
     app()

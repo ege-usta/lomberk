@@ -1,7 +1,7 @@
 import pytest
 import time
 import threading
-from undogate.recovery import (
+from rowback.recovery import (
     execute_with_recovery, RecoveryResult, RecoveryBudgetExhausted, TransientError, IdMismatchError
 )
 

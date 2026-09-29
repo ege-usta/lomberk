@@ -4,8 +4,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from testcontainers.community.postgres import PostgresContainer
 
-from undogate.capture.install import install_undogate
-from undogate.executor import UndogateExecutor
+from rowback.capture.install import install_rowback
+from rowback.executor import RowbackExecutor
 
 
 @pytest.fixture(scope="module")
@@ -27,11 +27,11 @@ def runtime_dsn(dsn):
 def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
-        cur.execute("DROP ROLE IF EXISTS undogate_control")
-        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS rowback_control")
+        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
     
-    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE public.users (
@@ -44,14 +44,14 @@ def setup_db(dsn, runtime_dsn):
             );
         """)
         cur.execute("INSERT INTO public.users (data) VALUES ('test_admin');")
-        cur.execute("SELECT undogate.register_table('public', 'users', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'users', 'id', 'mcp_agent');")
 
 @pytest.mark.asyncio
 async def test_mcp_execute_unregistered_fails(dsn, runtime_dsn, setup_db):
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "python", "src/undogate/cli.py", "serve"],
-        env={"UNDOGATE_AGENT_DSN": runtime_dsn, "UNDOGATE_ADMIN_DSN": dsn.replace("test:test@", "undogate_control:secret@")}
+        args=["run", "python", "src/rowback/cli.py", "serve"],
+        env={"ROWBACK_AGENT_DSN": runtime_dsn, "ROWBACK_ADMIN_DSN": dsn.replace("test:test@", "rowback_control:secret@")}
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -71,8 +71,8 @@ async def test_mcp_execute_unregistered_fails(dsn, runtime_dsn, setup_db):
 async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "python", "src/undogate/cli.py", "serve"],
-        env={"UNDOGATE_AGENT_DSN": runtime_dsn, "UNDOGATE_ADMIN_DSN": dsn.replace("test:test@", "undogate_control:secret@")}
+        args=["run", "python", "src/rowback/cli.py", "serve"],
+        env={"ROWBACK_AGENT_DSN": runtime_dsn, "ROWBACK_ADMIN_DSN": dsn.replace("test:test@", "rowback_control:secret@")}
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -92,7 +92,7 @@ async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
                 cur.execute("SELECT data FROM public.users WHERE id = 1")
                 assert cur.fetchone()[0] == 'test_admin'
             
-            executor = UndogateExecutor(dsn, runtime_dsn)
+            executor = RowbackExecutor(dsn, runtime_dsn)
             exec_res = executor.execute_pending(token)
             assert exec_res.status == "applied"
             
@@ -102,21 +102,21 @@ async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
                 assert cur.fetchone()[0] == 'mcp_test2'
 
 from typer.testing import CliRunner
-from undogate.cli import app
-from undogate.executor import UndogateExecutor
-from undogate.policy import PolicyDecision
-from undogate.sql.classify import ClassifiedStatement, StatementClass
-from undogate.models import StatementEvaluation
+from rowback.cli import app
+from rowback.executor import RowbackExecutor
+from rowback.policy import PolicyDecision
+from rowback.sql.classify import ClassifiedStatement, StatementClass
+from rowback.models import StatementEvaluation
 import os
 
 runner = CliRunner()
 
 def test_cli_undo_success(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    os.environ["UNDOGATE_ADMIN_DSN"] = dsn
-    os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    os.environ["ROWBACK_ADMIN_DSN"] = dsn
+    os.environ["ROWBACK_AGENT_DSN"] = runtime_dsn
     
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    executor = RowbackExecutor(dsn, runtime_dsn)
     stmt = ClassifiedStatement(sql="INSERT INTO public.users (data) VALUES ('CLI User')", stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
     res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
     
@@ -125,11 +125,11 @@ def test_cli_undo_success(dsn, runtime_dsn, setup_db, monkeypatch):
     assert "Successfully undid checkpoint" in result.stdout
 
 def test_cli_undo_already_undone(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    os.environ["UNDOGATE_ADMIN_DSN"] = dsn
-    os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    os.environ["ROWBACK_ADMIN_DSN"] = dsn
+    os.environ["ROWBACK_AGENT_DSN"] = runtime_dsn
     
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    executor = RowbackExecutor(dsn, runtime_dsn)
     stmt = ClassifiedStatement(sql="INSERT INTO public.users (data) VALUES ('CLI User 2')", stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
     res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
     
@@ -142,8 +142,8 @@ def test_cli_undo_already_undone(dsn, runtime_dsn, setup_db, monkeypatch):
     assert "already undone" in result.stdout
 
 def test_cli_undo_unknown_token(dsn, runtime_dsn, setup_db):
-    os.environ["UNDOGATE_ADMIN_DSN"] = dsn
-    os.environ["UNDOGATE_AGENT_DSN"] = runtime_dsn
+    os.environ["ROWBACK_ADMIN_DSN"] = dsn
+    os.environ["ROWBACK_AGENT_DSN"] = runtime_dsn
     
     result = runner.invoke(app, ["undo", "cp_invalid123"])
     assert result.exit_code == 1

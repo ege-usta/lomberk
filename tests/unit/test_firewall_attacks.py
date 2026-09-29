@@ -2,17 +2,17 @@
 escape the gateway. A new bypass found later belongs in this list."""
 import pytest
 
-from undogate.sentinel import AISentinel
+from rowback.sentinel import AISentinel
 
 MUST_BLOCK = [
     # stacked / smuggled statements
     "SELECT 1; DELETE FROM public.users WHERE id = 1",
     "DELETE FROM public.users WHERE id = 1; COMMIT",
     # GUC tampering (checkpoint/capability spoofing)
-    "SELECT set_config('undogate.checkpoint_id', '1', false)",
-    "SELECT current_setting('undogate.capability_token')",
-    "UPDATE public.users SET name = current_setting('undogate.capability_token') WHERE id = 1",
-    "SET undogate.checkpoint_id = '1'",
+    "SELECT set_config('rowback.checkpoint_id', '1', false)",
+    "SELECT current_setting('rowback.capability_token')",
+    "UPDATE public.users SET name = current_setting('rowback.capability_token') WHERE id = 1",
+    "SET rowback.checkpoint_id = '1'",
     "SET session_replication_role = replica",
     "RESET ALL",
     # side-effect / exfiltration functions
@@ -27,7 +27,7 @@ MUST_BLOCK = [
     # DDL / privilege / session commands
     "DROP TABLE public.users",
     "TRUNCATE public.users",
-    "ALTER TABLE public.users DISABLE TRIGGER undogate_capture",
+    "ALTER TABLE public.users DISABLE TRIGGER rowback_capture",
     "GRANT ALL ON public.users TO PUBLIC",
     "CREATE FUNCTION public.f() RETURNS int AS 'SELECT 1' LANGUAGE sql",
     "DO $$ BEGIN DELETE FROM public.users; END $$",

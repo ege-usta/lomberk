@@ -14,7 +14,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from testcontainers.community.postgres import PostgresContainer
 
-from undogate.capture.install import install_undogate
+from rowback.capture.install import install_rowback
 
 AGENT_KEY = "agent-key-remote-test"
 ADMIN_KEY = "admin-key-remote-test"
@@ -30,28 +30,28 @@ def gateway(tmp_path_factory):
             return urlunparse((p.scheme, f"{role}:secret@{p.hostname}:{p.port}", p.path, "", "", ""))
 
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute("CREATE ROLE undogate_control LOGIN PASSWORD 'secret'")
+            cur.execute("CREATE ROLE rowback_control LOGIN PASSWORD 'secret'")
             cur.execute("CREATE ROLE mcp_agent LOGIN PASSWORD 'secret'")
-        install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+        install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("CREATE TABLE public.accounts (id INT PRIMARY KEY, balance INT)")
             cur.execute("INSERT INTO public.accounts SELECT g, 100 FROM generate_series(1, 30) g")
-            cur.execute("SELECT undogate.register_table('public', 'accounts', 'id', 'mcp_agent')")
+            cur.execute("SELECT rowback.register_table('public', 'accounts', 'id', 'mcp_agent')")
 
         mp = pytest.MonkeyPatch()
         cfg = tmp_path_factory.mktemp("cfg")
-        (cfg / "undogate.yaml").write_text("limits:\n  max_rows_without_approval: 5\n")
+        (cfg / "rowback.yaml").write_text("limits:\n  max_rows_without_approval: 5\n")
         mp.chdir(cfg)
-        mp.setenv("UNDOGATE_ADMIN_DSN", as_role("undogate_control"))
-        mp.setenv("UNDOGATE_AGENT_DSN", as_role("mcp_agent"))
-        mp.setenv("UNDOGATE_API_KEY", AGENT_KEY)
-        mp.setenv("UNDOGATE_ADMIN_KEY", ADMIN_KEY)
-        mp.setattr("undogate.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+        mp.setenv("ROWBACK_ADMIN_DSN", as_role("rowback_control"))
+        mp.setenv("ROWBACK_AGENT_DSN", as_role("mcp_agent"))
+        mp.setenv("ROWBACK_API_KEY", AGENT_KEY)
+        mp.setenv("ROWBACK_ADMIN_KEY", ADMIN_KEY)
+        mp.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
 
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        server = uvicorn.Server(uvicorn.Config("undogate.api:app", host="127.0.0.1", port=port, log_level="warning"))
+        server = uvicorn.Server(uvicorn.Config("rowback.api:app", host="127.0.0.1", port=port, log_level="warning"))
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{port}"

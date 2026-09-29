@@ -2,9 +2,9 @@ import pytest
 import psycopg
 from testcontainers.community.postgres import PostgresContainer
 
-from undogate.capture.install import install_undogate
-from undogate.executor import UndogateExecutor
-from undogate.models import ClassifiedStatement, StatementClass, PolicyDecision, StatementEvaluation
+from rowback.capture.install import install_rowback
+from rowback.executor import RowbackExecutor
+from rowback.models import ClassifiedStatement, StatementClass, PolicyDecision, StatementEvaluation
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -25,11 +25,11 @@ def runtime_dsn(dsn):
 def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
-        cur.execute("DROP ROLE IF EXISTS undogate_control")
-        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS rowback_control")
+        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
     
-    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
@@ -38,11 +38,11 @@ def setup_db(dsn, runtime_dsn):
                     data TEXT
                 );
             """)
-        cur.execute("SELECT undogate.register_table('public', 'test_ddl', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_ddl', 'id', 'mcp_agent');")
         cur.execute("INSERT INTO public.test_ddl (data) VALUES ('A'), ('B')")
 
 def test_drop_table_undo(dsn, runtime_dsn, setup_db):
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    executor = RowbackExecutor(dsn, runtime_dsn)
 
     stmt = ClassifiedStatement(sql="DROP TABLE public.test_ddl;", stmt_class=StatementClass.DDL_REVERSIBLE, tables=["public.test_ddl"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason="Test")
@@ -58,7 +58,7 @@ def test_drop_table_undo(dsn, runtime_dsn, setup_db):
             assert cur.fetchone()[0] == 1
 
 def test_truncate_undo(dsn, runtime_dsn, setup_db):
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    executor = RowbackExecutor(dsn, runtime_dsn)
 
     stmt = ClassifiedStatement(sql="TRUNCATE public.test_ddl;", stmt_class=StatementClass.DDL_REVERSIBLE, tables=["public.test_ddl"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Test")
@@ -72,7 +72,7 @@ def test_truncate_undo(dsn, runtime_dsn, setup_db):
         assert cur.fetchone()[0] == 2
 
 def test_drop_column_undo(dsn, runtime_dsn, setup_db):
-    executor = UndogateExecutor(dsn, runtime_dsn)
+    executor = RowbackExecutor(dsn, runtime_dsn)
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE public.test_ddl ADD COLUMN extra INT DEFAULT 42;")

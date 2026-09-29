@@ -6,7 +6,7 @@ The previous architecture used a single `mcp_agent` DB role for both control ope
 ## Decision
 We implement a strict Separation of Duties and Capability-Based Execution:
 1. **Roles Matrix**:
-   - `undogate_control` (Trusted API/System): Has `EXECUTE` on control plane functions (`begin`, `approve`, `reject`, `fail`).
+   - `rowback_control` (Trusted API/System): Has `EXECUTE` on control plane functions (`begin`, `approve`, `reject`, `fail`).
    - `mcp_agent` (Untrusted Runtime): Has `EXECUTE` ONLY on `claim_checkpoint` and `finish_checkpoint`, and raw DML access to registered tables.
 2. **State & Capability Generation**:
    - Checkpoints start as `pending`. Runtime cannot change this state.
@@ -15,7 +15,7 @@ We implement a strict Separation of Duties and Capability-Based Execution:
 3. **Execution Context Binding (Transaction Isolation)**:
    - The runtime begins an explicit transaction (`BEGIN`).
    - `claim_checkpoint(capability_token)` is called. It verifies the token, transitions state to `executing`, and irreversibly binds the checkpoint to the current transaction ID (`exec_txid = txid_current()`).
-   - The runtime sets `undogate.capability_token` in the local GUC.
+   - The runtime sets `rowback.capability_token` in the local GUC.
    - `capture_row_change` trigger enforces that the GUC matches the DB, the status is `executing`, AND the `exec_txid` precisely matches the caller's `txid_current()`.
    - `finish_checkpoint(capability_token)` also asserts `txid_current()` before committing.
    - Any failure or rollback destroys the `claim` mutation (due to MVCC), meaning the checkpoint remains `approved` but the transaction is lost. The control plane can explicitly transition it to `failed` using `fail_checkpoint`.

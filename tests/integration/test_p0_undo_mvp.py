@@ -3,10 +3,10 @@ import psycopg
 import threading
 import time
 from testcontainers.community.postgres import PostgresContainer
-from undogate.capture.install import install_undogate
-from undogate.executor import UndogateExecutor
-from undogate.models import ClassifiedStatement, StatementClass
-from undogate.policy import StatementEvaluation, PolicyDecision
+from rowback.capture.install import install_rowback
+from rowback.executor import RowbackExecutor
+from rowback.models import ClassifiedStatement, StatementClass
+from rowback.policy import StatementEvaluation, PolicyDecision
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -27,22 +27,22 @@ def runtime_dsn(dsn):
 def control_dsn(dsn):
     from urllib.parse import urlparse, urlunparse
     parsed = urlparse(dsn)
-    return urlunparse((parsed.scheme, f"undogate_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return urlunparse((parsed.scheme, f"rowback_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 @pytest.fixture(scope="module")
 def setup_db(dsn, control_dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("CREATE ROLE undogate_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
-    install_undogate(dsn, control_role="undogate_control", agent_role="mcp_agent")
+    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_undo (my_pk INT PRIMARY KEY, val TEXT);")
-        cur.execute("SELECT undogate.register_table('public', 'test_undo', 'my_pk', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_undo', 'my_pk', 'mcp_agent');")
 
 def test_undo_basic_operations(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     
     # INSERT
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_undo (my_pk, val) VALUES (1, 'initial');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
@@ -88,8 +88,8 @@ def test_undo_basic_operations(control_dsn, runtime_dsn, dsn, setup_db, monkeypa
         assert cur.fetchone()[0] == 0
 
 def test_undo_conflict_rollback(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     
     # Insert 2 rows in one checkpoint
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_undo (my_pk, val) VALUES (2, 'a'), (3, 'b');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
@@ -112,32 +112,32 @@ def test_undo_conflict_rollback(control_dsn, runtime_dsn, dsn, setup_db, monkeyp
         assert cur.fetchone()[0] == 2
         
         # Original checkpoint should remain 'applied'
-        cur.execute("SELECT status FROM undogate.checkpoints WHERE public_id = %s", (res.public_id,))
+        cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         assert cur.fetchone()[0] == 'applied'
 def test_undo_unsupported_schema(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         # FK
         cur.execute("CREATE TABLE public.test_fk_parent (id INT PRIMARY KEY);")
         cur.execute("CREATE TABLE public.test_fk_child (id INT PRIMARY KEY, parent_id INT REFERENCES public.test_fk_parent(id));")
-        cur.execute("SELECT undogate.register_table('public', 'test_fk_child', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_fk_child', 'id', 'mcp_agent');")
         cur.execute("INSERT INTO public.test_fk_parent VALUES (1);")
         
         # Rule
         cur.execute("CREATE TABLE public.test_rule (id INT PRIMARY KEY, val TEXT);")
-        cur.execute("SELECT undogate.register_table('public', 'test_rule', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_rule', 'id', 'mcp_agent');")
         cur.execute("CREATE RULE test_rule_insert AS ON INSERT TO public.test_rule DO ALSO NOTIFY some_event;")
         
         # Inheritance
         cur.execute("CREATE TABLE public.test_parent (id INT PRIMARY KEY, val TEXT);")
         cur.execute("CREATE TABLE public.test_child (child_val TEXT) INHERITS (public.test_parent);")
-        cur.execute("SELECT undogate.register_table('public', 'test_child', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_child', 'id', 'mcp_agent');")
 
         # Trigger
         cur.execute("CREATE TABLE public.test_trigger (id INT PRIMARY KEY, val TEXT);")
-        cur.execute("SELECT undogate.register_table('public', 'test_trigger', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_trigger', 'id', 'mcp_agent');")
         cur.execute("CREATE FUNCTION public.dummy_trig() RETURNS trigger AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;")
         cur.execute("CREATE TRIGGER some_trig BEFORE INSERT ON public.test_trigger FOR EACH ROW EXECUTE FUNCTION public.dummy_trig();")
 
@@ -163,8 +163,8 @@ def test_undo_unsupported_schema(control_dsn, runtime_dsn, dsn, setup_db, monkey
     assert undo_trig.status == "failed"
     assert "Triggers" in undo_trig.message
 def test_undo_commit_loss(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
 
     # Insert
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_undo (my_pk, val) VALUES (4, 'loss');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
@@ -194,9 +194,9 @@ def test_undo_commit_loss(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
     assert res_undo2.status == "already_undone"
 
 def test_undo_pk_drift_same_oid(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    from undogate.executor import UndogateExecutor
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    from rowback.executor import RowbackExecutor
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
 
     # INSERT
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_undo (my_pk, val) VALUES (99, 'initial');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
@@ -216,11 +216,11 @@ def test_undo_pk_drift_same_oid(control_dsn, runtime_dsn, dsn, setup_db, monkeyp
     assert "has no primary key" in res_undo.message or "Security Violation" in res_undo.message
 
 def test_undo_schema_drift_dropped_column(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_drop_col (id INT PRIMARY KEY, val TEXT, secret TEXT);")
-        cur.execute("SELECT undogate.register_table('public', 'test_drop_col', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_drop_col', 'id', 'mcp_agent');")
         
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_drop_col VALUES (1, 'val', 'sec');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
@@ -236,29 +236,29 @@ def test_undo_schema_drift_dropped_column(control_dsn, runtime_dsn, dsn, setup_d
     assert "Schema drift" in undo_del.message
 
 def test_undo_when_false_trigger(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_when (id INT PRIMARY KEY, val TEXT);")
-        cur.execute("SELECT undogate.register_table('public', 'test_when', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_when', 'id', 'mcp_agent');")
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_when VALUES (1, 'val');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
     
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         # Replace trigger with WHEN false
-        cur.execute("DROP TRIGGER undogate_capture ON public.test_when;")
-        cur.execute("CREATE TRIGGER undogate_capture AFTER INSERT OR UPDATE OR DELETE ON public.test_when FOR EACH ROW WHEN (false) EXECUTE FUNCTION undogate.capture_row_change();")
+        cur.execute("DROP TRIGGER rowback_capture ON public.test_when;")
+        cur.execute("CREATE TRIGGER rowback_capture AFTER INSERT OR UPDATE OR DELETE ON public.test_when FOR EACH ROW WHEN (false) EXECUTE FUNCTION rowback.capture_row_change();")
         
     undo = executor.execute_undo(res_ins.public_id)
     assert undo.status == "failed"
     assert "Capture trigger missing" in undo.message
 
 def test_undo_generated_column(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_gen (id INT PRIMARY KEY, val TEXT, gen TEXT GENERATED ALWAYS AS (val) STORED);")
-        cur.execute("SELECT undogate.register_table('public', 'test_gen', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_gen', 'id', 'mcp_agent');")
         
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_gen (id, val) VALUES (1, 'val');", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
@@ -267,11 +267,11 @@ def test_undo_generated_column(control_dsn, runtime_dsn, dsn, setup_db, monkeypa
     assert undo.status == "undone", undo.message  # generated columns are supported (tests/integration/test_identity_undo.py)
 
 def test_undo_schema_drift_alter_type(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = UndogateExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_alter_type (id INT PRIMARY KEY, val NUMERIC(10,2));")
-        cur.execute("SELECT undogate.register_table('public', 'test_alter_type', 'id', 'mcp_agent');")
+        cur.execute("SELECT rowback.register_table('public', 'test_alter_type', 'id', 'mcp_agent');")
         
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_alter_type VALUES (1, 10.50);", stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))

@@ -1,6 +1,6 @@
 
-from undogate.config import UndogateConfig
-from undogate.models import (
+from rowback.config import RowbackConfig
+from rowback.models import (
     ClassifiedStatement,
     PolicyDecision,
     StatementClass,
@@ -9,7 +9,7 @@ from undogate.models import (
 
 
 class PolicyEngine:
-    def __init__(self, config: UndogateConfig):
+    def __init__(self, config: RowbackConfig):
         self.config = config
 
     def evaluate(self, stmt: ClassifiedStatement, rows_affected: int | None = None) -> StatementEvaluation:
@@ -46,7 +46,7 @@ class PolicyEngine:
                 return StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason=f"Rows affected ({rows_affected}) exceeds limit ({self.config.limits.max_rows_without_approval}).")
                 
             # AI Sentinel (Semantic Anomaly Detection)
-            from undogate.sentinel import AISentinel
+            from rowback.sentinel import AISentinel
             sentinel = AISentinel()
             is_safe, ai_reason = sentinel.evaluate_intent(stmt.sql, stmt.tables)
             if not is_safe:
