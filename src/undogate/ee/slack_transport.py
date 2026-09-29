@@ -145,8 +145,8 @@ class SlackTransport:
             response = SocketModeResponse(envelope_id=envelope_id)
             try:
                 await client.send_socket_mode_response(response)
-            except Exception:
-                pass
+            except Exception as ack_err:
+                logger.debug(f"ACK for dropped envelope {envelope_id} failed: {type(ack_err).__name__}")
             return
         except Exception as e:
             logger.warning(f"Interaction {envelope_id} aborted synchronously: {type(e).__name__}")

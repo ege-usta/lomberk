@@ -62,7 +62,7 @@ class AISentinel:
             elif isinstance(node, (list, tuple)):
                 for item in node:
                     traverse(item)
-            elif hasattr(node, '__call__'):
+            elif callable(node):
                 try:
                     traverse(node(skip_none=True))
                 except Exception:

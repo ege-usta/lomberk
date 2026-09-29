@@ -1,9 +1,13 @@
 
+import logging
+
 import psycopg
 from psycopg import sql
 from pydantic import BaseModel
 
 from undogate.audit import audit
+
+logger = logging.getLogger("undogate.executor")
 
 
 class ExecutionResult(BaseModel):
@@ -142,7 +146,6 @@ class UndogateExecutor:
                     (sql, stmt_class, agent_label, principal, operation_id)
                 )
                 row = cur.fetchone()
-                cp_id = row[0]
                 public_id = row[1]
                 # Transaction context manager will commit
                 return public_id
@@ -374,8 +377,9 @@ class UndogateExecutor:
                 with psycopg.connect(self.dsn, autocommit=True) as fail_conn:
                     with fail_conn.cursor() as fail_cur:
                         fail_cur.execute("SELECT undogate.fail_checkpoint(%s)", (public_id,))
-            except Exception:
-                pass 
+            except Exception as e:
+                # The write itself failed; only the bookkeeping did too. Surface it so an operator can close the checkpoint.
+                logger.error("Could not mark checkpoint %s as failed: %s", public_id, type(e).__name__)
                 
             audit("failed", actor=actor, public_id=public_id, sql=sql_to_execute, error=error_msg)
             safe_error_msg = error_msg if "exec_token" not in error_msg else "An error occurred during execution."
