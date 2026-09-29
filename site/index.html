@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Undogate — Ctrl+Z for AI agents</title>
+<meta name="description" content="An MCP gateway for PostgreSQL: AI agents never hold database credentials, destructive SQL is blocked, risky writes wait for a human, and any applied write can be undone.">
+<style>
+  :root { --bg:#0b0d10; --fg:#e8eaed; --muted:#9aa3ad; --card:#14181d; --line:#232a31; --accent:#4ade80; --warn:#f87171; --hold:#fbbf24; }
+  @media (prefers-color-scheme: light) { :root { --bg:#fbfbfa; --fg:#15191e; --muted:#5b6570; --card:#fff; --line:#e4e6e8; --accent:#15803d; --warn:#b91c1c; --hold:#a16207; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:17px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:880px; margin:0 auto; padding:0 20px 80px; }
+  header { padding:72px 0 40px; }
+  h1 { font-size:clamp(34px,6vw,54px); line-height:1.1; margin:0 0 16px; letter-spacing:-.02em; }
+  h2 { font-size:26px; margin:56px 0 12px; }
+  p.lead { font-size:20px; color:var(--muted); margin:0 0 28px; max-width:680px; }
+  .cta { display:inline-block; background:var(--accent); color:#04130a; font-weight:600; padding:12px 20px; border-radius:8px; text-decoration:none; margin:0 10px 10px 0; }
+  .ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  table { width:100%; border-collapse:collapse; font-size:15px; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  td, th { padding:10px 14px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+  code { font:14px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .deny { color:var(--warn); font-weight:600; } .held { color:var(--hold); font-weight:600; } .ok { color:var(--accent); font-weight:600; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
+  .card h3 { margin:0 0 6px; font-size:18px; } .card p { margin:0; color:var(--muted); font-size:15px; }
+  .price { font-size:28px; font-weight:700; margin:4px 0 8px; }
+  .scroll { overflow-x:auto; }
+  footer { color:var(--muted); font-size:14px; margin-top:64px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>Ctrl+Z for AI agents.</h1>
+  <p class="lead">In April 2026 an AI coding agent deleted a company's production database, and its backups, in 9 seconds. Undogate sits between your agents and PostgreSQL so that can't happen, and so any write that does go through can be undone.</p>
+  <a class="cta" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Undogate%20design%20partner">Become a design partner</a>
+  <a class="cta ghost" href="https://github.com/ege-usta/undogate">View on GitHub</a>
+</header>
+
+<h2>The same attack, behind Undogate</h2>
+<div class="scroll"><table>
+  <tr><th>Agent sends</th><th>Undogate</th></tr>
+  <tr><td><code>DROP TABLE public.users</code></td><td><span class="deny">Denied</span>: DDL is structurally banned</td></tr>
+  <tr><td><code>DELETE FROM public.users</code></td><td><span class="deny">Denied</span>: write without <code>WHERE</code></td></tr>
+  <tr><td><code>DELETE FROM public.users WHERE id &gt; 0</code></td><td><span class="held">Held</span>: protected table, a human decides</td></tr>
+  <tr><td><code>UPDATE … WHERE 1=1</code> on a big table</td><td><span class="held">Held</span>: over the row limit, rolled back</td></tr>
+  <tr><td>A human approved it, and it was a mistake</td><td><span class="ok">Undone</span>: rows and FK cascades restored with one call</td></tr>
+</table></div>
+
+<h2>What makes it different</h2>
+<div class="grid">
+  <div class="card"><h3>Row-level undo</h3><p>Every changed row is captured by the database itself. Undo restores parents before children and refuses rather than overwrite anyone's later writes. There is no point-in-time restore that loses a day of data.</p></div>
+  <div class="card"><h3>Agents hold no credentials</h3><p>Agents get a URL and a key. Database passwords and the approver key live only in the gateway.</p></div>
+  <div class="card"><h3>PostgreSQL's own parser</h3><p>An AST hard gate, not regex: one statement, schema-qualified writes, allowlisted pure functions only.</p></div>
+  <div class="card"><h3>Built for security review</h3><p>Hash-chained, append-only ledger. Least-privilege roles, refused at startup otherwise. Approvals from the CLI, the API, Slack, or company SSO.</p></div>
+</div>
+
+<h2>Works with your agents</h2>
+<p>Any MCP client that speaks Streamable HTTP: Claude Code, Cursor, and custom agents. Setup is one command:</p>
+<div class="card"><code>claude mcp add --transport http undogate https://your-gateway/mcp --header "Authorization: Bearer $AGENT_KEY"</code></div>
+<p>Overhead: about 5 ms for a read and about 18 ms for a captured, undoable write. Agent turns take seconds.</p>
+
+<h2>Pricing</h2>
+<div class="grid">
+  <div class="card"><h3>Community</h3><div class="price">Free</div><p>Apache-2.0 and self-hosted: hard gate, approvals over API/CLI, capture, undo, ledger.</p></div>
+  <div class="card"><h3>Team</h3><div class="price">$199<small>/mo</small></div><p>Up to 3 production databases. Slack approvals, approver SSO (OIDC), email support, help with setup.</p></div>
+  <div class="card"><h3>Enterprise</h3><div class="price">Custom</div><p>Unlimited databases, audit export, security review support, SLA.</p></div>
+</div>
+<p><strong>Design partners:</strong> Team free for 3 months, then 50% off the first year, in exchange for honest feedback. We set it up with you on a call.</p>
+
+<footer>Undogate · open core: Apache-2.0 core, <a href="https://github.com/ege-usta/undogate/blob/main/src/undogate/ee/LICENSE">Enterprise license</a> for <code>ee/</code> · <a href="https://github.com/ege-usta/undogate/blob/main/SECURITY.md">Security model</a></footer>
+</main>
+</body>
+</html>
