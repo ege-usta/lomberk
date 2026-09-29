@@ -220,8 +220,11 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
 
 
--- Records one person's approval of a pending checkpoint; returns how many distinct
--- people have approved it. The row lock serializes concurrent approvers.
+-- Records one approval of a pending checkpoint and returns the two-person quorum: the
+-- most distinct people who approved within ONE verified identity system (oidc: or
+-- slack:). The shared admin key and CLI users prove no identity, and one person may
+-- hold both an SSO and a Slack identity, so neither can make up a quorum.
+-- The row lock serializes concurrent approvers.
 CREATE OR REPLACE FUNCTION rowback.record_approval(p_public_id TEXT, p_actor TEXT) RETURNS INTEGER AS $$
 DECLARE
     v_status TEXT;
@@ -232,7 +235,10 @@ BEGIN
         RAISE EXCEPTION 'Checkpoint % not found or not in pending state.', p_public_id;
     END IF;
     INSERT INTO rowback.approvals (public_id, actor) VALUES (p_public_id, p_actor) ON CONFLICT DO NOTHING;
-    SELECT count(*) INTO v_count FROM rowback.approvals WHERE public_id = p_public_id;
+    SELECT coalesce(max(n), 0) INTO v_count FROM (
+        SELECT count(*) AS n FROM rowback.approvals
+        WHERE public_id = p_public_id AND split_part(actor, ':', 1) IN ('oidc', 'slack')
+        GROUP BY split_part(actor, ':', 1)) per_system;
     RETURN v_count;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
@@ -309,7 +315,6 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.record_approval TO %I', p_control_role);
     EXECUTE format('GRANT SELECT ON rowback.approvals TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.register_table TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.lock_table_for_undo TO %I', p_control_role);
     
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.execute_undo TO %I', p_control_role);
     
@@ -346,7 +351,7 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_control_role);
     EXECUTE format('GRANT SELECT ON rowback.registered_tables TO %I', p_control_role);
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 
 CREATE OR REPLACE FUNCTION rowback.check_checkpoint_status(
     p_public_id TEXT
@@ -391,14 +396,6 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 
 
-CREATE OR REPLACE FUNCTION rowback.lock_table_for_undo(
-    p_schema TEXT,
-    p_table TEXT
-) RETURNS VOID AS $$
-BEGIN
-    EXECUTE format('LOCK TABLE %I.%I IN SHARE ROW EXCLUSIVE MODE NOWAIT', p_schema, p_table);
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
 -- Returns the first table reachable from p_table_oid through ON DELETE CASCADE /
 -- SET NULL / SET DEFAULT foreign keys that has no enabled capture trigger, or NULL.
 -- A write whose cascade reaches such a table would change rows Rowback cannot undo.
