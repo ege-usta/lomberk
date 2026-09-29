@@ -264,8 +264,7 @@ def test_undo_generated_column(control_dsn, runtime_dsn, dsn, setup_db, monkeypa
     res_ins = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
     
     undo = executor.execute_undo(res_ins.public_id)
-    assert undo.status == "failed"
-    assert "Generated/Identity columns not allowed" in undo.message
+    assert undo.status == "undone", undo.message  # generated columns are supported (tests/integration/test_identity_undo.py)
 
 def test_undo_schema_drift_alter_type(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
     monkeypatch.setattr("undogate.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))

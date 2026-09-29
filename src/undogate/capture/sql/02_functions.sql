@@ -395,6 +395,20 @@ $$;
 -- Re-inserts deleted rows whose FK parent was not restored yet, retrying until
 -- every row lands or a pass makes no progress (then the whole undo aborts).
 -- ponytail: O(n^2) passes for pathological self-referencing chains; fine for per-statement checkpoints.
+-- Re-insert a captured row exactly: skip generated columns (Postgres recomputes
+-- them) and keep the original ids, including GENERATED ALWAYS AS IDENTITY.
+CREATE OR REPLACE FUNCTION undogate.restore_insert_sql(p_table TEXT) RETURNS TEXT AS $$
+DECLARE
+    v_cols TEXT;
+BEGIN
+    SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO v_cols
+    FROM pg_attribute
+    WHERE attrelid = p_table::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = '';
+    RETURN format('INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE SELECT %s FROM jsonb_populate_record(null::%s, $1::jsonb)',
+                  p_table, v_cols, v_cols, p_table);
+END;
+$$ LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp;
+
 CREATE OR REPLACE FUNCTION undogate.replay_deferred_inserts(p_tables TEXT[], p_rows JSONB[])
 RETURNS INT
 SET search_path = undogate, pg_temp
@@ -410,7 +424,7 @@ BEGIN
         v_left_rows := '{}';
         FOR i IN 1..array_length(p_tables, 1) LOOP
             BEGIN
-                EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', p_tables[i], p_tables[i]) USING p_rows[i];
+                EXECUTE undogate.restore_insert_sql(p_tables[i]) USING p_rows[i];
                 v_done := v_done + 1;
             EXCEPTION WHEN foreign_key_violation THEN
                 v_left_tables := v_left_tables || p_tables[i];
@@ -530,15 +544,7 @@ BEGIN
         ) THEN
             RAISE EXCEPTION 'Unsupported schema: Rules not allowed on %', v_change.table_name;
         END IF;
-        
-        IF EXISTS (
-            SELECT 1 FROM pg_attribute
-            WHERE attrelid = v_change.table_oid
-            AND (attgenerated != '' OR attidentity != '')
-            AND NOT attisdropped
-        ) THEN
-            RAISE EXCEPTION 'Unsupported schema: Generated/Identity columns not allowed on %', v_change.table_name;
-        END IF;
+
     END LOOP;
 
     -- 3. Create new checkpoint for the undo operation
@@ -663,7 +669,10 @@ BEGIN
             
             SELECT string_agg(quote_ident(key) || ' = (SELECT ' || quote_ident(key) || ' FROM jsonb_populate_record(null::' || v_full_table || ', $1::jsonb))', ', ') 
             INTO v_set_clauses
-            FROM jsonb_object_keys(v_change.old_row) AS key;
+            FROM jsonb_object_keys(v_change.old_row) AS key
+            -- generated columns recompute themselves; ALWAYS-identity columns can't be set
+            WHERE NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = v_change.table_oid
+                              AND a.attname = key AND (a.attgenerated <> '' OR a.attidentity = 'a'));
             
             EXECUTE format('UPDATE %s SET %s WHERE %I = %L', 
                 v_full_table, 
@@ -673,7 +682,7 @@ BEGIN
 
         ELSIF v_change.op = 'D' THEN
             BEGIN
-                EXECUTE format('INSERT INTO %s SELECT * FROM jsonb_populate_record(null::%s, $1::jsonb)', v_full_table, v_full_table) USING v_change.old_row;
+                EXECUTE undogate.restore_insert_sql(v_full_table) USING v_change.old_row;
             EXCEPTION WHEN foreign_key_violation THEN
                 v_retry_tables := v_retry_tables || v_full_table;
                 v_retry_rows := v_retry_rows || v_change.old_row;
