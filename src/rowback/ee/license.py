@@ -17,6 +17,10 @@ BUY_URL = "https://github.com/ege-usta/rowback#pricing"
 HTTP_TIMEOUT_SECONDS = 5
 
 
+def _need(features: list[str]) -> str:
+    return f"{', '.join(features)} {'needs' if len(features) == 1 else 'need'}"
+
+
 class LicenseError(ValueError):  # a startup refusal, like the other config errors
     pass
 
@@ -45,7 +49,7 @@ def check_license(key: str | None, features: list[str]) -> bool:
     """
     if not key:
         if features:
-            raise LicenseError(f"Startup Refusal: {', '.join(features)} need a Rowback Pro license. "
+            raise LicenseError(f"Startup Refusal: {_need(features)} a Rowback Pro license. "
                                f"Set ROWBACK_LICENSE_KEY (get one at {BUY_URL}) or remove them from the config.")
         return False
     result = validate_key(key)
@@ -56,6 +60,6 @@ def check_license(key: str | None, features: list[str]) -> bool:
         return True
     if features:
         raise LicenseError(f"Startup Refusal: the Rowback license key is invalid, expired or cancelled, and "
-                           f"{', '.join(features)} need one. Renew at {BUY_URL} or remove them from the config.")
+                           f"{_need(features)} one. Renew at {BUY_URL} or remove them from the config.")
     logger.warning("ROWBACK_LICENSE_KEY is invalid, expired or cancelled; Pro features are off.")
     return False

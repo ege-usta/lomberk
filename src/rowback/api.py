@@ -14,7 +14,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel
 
 from rowback.audit import audit
-from rowback.config import load_config
+from rowback.config import load_config, pro_features
 from rowback.executor import RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sentinel import AISentinel
@@ -64,13 +64,12 @@ async def lifespan(app: FastAPI):
     _API_KEY = agent_key
     _ADMIN_KEY = admin_key
     slack_enabled = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
-    pro_features = [name for name, on in (("SSO", bool(config.sso.issuer)), ("Slack approvals", slack_enabled),
-                                          ("two-person approval", config.approvals.required > 1)) if on]
+    needs_pro = pro_features(config)
     license_key = os.environ.get("ROWBACK_LICENSE_KEY")
     _PRO = False
-    if pro_features or license_key:
+    if needs_pro or license_key:
         from rowback.ee.license import check_license
-        _PRO = await asyncio.to_thread(check_license, license_key, pro_features)
+        _PRO = await asyncio.to_thread(check_license, license_key, needs_pro)
     _SSO, _ALLOW_ADMIN_KEY = None, True
     if config.sso.issuer:
         from rowback.ee.sso import OidcVerifier

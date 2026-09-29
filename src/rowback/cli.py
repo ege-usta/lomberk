@@ -190,6 +190,25 @@ def verify_ledger():
 
 
 @app.command()
+def doctor(config: str = typer.Option("rowback.yaml", help="Config file to check.")):
+    """Check this deployment (config, keys, database roles, install, license) and say how to fix problems."""
+    from rich.markup import escape
+
+    from rowback.doctor import FAIL, OK, run_checks
+    results = run_checks(config)
+    marks = {OK: "[green]✓[/green]", FAIL: "[red]✗[/red]"}
+    for level, what, fix in results:
+        console.print(f"{marks.get(level, '[yellow]![/yellow]')} {escape(what)}", highlight=False)
+        if fix and level != OK:
+            console.print(f"  [dim]→ {escape(fix)}[/dim]", highlight=False)
+    failures = sum(level == FAIL for level, _, _ in results)
+    if failures:
+        console.print(f"[red]{failures} problem(s) to fix before starting the gateway.[/red]")
+        raise typer.Exit(1)
+    console.print("[green]Ready. Start the gateway with: rowback api[/green]")
+
+
+@app.command()
 def api(port: int = 8000, host: str = typer.Option("127.0.0.1", help="Bind address. Put a TLS reverse proxy in front before exposing beyond localhost.")):
     """(Enterprise) Start the REST gateway (Slack via Socket Mode when enabled)."""
     import uvicorn

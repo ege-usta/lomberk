@@ -72,3 +72,10 @@ def load_config(path: str = "rowback.yaml") -> RowbackConfig:
     with open(path, "r") as f:
         data = yaml.safe_load(f) or {}
     return RowbackConfig(**data)
+
+
+def pro_features(config: RowbackConfig) -> list[str]:
+    """The configured features that need a Rowback Pro license."""
+    slack = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
+    return [name for name, on in (("SSO", bool(config.sso.issuer)), ("Slack approvals", slack),
+                                  ("two-person approval", config.approvals.required > 1)) if on]
