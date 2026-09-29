@@ -3,75 +3,345 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Undogate — Ctrl+Z for AI agents</title>
-<meta name="description" content="An MCP gateway for PostgreSQL: AI agents never hold database credentials, destructive SQL is blocked, risky writes wait for a human, and any applied write can be undone.">
+<title>Undogate: Ctrl+Z for AI agents</title>
+<meta name="description" content="An MCP gateway for PostgreSQL. Agents never hold the database password, destructive SQL is blocked, risky writes wait for a person, and every write can be undone.">
+<meta name="theme-color" content="#cf2e22">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=Martian+Mono:wdth,wght@75..112.5,300..700&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#0b0d10; --fg:#e8eaed; --muted:#9aa3ad; --card:#14181d; --line:#232a31; --accent:#4ade80; --warn:#f87171; --hold:#fbbf24; }
-  @media (prefers-color-scheme: light) { :root { --bg:#fbfbfa; --fg:#15191e; --muted:#5b6570; --card:#fff; --line:#e4e6e8; --accent:#15803d; --warn:#b91c1c; --hold:#a16207; } }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:17px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-  main { max-width:880px; margin:0 auto; padding:0 20px 80px; }
-  header { padding:72px 0 40px; }
-  h1 { font-size:clamp(34px,6vw,54px); line-height:1.1; margin:0 0 16px; letter-spacing:-.02em; }
-  h2 { font-size:26px; margin:56px 0 12px; }
-  p.lead { font-size:20px; color:var(--muted); margin:0 0 28px; max-width:680px; }
-  .cta { display:inline-block; background:var(--accent); color:#04130a; font-weight:600; padding:12px 20px; border-radius:8px; text-decoration:none; margin:0 10px 10px 0; }
-  .ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
-  table { width:100%; border-collapse:collapse; font-size:15px; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
-  td, th { padding:10px 14px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
-  code { font:14px ui-monospace,SFMono-Regular,Menlo,monospace; }
-  .deny { color:var(--warn); font-weight:600; } .held { color:var(--hold); font-weight:600; } .ok { color:var(--accent); font-weight:600; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
-  .card h3 { margin:0 0 6px; font-size:18px; } .card p { margin:0; color:var(--muted); font-size:15px; }
-  .price { font-size:28px; font-weight:700; margin:4px 0 8px; }
-  .scroll { overflow-x:auto; }
-  footer { color:var(--muted); font-size:14px; margin-top:64px; }
-  a { color:var(--accent); }
+:root {
+  --red: #cf2e22; --green: #0d7a45; --amber: #f0a92b;
+  --ink: #111214; --ink-2: #1c1d21; --paper: #f2f2ef; --muted: #a4a6ab; --rule: #2b2d33;
+  --on-red: #fff3ef; --on-red-2: #ffd3cb; --on-green: #effff5; --on-green-2: #c3ecd3;
+  --deny: #ff6a5a; --allow: #46d38a;
+  --sans: "Archivo", system-ui, sans-serif; --mono: "Martian Mono", ui-monospace, Menlo, monospace;
+  --gutter: clamp(18px, 4vw, 48px); --max: 1320px;
+  --ease: cubic-bezier(.16, 1, .3, 1);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { background: var(--ink); scrollbar-color: #3a3c43 var(--ink); }
+body { margin: 0; background: var(--ink); color: var(--paper); font: 400 18px/1.55 var(--sans); font-variation-settings: "wdth" 100; -webkit-font-smoothing: antialiased; }
+::selection { background: var(--amber); color: var(--ink); }
+a { color: inherit; text-underline-offset: 4px; text-decoration-thickness: 1.5px; }
+:focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; }
+code, pre, .mono { font-family: var(--mono); font-variation-settings: "wdth" 87.5; font-variant-numeric: tabular-nums; }
+code { font-size: .8em; }
+.wrap { max-width: var(--max); margin: 0 auto; padding: 0 var(--gutter); }
+.display { font-family: var(--sans); font-weight: 850; font-variation-settings: "wdth" 62; letter-spacing: -0.015em; line-height: .9; margin: 0; text-wrap: balance; }
+
+/* ---------- hero: the page is the diff ---------- */
+.hero { position: relative; isolation: isolate; background: var(--red); color: var(--on-red); min-height: min(100svh, 980px); display: flex; flex-direction: column; overflow: hidden; }
+.hero > .wrap { width: 100%; }
+.key-label code { white-space: nowrap; }
+.hero::before { content: ""; position: absolute; inset: 0; z-index: -1; background: var(--green); clip-path: inset(0 100% 0 0); transition: clip-path .9s var(--ease); }
+.hero[data-state="restored"]::before { clip-path: inset(0 0 0 0); }
+.hero[data-state="restored"] { color: var(--on-green); }
+nav { display: flex; align-items: center; justify-content: space-between; height: 76px; }
+.mark { font-weight: 900; font-variation-settings: "wdth" 112; font-size: 22px; letter-spacing: -0.02em; text-decoration: none; }
+.navlinks { display: flex; gap: 30px; align-items: center; font-size: 16px; font-weight: 500; }
+.navlinks a { text-decoration: none; }
+.navlinks a:hover { text-decoration: underline; }
+.btn { display: inline-block; background: var(--ink); color: var(--paper) !important; font-weight: 700; font-size: 16px; padding: 14px 22px; text-decoration: none !important; white-space: nowrap; transition: transform .15s var(--ease), background-color .2s; }
+.btn:hover { background: #000; }
+.btn:active { transform: translateY(2px); }
+.hero-grid { flex: 1; display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: clamp(28px, 5vw, 80px); align-items: center; padding-block: clamp(24px, 5vh, 64px) clamp(40px, 7vh, 88px); }
+.hero h1 { font-size: clamp(64px, 11.5vw, 184px); }
+.sub { font-size: clamp(19px, 1.5vw, 22px); margin: 26px 0 34px; max-width: 34ch; color: var(--on-red-2); transition: color .6s var(--ease); }
+.hero[data-state="restored"] .sub { color: var(--on-green-2); }
+.ctas { display: flex; gap: 26px; align-items: center; flex-wrap: wrap; }
+.ctas a:not(.btn) { font-weight: 600; }
+
+/* the key and the rows */
+.console { display: grid; gap: 22px; }
+.key-row { display: flex; align-items: center; gap: 22px; }
+.key { flex: none; width: clamp(104px, 9vw, 136px); aspect-ratio: 1; border: 0; border-radius: 16px; background: var(--paper); color: var(--ink); font: 600 clamp(28px, 2.6vw, 38px)/1 var(--mono); cursor: pointer; border-bottom: 10px solid #c9c8c2; box-shadow: 0 18px 30px -12px rgba(60, 5, 2, .55); transition: transform .12s var(--ease), border-bottom-width .12s var(--ease), box-shadow .12s var(--ease); }
+.key:hover { transform: translateY(-2px); }
+.key:active, .key.pressed { transform: translateY(8px); border-bottom-width: 2px; box-shadow: 0 6px 12px -8px rgba(60, 5, 2, .55); }
+.key-label { font: 500 14px/1.5 var(--mono); font-variation-settings: "wdth" 87.5; }
+.key-label strong { display: block; font: 850 30px/1 var(--sans); font-variation-settings: "wdth" 62; letter-spacing: 0; margin-bottom: 6px; }
+.rows { font-family: var(--mono); font-variation-settings: "wdth" 87.5; font-size: 13.5px; font-variant-numeric: tabular-nums; border-top: 1.5px solid currentColor; }
+.rows table { width: 100%; border-collapse: collapse; }
+.rows td { padding: 7px 8px 7px 0; white-space: nowrap; }
+.rows .t td { padding-top: 14px; opacity: .72; font-size: 12px; }
+.rows .g { width: 22px; font-weight: 700; }
+.rows .row td:not(.g) { text-decoration: line-through; text-decoration-thickness: 1.5px; transition: opacity .4s var(--ease); opacity: .82; }
+.rows .row.back td:not(.g) { text-decoration: none; opacity: 1; animation: land .55s var(--ease); }
+@keyframes land { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+.status { font: 500 13px/1.5 var(--mono); font-variation-settings: "wdth" 87.5; min-height: 20px; }
+.proof { font-size: 13px; opacity: .8; margin: 0; }
+
+/* ---------- sections on ink ---------- */
+section { padding: clamp(80px, 13vh, 160px) 0; }
+h2.display { font-size: clamp(48px, 7vw, 112px); margin-bottom: 28px; }
+.lede { color: var(--muted); font-size: clamp(19px, 1.5vw, 22px); max-width: 52ch; margin: 0 0 56px; }
+.fine { color: var(--muted); font-size: 15px; margin: 14px 0 0; }
+
+/* the gate log */
+.log { list-style: none; margin: 0; padding: 0; }
+.log li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 40px; padding: 26px 0; border-top: 1.5px solid var(--rule); align-items: end; }
+.log li:last-child { border-bottom: 1.5px solid var(--rule); }
+.log code { font-size: clamp(15px, 1.35vw, 20px); color: var(--paper); overflow-wrap: anywhere; }
+.log p { grid-column: 1; margin: 0; color: var(--muted); font-size: 16px; }
+.verdict { grid-column: 2; grid-row: 1 / span 2; font-weight: 850; font-variation-settings: "wdth" 62; font-size: clamp(40px, 5vw, 76px); line-height: .85; text-transform: uppercase; }
+.v-deny { color: var(--deny); } .v-hold { color: var(--amber); }
+
+/* how undo works: an order you can read */
+.how { background: var(--paper); color: var(--ink); }
+.how .lede { color: #4a4c52; }
+.order { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 3px solid var(--ink); }
+.order div { padding: 26px 26px 10px 0; }
+.order div + div { border-left: 1.5px solid #cfcfca; padding-left: 26px; }
+.order h3 { font-weight: 850; font-variation-settings: "wdth" 70; font-size: 30px; line-height: 1; letter-spacing: -0.01em; margin: 0 0 14px; }
+.order p { margin: 0; color: #4a4c52; font-size: 16px; }
+.order code { background: #e2e2dc; padding: 1px 5px; }
+
+/* setup */
+.setup-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: clamp(32px, 5vw, 80px); align-items: start; }
+pre { margin: 0 0 36px; padding: 22px; background: var(--ink-2); overflow-x: auto; font-size: 13px; line-height: 1.7; color: var(--paper); }
+.perf { width: 100%; border-collapse: collapse; }
+.perf td { padding: 14px 0; border-top: 1.5px solid var(--rule); color: var(--muted); }
+.perf td:last-child { text-align: right; font-family: var(--mono); color: var(--paper); font-variant-numeric: tabular-nums; }
+.perf strong { font-family: var(--sans); font-weight: 850; font-variation-settings: "wdth" 62; font-size: 34px; color: var(--paper); }
+figure { margin: 0; }
+figure img { display: block; width: 100%; height: auto; }
+figcaption { font-size: 14px; color: var(--muted); margin-top: 12px; }
+
+/* limits: amber, because it's the warning */
+.limits { background: var(--amber); color: var(--ink); }
+.limits .lede { color: #3d2c06; }
+.limits a { font-weight: 700; }
+.limit-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 36px 56px; margin: 0; padding: 0; list-style: none; }
+.limit-list li { border-top: 3px solid var(--ink); padding-top: 16px; font-size: 17px; }
+.limit-list strong { display: block; font-weight: 850; font-variation-settings: "wdth" 70; font-size: 26px; line-height: 1.05; margin-bottom: 8px; }
+
+/* pricing */
+.tiers { display: grid; grid-template-columns: 1fr 1.25fr 1fr; border-top: 1.5px solid var(--rule); }
+.tier { padding: 30px 30px 30px 0; }
+.tier + .tier { border-left: 1.5px solid var(--rule); padding-left: 30px; }
+.tier h3 { font-size: 18px; font-weight: 600; margin: 0 0 10px; color: var(--muted); }
+.amount { font-weight: 850; font-variation-settings: "wdth" 62; font-size: clamp(56px, 6vw, 96px); line-height: .9; margin-bottom: 18px; }
+.amount small { font: 500 16px var(--sans); color: var(--muted); }
+.tier p { margin: 0; color: var(--muted); font-size: 16px; }
+.tier.team .amount { color: var(--allow); }
+.partner { margin: 44px 0 0; font-size: 19px; max-width: 70ch; }
+.partner strong { color: var(--allow); }
+
+/* close: restored */
+.close { background: var(--green); color: var(--on-green); padding: clamp(96px, 16vh, 200px) 0 0; }
+.close h2 { font-size: clamp(56px, 9vw, 150px); max-width: 12ch; margin-bottom: 44px; }
+.close .btn { font-size: 18px; padding: 18px 28px; }
+footer { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-top: clamp(80px, 12vh, 140px); padding: 26px 0 40px; border-top: 1.5px solid rgba(239, 255, 245, .3); font-size: 14px; color: var(--on-green-2); }
+footer nav { height: auto; gap: 24px; justify-content: flex-start; }
+
+@media (max-width: 960px) {
+  .hero-grid, .setup-grid { grid-template-columns: minmax(0, 1fr); }
+  .navlinks a:not(.btn) { display: none; }
+  .order { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .order div:nth-child(3) { border-left: 0; padding-left: 0; }
+  .tiers { grid-template-columns: minmax(0, 1fr); }
+  .tier, .tier + .tier { border-left: 0; padding: 26px 0; border-top: 1.5px solid var(--rule); }
+  .limit-list { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 600px) {
+  .order { grid-template-columns: minmax(0, 1fr); }
+  .order div + div { border-left: 0; padding-left: 0; border-top: 1.5px solid #cfcfca; }
+  .log li { grid-template-columns: minmax(0, 1fr); }
+  .verdict { grid-column: 1; grid-row: auto; }
+  .rows .col-x { display: none; }
+  .key-label code { white-space: normal; }
+  .navlinks .btn { padding: 11px 14px; font-size: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero::before, .sub, .btn, .key { transition: none; }
+  .rows .row.back td:not(.g) { animation: none; }
+}
 </style>
 </head>
 <body>
-<main>
-<header>
-  <h1>Ctrl+Z for AI agents.</h1>
-  <p class="lead">In April 2026 an AI coding agent deleted a company's production database, and its backups, in 9 seconds. When your agents talk to PostgreSQL, Undogate sits in between: they never hold the credentials, destructive SQL is blocked, risky writes wait for a human, and any write that does go through can be undone. (It guards the database path. Keep infrastructure tokens away from agents too.)</p>
-  <a class="cta" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Undogate%20design%20partner">Become a design partner</a>
-  <a class="cta ghost" href="https://github.com/ege-usta/undogate">View on GitHub</a>
+
+<header class="hero" id="top" data-state="deleted">
+  <div class="wrap">
+    <nav aria-label="Main">
+      <a class="mark" href="#top">Undogate</a>
+      <div class="navlinks">
+        <a href="#how">How undo works</a>
+        <a href="#pricing">Pricing</a>
+        <a href="https://github.com/ege-usta/undogate">GitHub</a>
+        <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Undogate%20design%20partner">Become a design partner</a>
+      </div>
+    </nav>
+  </div>
+  <div class="wrap hero-grid">
+    <div>
+      <h1 class="display">Ctrl+Z for AI&nbsp;agents.</h1>
+      <p class="sub">Agents never hold your database password. Destructive SQL is blocked, risky writes wait for a person, and every write can be undone.</p>
+      <div class="ctas">
+        <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Undogate%20design%20partner">Become a design partner</a>
+        <a href="https://github.com/ege-usta/undogate">Read the code</a>
+      </div>
+    </div>
+
+    <div class="console">
+      <div class="key-row">
+        <button class="key" id="undo" type="button" aria-describedby="status">⌘Z</button>
+        <div class="key-label" id="key-label"><strong>5 rows deleted.</strong>An agent ran <code>DELETE FROM public.users WHERE id &gt; 0</code> and a person approved it.</div>
+      </div>
+      <div class="rows" role="region" aria-label="Rows changed by the approved DELETE">
+        <table>
+          <tbody>
+            <tr class="t"><td class="g"></td><td colspan="3">public.users</td></tr>
+            <tr class="row"><td class="g">-</td><td>1</td><td>Alice CEO</td><td class="col-x">alice@pocketos.com</td></tr>
+            <tr class="row"><td class="g">-</td><td>2</td><td>Bob CTO</td><td class="col-x">bob@pocketos.com</td></tr>
+            <tr class="row"><td class="g">-</td><td>3</td><td>Charlie Dev</td><td class="col-x">charlie@pocketos.com</td></tr>
+            <tr class="t"><td class="g"></td><td colspan="3">public.payments, gone by ON DELETE CASCADE</td></tr>
+            <tr class="row"><td class="g">-</td><td>1</td><td>user 1</td><td class="col-x">1000.00</td></tr>
+            <tr class="row"><td class="g">-</td><td>2</td><td>user 2</td><td class="col-x">500.00</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="status" id="status" aria-live="polite">Press the key, or ⌘Z / Ctrl+Z on your keyboard.</div>
+      <p class="proof">A replay of a real run on the repo's demo data. The recording is further down.</p>
+    </div>
+  </div>
 </header>
 
-<h2>The same attack, behind Undogate</h2>
-<p><img src="demo.gif" alt="Terminal demo: DROP and DELETE denied, protected DELETE held, approved, then undone and all rows restored" style="width:100%;border-radius:10px;border:1px solid var(--line)"></p>
-<div class="scroll"><table>
-  <tr><th>Agent sends</th><th>Undogate</th></tr>
-  <tr><td><code>DROP TABLE public.users</code></td><td><span class="deny">Denied</span>: DDL is structurally banned</td></tr>
-  <tr><td><code>DELETE FROM public.users</code></td><td><span class="deny">Denied</span>: write without <code>WHERE</code></td></tr>
-  <tr><td><code>DELETE FROM public.users WHERE id &gt; 0</code></td><td><span class="held">Held</span>: protected table, a human decides</td></tr>
-  <tr><td><code>UPDATE … WHERE 1=1</code> on a big table</td><td><span class="held">Held</span>: over the row limit, rolled back</td></tr>
-  <tr><td>A human approved it, and it was a mistake</td><td><span class="ok">Undone</span>: rows and FK cascades restored with one call</td></tr>
-</table></div>
+<section>
+  <div class="wrap">
+    <h2 class="display">What else the agent tried.</h2>
+    <p class="lede">Most attempts never reach the database. The rest wait for a person, who reads the exact SQL first.</p>
+    <ol class="log">
+      <li><code>DROP TABLE public.users</code><span class="verdict v-deny">Denied</span><p>DDL is refused by PostgreSQL's own parser before it runs.</p></li>
+      <li><code>DELETE FROM public.users</code><span class="verdict v-deny">Denied</span><p>A write with no WHERE clause.</p></li>
+      <li><code>SELECT set_config('role', 'postgres', false)</code><span class="verdict v-deny">Denied</span><p>Only an allowlist of pure built-in functions is callable.</p></li>
+      <li><code>UPDATE public.orders SET total = 0 WHERE 1=1</code><span class="verdict v-hold">Held</span><p>It touched more rows than the limit, so it was rolled back and queued.</p></li>
+      <li><code>DELETE FROM public.users WHERE id &gt; 0</code><span class="verdict v-hold">Held</span><p><code>public.users</code> is protected. This is the one you just undid.</p></li>
+    </ol>
+  </div>
+</section>
 
-<h2>What makes it different</h2>
-<div class="grid">
-  <div class="card"><h3>Row-level undo</h3><p>Every changed row is captured by the database itself. Undo restores parents before children and refuses rather than overwrite anyone's later writes. There is no point-in-time restore that loses a day of data.</p></div>
-  <div class="card"><h3>Agents hold no credentials</h3><p>Agents get a URL and a key. Database passwords and the approver key live only in the gateway.</p></div>
-  <div class="card"><h3>PostgreSQL's own parser</h3><p>An AST hard gate, not regex: one statement, schema-qualified writes, allowlisted pure functions only.</p></div>
-  <div class="card"><h3>Built for security review</h3><p>Hash-chained, append-only ledger. Least-privilege roles, refused at startup otherwise. Approvals from the CLI, the API, Slack, or company SSO.</p></div>
-</div>
+<section class="how" id="how">
+  <div class="wrap">
+    <h2 class="display">How undo works.</h2>
+    <p class="lede">No point-in-time restore, and nobody else's later writes lost.</p>
+    <div class="order">
+      <div><h3>The database records every change</h3><p>A trigger inside PostgreSQL captures each changed row, cascades included, and refuses agent writes that don't carry a single-use token.</p></div>
+      <div><h3>Undo goes parents first</h3><p>Deleted rows come back in foreign-key order, then updates revert, then inserts disappear. That's why the users returned before their payments.</p></div>
+      <div><h3>It refuses to overwrite</h3><p>If a row changed after the checkpoint, or the schema drifted, undo stops and names the row. It never guesses.</p></div>
+      <div><h3>The ledger can be checked</h3><p>Checkpoints are append-only and SHA-256 hash-chained. <code>undogate verify-ledger</code> finds the first altered entry.</p></div>
+    </div>
+  </div>
+</section>
 
-<h2>Works with your agents</h2>
-<p>Any MCP client that speaks Streamable HTTP: Claude Code, Cursor, and custom agents. Setup is one command:</p>
-<div class="card"><code>claude mcp add --transport http undogate https://your-gateway/mcp --header "Authorization: Bearer $AGENT_KEY"</code></div>
-<p>Overhead: about 5 ms for a read and about 18 ms for a captured, undoable write. Agent turns take seconds.</p>
+<section>
+  <div class="wrap setup-grid">
+    <div>
+      <h2 class="display">One command for your agent.</h2>
+      <p class="lede">Claude Code, Cursor, or your own agent over MCP. It gets a URL and a key, nothing else.</p>
+      <pre>claude mcp add --transport http undogate \
+  https://your-gateway/mcp \
+  --header "Authorization: Bearer $AGENT_KEY"</pre>
+      <table class="perf">
+        <tbody>
+          <tr><td>A captured, undoable write</td><td><strong>18.3</strong> ms</td></tr>
+          <tr><td>A read through Undogate</td><td><strong>5.4</strong> ms</td></tr>
+          <tr><td>A plain write, new connection</td><td><strong>4.8</strong> ms</td></tr>
+        </tbody>
+      </table>
+      <p class="fine">Postgres 16, p50 over 200 runs. Agent turns take seconds.</p>
+    </div>
+    <figure>
+      <img src="demo.gif" width="1100" height="620" loading="lazy" alt="Terminal recording: DROP and DELETE without WHERE are denied, a DELETE on a protected table is held, a person approves it, the rows disappear, and undo brings back 3 users and 2 payments.">
+      <figcaption>The same data, recorded against a real gateway started with <code>docker compose up</code>.</figcaption>
+    </figure>
+  </div>
+</section>
 
-<h2>Pricing</h2>
-<div class="grid">
-  <div class="card"><h3>Community</h3><div class="price">Free</div><p>Apache-2.0 and self-hosted: hard gate, approvals over API/CLI, capture, undo, ledger.</p></div>
-  <div class="card"><h3>Team</h3><div class="price">$199<small>/mo</small></div><p>Up to 3 production databases. Slack approvals, approver SSO (OIDC), email support, help with setup.</p></div>
-  <div class="card"><h3>Enterprise</h3><div class="price">Custom</div><p>Unlimited databases, audit export, security review support, SLA.</p></div>
-</div>
-<p><strong>Design partners:</strong> Team free for 3 months, then 50% off the first year, in exchange for honest feedback. We set it up with you on a call.</p>
+<section class="limits">
+  <div class="wrap">
+    <h2 class="display">What it doesn't cover.</h2>
+    <p class="lede">Your security team will ask, so here it is up front. The full model is in <a href="https://github.com/ege-usta/undogate/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+    <ul class="limit-list">
+      <li><strong>Infrastructure tokens</strong>Undogate guards the SQL path. An agent holding a cloud or hosting API token can still delete a volume. Keep those tokens away from agents.</li>
+      <li><strong>Database superusers</strong>They can disable triggers and rewrite the ledger. Ship the ledger's head hash to your SIEM.</li>
+      <li><strong>Some tables, for now</strong>Composite primary keys, and tables with rules, inheritance or their own triggers, are refused rather than guessed at.</li>
+      <li><strong>Schema changes</strong>DDL is blocked, not reversible. It goes through your normal migrations.</li>
+    </ul>
+  </div>
+</section>
 
-<footer>Undogate · open core: Apache-2.0 core, <a href="https://github.com/ege-usta/undogate/blob/main/src/undogate/ee/LICENSE">Enterprise license</a> for <code>ee/</code> · <a href="https://github.com/ege-usta/undogate/blob/main/SECURITY.md">Security model</a></footer>
-</main>
+<section id="pricing">
+  <div class="wrap">
+    <h2 class="display">Pricing.</h2>
+    <p class="lede">The whole safety path is open source. You pay for team features, and for us.</p>
+    <div class="tiers">
+      <div class="tier"><h3>Community</h3><div class="amount">Free</div><p>Apache-2.0, self-hosted. Hard gate, holds, capture, undo, ledger, approvals from the API or CLI.</p></div>
+      <div class="tier team"><h3>Team</h3><div class="amount">$199<small> / month</small></div><p>Up to 3 production databases. Slack approvals, approver SSO (OIDC), email support, and help with setup.</p></div>
+      <div class="tier"><h3>Enterprise</h3><div class="amount">Custom</div><p>Unlimited databases, audit export, support for your security review, and an SLA.</p></div>
+    </div>
+    <p class="partner"><strong>Design partners</strong> get Team free for 3 months, then half price for the first year. In exchange: honest feedback every two weeks. We set it up with you on a call.</p>
+  </div>
+</section>
+
+<section class="close">
+  <div class="wrap">
+    <h2 class="display">Looking for three to five teams whose agents write to Postgres.</h2>
+    <a class="btn" href="mailto:REPLACE_WITH_CONTACT_EMAIL?subject=Undogate%20design%20partner">Become a design partner</a>
+    <footer>
+      <span>Undogate. Open core: Apache-2.0, with <code>ee/</code> under the <a href="https://github.com/ege-usta/undogate/blob/main/src/undogate/ee/LICENSE">Enterprise license</a>.</span>
+      <nav aria-label="Footer"><a href="https://github.com/ege-usta/undogate">GitHub</a><a href="https://github.com/ege-usta/undogate/blob/main/SECURITY.md">Security model</a></nav>
+    </footer>
+  </div>
+</section>
+
+<script>
+(() => {
+  const hero = document.getElementById('top');
+  const key = document.getElementById('undo');
+  const label = document.getElementById('key-label');
+  const status = document.getElementById('status');
+  const rows = [...document.querySelectorAll('.rows .row')];
+  const meta = document.querySelector('meta[name="theme-color"]');
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const labelDeleted = label.innerHTML;
+  let state = 'deleted', timers = [];
+
+  function undo() {
+    if (state !== 'deleted') return;
+    state = 'restoring';
+    key.classList.add('pressed');
+    setTimeout(() => key.classList.remove('pressed'), 160);
+    status.textContent = 'Undoing checkpoint cp_6ae6b82d...';
+    hero.dataset.state = 'restored';
+    meta.content = '#0d7a45';
+    rows.forEach((r, i) => timers.push(setTimeout(() => {
+      r.classList.add('back');
+      r.querySelector('.g').textContent = '+';
+      if (i === rows.length - 1) done();
+    }, still ? 0 : 260 + i * 150)));
+  }
+  function done() {
+    state = 'restored';
+    label.innerHTML = '<strong>5 rows back.</strong>Users first, then the payments that depend on them. Nothing written after the checkpoint was touched.';
+    status.textContent = 'Undone. Press again to replay.';
+  }
+  function reset() {
+    timers.forEach(clearTimeout); timers = [];
+    rows.forEach(r => { r.classList.remove('back'); r.querySelector('.g').textContent = '-'; });
+    hero.dataset.state = 'deleted';
+    meta.content = '#cf2e22';
+    label.innerHTML = labelDeleted;
+    status.textContent = 'Press the key, or ⌘Z / Ctrl+Z on your keyboard.';
+    state = 'deleted';
+  }
+  key.addEventListener('click', () => state === 'restored' ? reset() : undo());
+  addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && state === 'deleted' && !e.target.closest('input, textarea, [contenteditable]')) {
+      e.preventDefault(); undo();
+    }
+  });
+})();
+</script>
 </body>
 </html>

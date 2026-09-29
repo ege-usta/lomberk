@@ -9,13 +9,12 @@ Set Theme "Dracula"
 
 Hide
 Type ". demo/helpers.sh && clear" Enter
+Sleep 300ms
+Type "# The agent goes rogue. It only has a URL + key, no DB password." Enter
+Type "rows" Enter
 Sleep 500ms
 Show
-
-Type "# The agent goes rogue. It only has a URL + key, no DB password." Enter
-Sleep 800ms
-Type "rows" Enter
-Sleep 1s
+Sleep 1.2s
 Type "agent 'DROP TABLE public.users'" Enter
 Sleep 1.5s
 Type "agent 'DELETE FROM public.users'" Enter
