@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ege-usta/rowback",
+  "title": "Rowback",
+  "description": "Postgres gateway for AI agents: blocks destructive SQL, holds risky writes, undoes applied ones.",
+  "repository": {
+    "url": "https://github.com/ege-usta/rowback",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "rowback",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

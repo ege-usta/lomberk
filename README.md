@@ -1,4 +1,5 @@
 # Rowback
+<!-- mcp-name: io.github.ege-usta/rowback -->
 
 **Every agent write, reversible.**
 Rowback is an MCP gateway for PostgreSQL. AI agents send SQL through it instead of holding database credentials. It blocks destructive commands, holds large or sensitive writes for a human, records every changed row, and can undo any applied write, including foreign-key cascades.

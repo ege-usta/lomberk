@@ -1,6 +1,6 @@
 [project]
 name = "rowback"
-version = "0.1.0"
+version = "0.2.0"
 description = "Every agent write, reversible: an MCP gateway that makes every database write reversible."
 readme = "README.md"
 requires-python = ">=3.12"
