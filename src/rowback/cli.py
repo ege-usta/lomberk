@@ -73,6 +73,8 @@ def register(
     table: str = typer.Argument(..., help="Schema-qualified table, e.g. public.users"),
     agent_role: str = typer.Option(..., help="The agent role that may write to this table through Rowback."),
     pk: str = typer.Option("id", help="Single-column primary key."),
+    allow_triggers: bool = typer.Option(False, help="The table's own triggers only change the row itself (like updated_at) "
+                                        "or tables Rowback also protects. Undo switches them off while it restores rows."),
     install_dsn: str = typer.Option(None, envvar="ROWBACK_INSTALL_DSN", help="Owner/superuser DSN."),
 ):
     """Put a table under Rowback protection (capture trigger + agent grants)."""
@@ -92,7 +94,7 @@ def register(
                 "SELECT attname FROM pg_attribute WHERE attrelid = %s::regclass AND attnum > 0 AND NOT attisdropped",
                 (f'"{schema}"."{name}"',))]
             hidden = [c for c in columns if is_secret(c, extra)]
-            conn.execute("SELECT rowback.register_table(%s, %s, %s, %s, %s)", (schema, name, pk, agent_role, hidden))
+            conn.execute("SELECT rowback.register_table(%s, %s, %s, %s, %s, %s)", (schema, name, pk, agent_role, hidden, allow_triggers))
             unprotected = conn.execute("SELECT rowback.unprotected_cascade_child(%s::regclass)", (f'"{schema}"."{name}"',)).fetchone()[0]
     except psycopg.Error as e:
         console.print(f"[red]Failed to register {table}: {str(e).splitlines()[0]}[/red]")

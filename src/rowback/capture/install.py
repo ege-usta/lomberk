@@ -38,6 +38,7 @@ def install_rowback(admin_dsn: str, control_role: str, agent_role: str):
             cur.execute("DROP FUNCTION IF EXISTS rowback.execute_undo_dml(TEXT, TEXT, CHAR, TEXT, TEXT, JSONB, JSONB);"); cur.execute("DROP FUNCTION IF EXISTS rowback.execute_undo_dml(TEXT, TEXT, CHAR, JSONB, JSONB);")
             cur.execute("DROP FUNCTION IF EXISTS rowback.lock_table_for_undo(TEXT, TEXT);")
             cur.execute("DROP FUNCTION IF EXISTS rowback.register_table(TEXT, TEXT, TEXT, TEXT);")
+            cur.execute("DROP FUNCTION IF EXISTS rowback.register_table(TEXT, TEXT, TEXT, TEXT, TEXT[]);")
             
             # 1. Read and execute schema
             with open(sql_dir / "01_schema.sql", "r") as f:

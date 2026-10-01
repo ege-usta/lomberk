@@ -370,7 +370,8 @@ class RowbackExecutor:
                             cur.execute(
                                 "SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = %(t)s OR inhrelid = %(t)s), "
                                 "EXISTS (SELECT 1 FROM pg_rewrite WHERE ev_class = %(t)s AND rulename <> '_RETURN'), "
-                                "EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = %(t)s AND NOT tgisinternal AND tgname <> 'rowback_capture')",
+                                "EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = %(t)s AND NOT tgisinternal AND tgname <> 'rowback_capture') "
+                                "AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = %(t)s), false)",
                                 {"t": c_oid})
                             in_inheritance, has_rules, has_user_triggers = cur.fetchone()
                             if in_inheritance:
@@ -378,8 +379,10 @@ class RowbackExecutor:
                             if has_rules:
                                 raise Exception(f"Table {schema}.{table} has rewrite rules, which move writes past capture.")
                             if has_user_triggers and enforce_row_limit:
-                                # Undo refuses tables with their own triggers, so this write could not be undone.
-                                raise HoldForApproval(f"Table {schema}.{table} has its own triggers, so this write can't be undone.")
+                                # Undo refuses tables with their own triggers unless registered with
+                                # --allow-triggers, so this write could not be undone.
+                                raise HoldForApproval(f"Table {schema}.{table} has its own triggers, so this write can't be undone. "
+                                                      "If they only change the row itself (like updated_at), register it with --allow-triggers.")
                                 
                             if tgattr and str(tgattr) != '' and str(tgattr) != 'b\'\'':
                                 raise Exception(f"Trigger column restrictions (UPDATE OF) are not allowed on {schema}.{table}.")

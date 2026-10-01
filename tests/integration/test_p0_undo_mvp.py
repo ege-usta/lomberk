@@ -288,3 +288,48 @@ def test_undo_schema_drift_alter_type(control_dsn, runtime_dsn, dsn, setup_db, m
     undo_del = executor.execute_undo(res_del.public_id)
     assert undo_del.status == "failed"
     assert "Schema drift detected" in undo_del.message
+
+
+def test_undo_with_allowed_triggers(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
+    """--allow-triggers: undo restores rows exactly with the table's own triggers off, then puts them back."""
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE public.trg_items (id INT PRIMARY KEY, val TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT '2020-01-01');")
+        cur.execute("CREATE TABLE public.trg_log (n BIGSERIAL PRIMARY KEY, op TEXT);")
+        cur.execute("CREATE FUNCTION public.touch() RETURNS trigger AS $$ BEGIN NEW.updated_at := clock_timestamp(); RETURN NEW; END $$ LANGUAGE plpgsql;")
+        cur.execute("CREATE FUNCTION public.log_ins() RETURNS trigger AS $$ BEGIN INSERT INTO public.trg_log(op) VALUES (TG_OP); RETURN NULL; END $$ LANGUAGE plpgsql SECURITY DEFINER;")
+        cur.execute("INSERT INTO public.trg_items (id, val) VALUES (1, 'a'), (2, 'b'), (3, 'c');")
+        cur.execute("CREATE TRIGGER touch BEFORE UPDATE ON public.trg_items FOR EACH ROW EXECUTE FUNCTION public.touch();")
+        cur.execute("CREATE TRIGGER log_ins AFTER INSERT ON public.trg_items FOR EACH ROW EXECUTE FUNCTION public.log_ins();")
+        cur.execute("ALTER TABLE public.trg_items ENABLE ALWAYS TRIGGER log_ins;")
+        cur.execute("SELECT rowback.register_table('public', 'trg_items', 'id', 'mcp_agent', '{}', true);")
+        before = cur.execute("SELECT * FROM public.trg_items ORDER BY id").fetchall()
+
+    def run(sql):
+        stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+        return executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason=""))
+
+    upd = run("UPDATE public.trg_items SET val = 'x' WHERE id = 1;")
+    dele = run("DELETE FROM public.trg_items WHERE id = 2;")
+    assert upd.status == "applied", upd.message  # opted in: no hold, the write can be undone
+    assert dele.status == "applied", dele.message
+    assert executor.execute_undo(dele.public_id).status == "undone"
+    assert executor.execute_undo(upd.public_id).status == "undone"
+
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        assert cur.execute("SELECT * FROM public.trg_items ORDER BY id").fetchall() == before  # same updated_at
+        assert cur.execute("SELECT count(*) FROM public.trg_log").fetchone()[0] == 0  # the restore fired nothing
+        modes = dict(cur.execute("SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'public.trg_items'::regclass").fetchall())
+        assert modes == {"touch": "O", "log_ins": "A", "rowback_capture": "O"}
+
+    # A failed undo rolls the switch back too: triggers stay on.
+    upd2 = run("UPDATE public.trg_items SET val = 'y' WHERE id = 3;")
+    assert upd2.status == "applied", upd2.message
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("UPDATE public.trg_items SET val = 'z' WHERE id = 3;")
+    failed = executor.execute_undo(upd2.public_id)
+    assert failed.status == "conflict", failed.message
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        modes = dict(cur.execute("SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'public.trg_items'::regclass").fetchall())
+        assert modes == {"touch": "O", "log_ins": "A", "rowback_capture": "O"}

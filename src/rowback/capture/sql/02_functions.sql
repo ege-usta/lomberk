@@ -268,7 +268,8 @@ CREATE OR REPLACE FUNCTION rowback.register_table(
     p_table TEXT,
     p_pk_column TEXT,
     p_agent_role TEXT,
-    p_secret_columns TEXT[] DEFAULT '{}'  -- the agent may never SELECT these; enforced by PostgreSQL
+    p_secret_columns TEXT[] DEFAULT '{}',  -- the agent may never SELECT these; enforced by PostgreSQL
+    p_allow_triggers BOOLEAN DEFAULT false  -- undo may switch the table's own triggers off; see 01_schema.sql
 ) RETURNS VOID AS $$
 DECLARE
     v_table_oid OID;
@@ -283,11 +284,15 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Table %.% does not exist.', p_schema, p_table;
     END IF;
+    IF p_allow_triggers AND NOT pg_has_role(current_user, (SELECT relowner FROM pg_class WHERE oid = v_table_oid), 'USAGE') THEN
+        -- Switching a trigger off needs ownership; fail now, not in the middle of an undo.
+        RAISE EXCEPTION 'Undo can switch off triggers on %.% only if the role that installed Rowback owns the table.', p_schema, p_table;
+    END IF;
 
-    INSERT INTO rowback.registered_tables (schema_name, table_name, table_oid, pk_column)
-    VALUES (p_schema, p_table, v_table_oid, p_pk_column)
+    INSERT INTO rowback.registered_tables (schema_name, table_name, table_oid, pk_column, allow_triggers)
+    VALUES (p_schema, p_table, v_table_oid, p_pk_column, p_allow_triggers)
     ON CONFLICT (schema_name, table_name) DO UPDATE 
-    SET table_oid = EXCLUDED.table_oid, pk_column = EXCLUDED.pk_column;
+    SET table_oid = EXCLUDED.table_oid, pk_column = EXCLUDED.pk_column, allow_triggers = EXCLUDED.allow_triggers;
 
     EXECUTE format('DROP TRIGGER IF EXISTS rowback_capture ON %I.%I', p_schema, p_table);
     EXECUTE format('CREATE TRIGGER rowback_capture AFTER INSERT OR UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION rowback.capture_row_change()', p_schema, p_table);
@@ -508,6 +513,8 @@ DECLARE
     v_retry_tables TEXT[] := '{}';
     v_retry_rows JSONB[] := '{}';
     v_drained BOOLEAN := false;
+    v_trig RECORD;
+    v_paused TEXT[] := '{}';  -- ALTER TABLE ... ENABLE statements that put switched-off triggers back
 BEGIN
     -- 1. Fetch and lock original checkpoint
     SELECT id, status INTO v_cp_id, v_status
@@ -561,13 +568,27 @@ BEGIN
             RAISE EXCEPTION 'Unsupported schema: % cascades into % which is not registered with Rowback', v_change.table_name, v_unprotected;
         END IF;
         
-        -- Check triggers: exactly ONE trigger allowed, and it MUST be rowback_capture, and ENABLED.
+        -- Check triggers: only rowback_capture, unless the owner opted the table in. Then its
+        -- own triggers are switched off for this transaction, so restored rows come back exactly
+        -- (no fresh updated_at) and nothing fires twice. LOCK above already holds the lock
+        -- DISABLE TRIGGER needs; an error rolls the switch back with everything else.
         IF EXISTS (
             SELECT 1 FROM pg_trigger 
             WHERE tgrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass
             AND tgname != 'rowback_capture' AND tgisinternal = false
         ) THEN
-            RAISE EXCEPTION 'Unsupported schema: Triggers not allowed on %', v_change.table_name;
+            IF NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = v_change.table_oid), false) THEN
+                RAISE EXCEPTION 'Unsupported schema: Triggers not allowed on % (register it with --allow-triggers if they only touch the row itself or registered tables)', v_change.table_name;
+            END IF;
+            FOR v_trig IN
+                SELECT tgname, tgenabled FROM pg_trigger
+                WHERE tgrelid = v_change.table_oid AND NOT tgisinternal
+                  AND tgname <> 'rowback_capture' AND tgenabled IN ('O', 'A')
+            LOOP
+                EXECUTE format('ALTER TABLE %I.%I DISABLE TRIGGER %I', v_change.table_schema, v_change.table_name, v_trig.tgname);
+                v_paused := v_paused || format('ALTER TABLE %I.%I ENABLE %s TRIGGER %I', v_change.table_schema, v_change.table_name,
+                                               CASE v_trig.tgenabled WHEN 'A' THEN 'ALWAYS' ELSE '' END, v_trig.tgname);
+            END LOOP;
         END IF;
         
         IF NOT EXISTS (
@@ -749,6 +770,10 @@ BEGIN
     IF v_captured <> v_affected THEN
         RAISE EXCEPTION 'Conflict: undo would cascade into % row(s) changed after checkpoint %', v_captured - v_affected, p_public_id;
     END IF;
+
+    FOR i IN 1 .. coalesce(array_length(v_paused, 1), 0) LOOP
+        EXECUTE v_paused[i];
+    END LOOP;
 
     -- 5. Mark old checkpoint undone, new checkpoint applied
     UPDATE rowback.checkpoints SET status = 'undone' WHERE id = v_cp_id;

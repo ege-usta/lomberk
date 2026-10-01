@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS rowback.registered_tables (
     pk_column     TEXT NOT NULL,
     UNIQUE(schema_name, table_name)
 );
+-- Opt-in per table (rowback register --allow-triggers): the owner vouches that the table's
+-- own triggers only change the row itself (updated_at) or registered tables, so undo may
+-- switch them off while it restores rows.
+ALTER TABLE rowback.registered_tables ADD COLUMN IF NOT EXISTS allow_triggers BOOLEAN NOT NULL DEFAULT false;
 
 CREATE SEQUENCE IF NOT EXISTS rowback.seq_row_changes START 1;
 
