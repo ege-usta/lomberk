@@ -166,4 +166,4 @@ PYTHONPATH=src uv run pytest tests/    # needs Docker (testcontainers)
 ## License
 Open core. Everything outside `src/rowback/ee/` is Apache-2.0: the hard gate, policy, capture, undo, ledger, remote MCP, and API/CLI approvals. You can run the whole safety path for free.
 
-`src/rowback/ee/` (Slack approvals, approver SSO, the web panel, audit export and the license check) is source-available under the [Rowback Enterprise License](src/rowback/ee/LICENSE). It is free for development and evaluation. Production use needs a Pro or Enterprise subscription. The two-person rule is core code, but turning it on needs a key.
+`src/rowback/ee/` (Slack approvals, approver SSO, the web panel, audit export and the license check) is source-available under the [Elastic License 2.0](src/rowback/ee/LICENSE) (ELv2), the same license Elasticsearch uses. You can read, run and modify it. The features need a Pro or Enterprise key, and ELv2 forbids removing or bypassing the key check or offering the software as a hosted service. The two-person rule is core code, but turning it on needs a key.
