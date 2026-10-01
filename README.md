@@ -121,6 +121,8 @@ rowback init --control-role rowback_control --agent-role rowback_agent
 rowback register public.orders --agent-role rowback_agent  # repeat per table (and FK children)
 rowback verify-ledger                                       # tamper-evidence check
 ```
+What an agent can't do, with the exact refusal for 20 real attacks: [docs/attack-gallery.md](docs/attack-gallery.md).
+
 Step-by-step for **Supabase, Neon and Amazon RDS** (roles, connection strings, RLS, `updated_at` triggers): [docs/hosted-postgres.md](docs/hosted-postgres.md).
 
 Local, single-user development without the service: `rowback serve` (stdio MCP). Do not use this mode with agents that have shell access. See [SECURITY.md](SECURITY.md).
