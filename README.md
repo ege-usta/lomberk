@@ -116,10 +116,13 @@ Environment: `ROWBACK_ADMIN_DSN` (control role), `ROWBACK_AGENT_DSN` (agent role
 ```bash
 pip install "rowback @ git+https://github.com/ege-usta/rowback"   # or: docker build -t rowback .
 export ROWBACK_INSTALL_DSN=postgresql://owner@db/app       # used only for install
+# first, as that owner: CREATE ROLE rowback_control LOGIN PASSWORD '...'; CREATE ROLE rowback_agent LOGIN PASSWORD '...';
 rowback init --control-role rowback_control --agent-role rowback_agent
 rowback register public.orders --agent-role rowback_agent  # repeat per table (and FK children)
 rowback verify-ledger                                       # tamper-evidence check
 ```
+Step-by-step for **Supabase, Neon and Amazon RDS** (roles, connection strings, RLS, `updated_at` triggers): [docs/hosted-postgres.md](docs/hosted-postgres.md).
+
 Local, single-user development without the service: `rowback serve` (stdio MCP). Do not use this mode with agents that have shell access. See [SECURITY.md](SECURITY.md).
 
 ## How it works
