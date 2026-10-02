@@ -5,7 +5,7 @@ from rowback.capture.install import install_rowback
 
 @pytest.fixture(scope="module")
 def postgres():
-    from testcontainers.postgres import PostgresContainer
+    from testcontainers.community.postgres import PostgresContainer
     with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
         yield postgres
 

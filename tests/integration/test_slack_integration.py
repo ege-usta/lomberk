@@ -4,7 +4,7 @@ import psycopg
 import asyncio
 import httpx
 from fastapi.testclient import TestClient
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 from rowback.api import app, verify_api_key, verify_admin_key, get_executor, get_policy_engine
 import rowback.api
 import rowback.config

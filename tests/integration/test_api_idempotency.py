@@ -3,7 +3,7 @@ import os
 import threading
 from fastapi.testclient import TestClient
 import psycopg
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 from rowback.api import app, _API_KEY
 from rowback.config import load_config
