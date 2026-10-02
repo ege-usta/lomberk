@@ -6,6 +6,9 @@ from datetime import UTC, datetime
 # Configure standard logger to write JSON to a file or stream
 logger = logging.getLogger("rowback_audit")
 logger.setLevel(logging.INFO)
+# Audit lines carry full SQL (possible secrets/PII). Never let them propagate to the
+# root logger, where an operator's INFO handler would copy them to stdout/journald.
+logger.propagate = False
 
 # Audit lines contain full SQL text (may include PII): keep them owner-only, never in /tmp.
 log_path = os.environ.get("ROWBACK_AUDIT_LOG") or os.path.expanduser("~/.local/state/rowback/audit.jsonl")
