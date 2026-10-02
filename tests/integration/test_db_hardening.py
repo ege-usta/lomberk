@@ -1,4 +1,5 @@
 """Database-level guarantees that no single code change should quietly undo."""
+import os
 import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
@@ -10,7 +11,7 @@ AGENT_MAY_EXECUTE = {"claim_checkpoint", "finish_checkpoint", "unprotected_casca
 
 @pytest.fixture(scope="module")
 def dsn():
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")

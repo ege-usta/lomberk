@@ -1,5 +1,6 @@
 """A write Rowback lets through must be fully captured. Inheritance children and rewrite
 rules move rows the capture trigger never sees, so such tables are refused before the write."""
+import os
 import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
@@ -13,7 +14,7 @@ from rowback.sql.classify import classify_sql
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as c:
             c.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")

@@ -1,4 +1,5 @@
 """rowback doctor: every problem gets a plain message and a fix, and the exit code says if it's safe to start."""
+import os
 import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
@@ -13,7 +14,7 @@ KEYS = {"ROWBACK_API_KEY": "3f9c2a7e1b8d4065c7a9e2f1d3b5a8c6", "ROWBACK_ADMIN_KE
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")

@@ -1,4 +1,5 @@
 """Web panel (Pro): sign-in, session, CSRF, SSO login flow, approvals and export."""
+import os
 import base64
 import hashlib
 import json
@@ -69,7 +70,7 @@ def idp():
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")

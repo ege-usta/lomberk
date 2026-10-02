@@ -1,3 +1,4 @@
+import os
 import psycopg
 import pytest
 from hypothesis import given, settings
@@ -16,7 +17,7 @@ from rowback.models import (
 
 @pytest.fixture(scope="module")
 def postgres():
-    with PostgresContainer("postgres:16-alpine") as postgres:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine"))) as postgres:
         yield postgres
 
 @pytest.fixture(scope="module")

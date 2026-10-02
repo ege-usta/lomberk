@@ -1,5 +1,6 @@
 """Tamper evidence: the checkpoint ledger is append-only and hash-chained, so even
 a database owner editing history is detected by verify_ledger()."""
+import os
 from urllib.parse import urlparse, urlunparse
 
 import psycopg
@@ -18,7 +19,7 @@ from rowback.models import (
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 

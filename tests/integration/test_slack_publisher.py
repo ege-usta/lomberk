@@ -1,6 +1,7 @@
 """Production Slack approval path: pending checkpoints are posted by the built-in
 outbox publisher, bindings live in the database (survive restarts), only the bound
 (team, channel, ts) authorizes a click, and the approver's Slack ID is audited."""
+import os
 import asyncio
 import json
 import logging
@@ -37,7 +38,7 @@ class FakeWeb:
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 

@@ -11,7 +11,7 @@ from rowback.capture.install import install_rowback
 
 @pytest.fixture(scope="module")
 def dsn():
-    postgres = PostgresContainer("postgres:16-alpine")
+    postgres = PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine"))
     postgres.start()
     with psycopg.connect(postgres.get_connection_url().replace("postgresql+psycopg2", "postgresql"), autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER SYSTEM SET max_prepared_transactions = 100")

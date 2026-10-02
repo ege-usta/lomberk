@@ -1,5 +1,6 @@
 """The core promise: a mass write that slips past the AST gate (e.g. WHERE 1=1)
 is rolled back and held for a human instead of being applied."""
+import os
 from urllib.parse import urlparse, urlunparse
 
 import psycopg
@@ -15,7 +16,7 @@ from rowback.sql.classify import classify_sql
 
 @pytest.fixture(scope="module")
 def dsns():
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 

@@ -1,3 +1,4 @@
+import os
 import pytest
 import psycopg
 from testcontainers.community.postgres import PostgresContainer
@@ -8,7 +9,7 @@ from rowback.policy import StatementEvaluation, PolicyDecision
 
 @pytest.fixture(scope="module")
 def postgres():
-    with PostgresContainer("postgres:16-alpine") as postgres:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
         yield postgres
 
 @pytest.fixture(scope="module")

@@ -151,6 +151,8 @@ Measured against Postgres 16 on localhost (200 runs, p50 / p95):
 
 Agent turns take seconds, so this is negligible in practice. Most of the cost is opening new connections; connection pooling is on the roadmap for remote/TLS databases.
 
+Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against every one in CI.
+
 ## Pricing
 | | Free | Pro | Enterprise |
 |---|---|---|---|

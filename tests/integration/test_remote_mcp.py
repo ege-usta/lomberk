@@ -1,6 +1,7 @@
 """Enterprise deployment model: the gateway runs as its own service and the agent
 holds only a URL + agent key. Verifies the remote MCP endpoint end to end over real
 HTTP, and that the agent key can neither approve nor undo."""
+import os
 import socket
 import threading
 import time
@@ -22,7 +23,7 @@ ADMIN_KEY = "admin-key-remote-test"
 
 @pytest.fixture(scope="module")
 def gateway(tmp_path_factory):
-    with PostgresContainer("postgres:16-alpine") as pg:
+    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 

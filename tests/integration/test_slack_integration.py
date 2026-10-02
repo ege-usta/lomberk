@@ -1,3 +1,4 @@
+import os
 import pytest
 import psycopg
 import asyncio
@@ -11,7 +12,7 @@ from rowback.ee.slack import SlackInteractionAdapter
 
 @pytest.fixture(scope="module")
 def postgres():
-    postgres = PostgresContainer("postgres:16-alpine")
+    postgres = PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine"))
     postgres.start()
     yield postgres
     postgres.stop()
