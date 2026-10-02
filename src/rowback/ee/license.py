@@ -11,9 +11,9 @@ import urllib.request
 logger = logging.getLogger("rowback.license")
 
 # ponytail: set to the real Polar organization ID before the first sale; see BACKLOG.md.
-POLAR_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000000"
+POLAR_ORGANIZATION_ID = "493a1901-78e3-4579-9c47-01bb8125a314"
 POLAR_VALIDATE_URL = "https://api.polar.sh/v1/customer-portal/license-keys/validate"
-BUY_URL = "https://github.com/ege-usta/rowback#pricing"
+BUY_URL = "https://buy.polar.sh/polar_cl_ar1Nqmcc0aEByc0Z6pMf3mke7yp1rm22gUQy73Uaomv"
 HTTP_TIMEOUT_SECONDS = 5
 
 

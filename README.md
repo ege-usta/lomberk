@@ -156,14 +156,14 @@ Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against 
 ## Pricing
 | | Free | Pro | Enterprise |
 |---|---|---|---|
-| Price | $0 | **$99/month** or $990/year | from **$3,000/year** |
+| Price | $0 | **$199/month** or $1,990/year | from **$3,000/year** |
 | Hard gate, holds, capture, undo, ledger, remote MCP, API/CLI approvals | ✓ | ✓ | ✓ |
 | Slack approvals, approver SSO, web panel, two-person rule, audit export | | ✓ | ✓ |
 | Production databases | unlimited | up to 3 | unlimited |
 | Billing | | card, self-serve | annual invoice |
 | Help | GitHub issues | GitHub issues | email, answered within 2 business days; help with your security questionnaire |
 
-**[Buy Pro](REPLACE_WITH_POLAR_CHECKOUT_URL)**: the key arrives by email right away. For Enterprise, write to REPLACE_WITH_CONTACT_EMAIL. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
+**[Buy Pro](https://buy.polar.sh/polar_cl_ar1Nqmcc0aEByc0Z6pMf3mke7yp1rm22gUQy73Uaomv)**: the key arrives by email right away. For Enterprise, write to https://github.com/ege-usta/rowback/discussions. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
 
 Rowback is self-hosted and your data never reaches us. There is no phone support or on-call; the docs and `rowback doctor` are built so you can set it up alone.
 
