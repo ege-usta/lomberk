@@ -126,6 +126,8 @@ What an agent can't do, with the exact refusal for 20 real attacks: [docs/attack
 
 Step-by-step for **Supabase, Neon and Amazon RDS** (roles, connection strings, RLS, `updated_at` triggers): [docs/hosted-postgres.md](docs/hosted-postgres.md).
 
+Common questions before adopting Rowback: [docs/faq.md](docs/faq.md).
+
 Local, single-user development without the service: `rowback serve` (stdio MCP). Do not use this mode with agents that have shell access. See [SECURITY.md](SECURITY.md).
 
 ## How it works
