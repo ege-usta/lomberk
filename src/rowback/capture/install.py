@@ -58,5 +58,8 @@ def install_rowback(admin_dsn: str, control_role: str, agent_role: str):
             cur.execute(sql.SQL("REVOKE EXECUTE ON FUNCTION rowback.finish_checkpoint(UUID, INTEGER) FROM {}").format(sql.Identifier(control_role)))
             cur.execute(sql.SQL("REVOKE USAGE, SELECT ON ALL SEQUENCES IN SCHEMA rowback FROM {}").format(sql.Identifier(control_role)))
             cur.execute("SELECT rowback.grant_access(%s, %s)", (control_role, agent_role))
+            # Upgrade: older installs granted the control role EXECUTE on register_table
+            # (a SECURITY DEFINER function that runs as the installer). Take it back.
+            cur.execute(sql.SQL("REVOKE EXECUTE ON FUNCTION rowback.register_table(TEXT, TEXT, TEXT, TEXT, TEXT[], BOOLEAN) FROM {}").format(sql.Identifier(control_role)))
             
         conn.commit()

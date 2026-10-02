@@ -45,3 +45,11 @@ def test_public_executes_nothing_and_agent_only_its_runtime_functions(dsn):
 def test_retired_table_lock_function_is_gone(dsn):
     with psycopg.connect(dsn) as conn:
         assert _functions(conn, "p.proname = 'lock_table_for_undo'") == set()
+
+
+def test_control_role_cannot_run_register_table(dsn):
+    # register_table is SECURITY DEFINER (runs as the installer). A leaked control DSN
+    # must not be able to grant itself DML/SELECT on arbitrary tables through it.
+    with psycopg.connect(dsn) as conn:
+        assert not _functions(conn, "p.proname = 'register_table' "
+                              "AND has_function_privilege('rowback_control', p.oid, 'EXECUTE')")

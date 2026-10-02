@@ -337,8 +337,10 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.get_pending_checkpoint TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.record_approval TO %I', p_control_role);
     EXECUTE format('GRANT SELECT ON rowback.approvals TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.register_table TO %I', p_control_role);
-    
+    -- register_table is SECURITY DEFINER and runs as the installer, so it must stay
+    -- callable only by the install connection. The control role never calls it; granting
+    -- it here would let a leaked control DSN grant itself DML/SELECT on any table.
+
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.execute_undo TO %I', p_control_role);
     
 
