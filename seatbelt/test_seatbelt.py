@@ -37,6 +37,11 @@ DANGEROUS_BASH = [
     "fly volumes destroy vol_123",
     "neonctl branches delete main",
     "cd api && psql -c 'drop table users;'",
+    # F3: a path-prefixed client must still be inspected
+    '/usr/bin/psql "$DATABASE_URL" -c "DROP TABLE users"',
+    "./psql -c 'delete from public.users'",
+    # F4: a tab-indented `<<-` heredoc terminator must not escape extraction
+    "psql <<-SQL\n\tDROP SCHEMA public CASCADE;\n\tSQL",
 ]
 
 SAFE_BASH = [
@@ -83,6 +88,12 @@ class Seatbelt(unittest.TestCase):
 
     def test_other_tools_ignored(self):
         self.assertIsNone(seatbelt.check({"tool_name": "Write", "tool_input": {"content": "DROP TABLE users"}}))
+
+    def test_oversized_command_fails_closed(self):
+        # F4 (ReDoS): an enormous command is not pattern-scanned; it is asked about instead,
+        # so a heredoc-bomb can neither hang the hook nor slip through unscanned.
+        bomb = "psql <<X\n" * 20000
+        self.assertIsNotNone(seatbelt.check({"tool_name": "Bash", "tool_input": {"command": bomb}}))
 
     def test_hook_protocol(self):
         run = lambda payload, env=None: subprocess.run(  # noqa: E731

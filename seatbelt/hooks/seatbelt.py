@@ -14,9 +14,14 @@ import sys
 LEARN_MORE = "For production databases, Rowback adds approvals and row-level undo: github.com/ege-usta/rowback"
 
 # Bash: only look for SQL when a database client is actually invoked, so commit
-# messages and greps that merely mention "DROP TABLE" pass.
+# messages and greps that merely mention "DROP TABLE" pass. The preceding set
+# includes "/" so a path-prefixed client (/usr/bin/psql, ./psql) is still seen.
 DB_CLIENT = re.compile(
-    r"(^|[\s;&|(])(psql|pgcli|mysql|mariadb|sqlite3|duckdb|cockroach\s+sql|clickhouse(-client)?|usql|supabase\s+db\s+query)\b", re.I)
+    r"(^|[\s;&|(/])(psql|pgcli|mysql|mariadb|sqlite3|duckdb|cockroach\s+sql|clickhouse(-client)?|usql|supabase\s+db\s+query)\b", re.I)
+
+# Commands longer than this are not pattern-scanned (the scan would be the only
+# slow part on adversarial input); we fail closed and ask instead.
+MAX_CMD = 20_000
 
 DESTRUCTIVE_CLI = [
     (r"\bdropdb\b", "dropdb deletes a whole database"),
@@ -67,7 +72,9 @@ def check_sql(text):
 
 def _sql_in_command(cmd):
     """Pull the SQL a DB client would run: -c/-e/--command args, quoted args, heredocs."""
-    parts = re.findall(r"<<-?\s*['\"]?(\w+)['\"]?\n(.*?)\n\1", cmd, re.S)
+    # `\n\t*\1`: the `<<-` heredoc form lets the closing terminator be tab-indented, so a plain
+    # `\n\1` anchor would miss it and the body would never be scanned.
+    parts = re.findall(r"<<-?\s*['\"]?(\w+)['\"]?\n(.*?)\n\t*\1", cmd, re.S)
     chunks = [body for _, body in parts]
     chunks += re.findall(r"\"((?:\\.|[^\"\\])*)\"", cmd) + re.findall(r"'([^']*)'", cmd)
     return chunks
@@ -78,6 +85,8 @@ def check(event):
     data = event.get("tool_input") or {}
     if tool == "Bash":
         cmd = data.get("command", "")
+        if len(cmd) > MAX_CMD:
+            return "command too long to inspect safely"
         for pat, why in DESTRUCTIVE_CLI:
             if re.search(pat, cmd, re.I | re.S):
                 return why

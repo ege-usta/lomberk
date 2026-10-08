@@ -3,6 +3,7 @@ import hmac
 import inspect
 import logging
 import os
+import secrets
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -30,13 +31,17 @@ _slack_transport_instance = None
 # Immutable runtime config
 _API_KEY = None
 _ADMIN_KEY = None
+# Panel session-cookie signing secret. Random per process and independent of _ADMIN_KEY:
+# the admin key is deliberately excluded from the approval quorum, so it must not be able to
+# mint (forge) panel sessions — least of all an `oidc:` identity. A restart ends all sessions.
+_SESSION_SECRET = None
 _SSO = None  # ee OidcVerifier when sso.issuer is set
 _ALLOW_ADMIN_KEY = True
 _PRO = False  # a valid Rowback Pro license is present
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY, _PRO
+    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _SESSION_SECRET, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY, _PRO
     
     # Local registry ownership for safe and strict shutdown drainage
     local_db_workers = set()
@@ -69,6 +74,7 @@ async def lifespan(app: FastAPI):
         
     _API_KEY = agent_key
     _ADMIN_KEY = admin_key
+    _SESSION_SECRET = secrets.token_bytes(32)
     slack_enabled = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
     needs_pro = pro_features(config)
     license_key = os.environ.get("ROWBACK_LICENSE_KEY")

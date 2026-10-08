@@ -1,10 +1,11 @@
 """Web approval panel (Pro): writes waiting for approval, history, approve/reject/undo, export.
 
 Sign-in: SSO (OIDC authorization code flow with PKCE, done server side) or the shared admin key.
-Session: an HMAC-signed cookie keyed from ROWBACK_ADMIN_KEY (rotating the key signs everyone
-out), HttpOnly and SameSite=Strict. State-changing requests also need the X-Rowback-Panel
-header, which a cross-site form cannot send. Agent SQL is untrusted input: the page renders
-it as text only, and the CSP allows no inline script.
+Session: an HMAC-signed cookie keyed from a random per-process server secret, independent of
+ROWBACK_ADMIN_KEY (so holding the admin key cannot forge a session, and a restart signs
+everyone out), HttpOnly and SameSite=Strict. State-changing requests also need the
+X-Rowback-Panel header, which a cross-site form cannot send. Agent SQL is untrusted input: the
+page renders it as text only, and the CSP allows no inline script.
 """
 import base64
 import hashlib
@@ -54,7 +55,10 @@ def _b64(b: bytes) -> str:
 
 
 def _mac(payload: str) -> str:
-    key = hmac.new(_api()._ADMIN_KEY.encode(), b"rowback-panel-session-v1", hashlib.sha256).digest()
+    # Keyed from a random per-process server secret, NOT ROWBACK_ADMIN_KEY: the admin key is
+    # deliberately excluded from the approval quorum, so holding it must not let anyone forge a
+    # panel session (and assert an `oidc:` approver that never signed in).
+    key = hmac.new(_api()._SESSION_SECRET, b"rowback-panel-session-v1", hashlib.sha256).digest()
     return _b64(hmac.new(key, payload.encode(), hashlib.sha256).digest())
 
 

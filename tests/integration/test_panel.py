@@ -2,6 +2,7 @@
 import os
 import base64
 import hashlib
+import hmac
 import json
 import threading
 import time
@@ -158,6 +159,24 @@ def test_admin_key_sign_in_session_and_csrf(gateway):
         assert send(cookie).status_code == 200                      # the real cookie works when sent this way
         assert send(forged + "." + sig).status_code == 401          # another actor under the old signature
         assert send(payload + "." + sig[:-2] + "AA").status_code == 401
+
+
+def test_admin_key_cannot_forge_a_panel_session(gateway):
+    # F2 regression: the session cookie must NOT be signed with ROWBACK_ADMIN_KEY. That key is
+    # deliberately excluded from the approval quorum, so a holder of it minting an `oidc:` session
+    # (which the quorum DOES count) would single-handedly satisfy the two-person rule. We forge a
+    # cookie with the old, admin-key-derived scheme for an allowed identity and group; only the
+    # signature can stop it, and it must.
+    start, _ = gateway
+    with start(SSO_YAML) as c:
+        payload = base64.urlsafe_b64encode(json.dumps(
+            {"actor": "oidc:alice@corp.com", "groups": ["db-approvers"], "p": "session", "exp": 9999999999}
+        ).encode()).rstrip(b"=").decode()
+        key = hmac.new(b"admin-k", b"rowback-panel-session-v1", hashlib.sha256).digest()
+        sig = base64.urlsafe_b64encode(hmac.new(key, payload.encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
+        forged = f"{payload}.{sig}"
+        assert c.get("/panel/api/session", headers={"Cookie": f"rowback_session={forged}"}).json()["actor"] is None
+        assert c.get("/panel/api/checkpoints", headers={"Cookie": f"rowback_session={forged}"}).status_code == 401
 
 
 def test_sso_sign_in_then_two_people_apply(gateway, idp):
