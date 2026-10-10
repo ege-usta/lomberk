@@ -40,7 +40,7 @@ def run_agent_sql(executor: RowbackExecutor, policy_engine: PolicyEngine, sql: s
             res = executor.execute(policy_engine.evaluate(stmt), agent_label=principal, principal=principal, operation_id=operation_id)
             results.append(format_result(res))
         return "\n".join(results)
-    except Exception as e:  # noqa: BLE001 - a tool must answer the agent, never crash the session
+    except Exception as e:
         return f"Error executing SQL: {e}"
 
 

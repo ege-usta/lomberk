@@ -39,21 +39,21 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
         stmt = stmt_dict.stmt
         raw_sql = get_sql_slice(sql, stmt_dict)
         tables = list(referenced_relations(stmt_dict))
-        
+
         visitor = StatementTypeVisitor()
         visitor(stmt)
         types = visitor.found_types
-        
+
         stmt_class = StatementClass.UNKNOWN
-        
+
         # Priority classification
-        if any(t.startswith("AlterRole") or t.startswith("CreateRole") or t.startswith("DropRole") 
+        if any(t.startswith(("AlterRole", "CreateRole", "DropRole"))
                or t in ("GrantStmt", "RevokeStmt", "VariableSetStmt", "AlterSystemStmt") for t in types):
             stmt_class = StatementClass.BLOCKED
-            
+
         elif any(t in ("DropdbStmt", "DropdbStmt") for t in types):
             stmt_class = StatementClass.DDL_DANGEROUS
-            
+
         elif "DropStmt" in types:
             remove_type = getattr(stmt, "removeType", None)
             behavior = getattr(stmt, "behavior", None)
@@ -66,31 +66,31 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
                 stmt_class = StatementClass.DDL_DANGEROUS
             else:
                 stmt_class = StatementClass.DDL_REVERSIBLE
-                
+
         elif any(t in ("TruncateStmt", "AlterTableStmt", "CreateStmt", "IndexStmt", "ViewStmt", "CreateTableAsStmt", "RenameStmt", "CreateEnumStmt", "CompositeTypeStmt", "DefineStmt") for t in types):
             stmt_class = StatementClass.DDL_REVERSIBLE
-            
+
         elif any(t in ("PrepareStmt", "ExecuteStmt", "DoStmt", "CreateFunctionStmt") for t in types):
             stmt_class = StatementClass.UNKNOWN
-            
+
         elif any(t in ("InsertStmt", "UpdateStmt", "DeleteStmt", "MergeStmt") for t in types):
             stmt_class = StatementClass.WRITE_DML
-            
+
         elif any(t in ("SelectStmt", "ExplainStmt", "VariableShowStmt") for t in types):
             stmt_class = StatementClass.READ
 
         # Check for blocked schemas
         for table in tables:
-            if table.startswith("rowback.") or table.startswith("rowback_trash.") or table == "rowback" or table == "rowback_trash":
+            if table.startswith(("rowback.", "rowback_trash.")) or table in ("rowback", "rowback_trash"):
                 stmt_class = StatementClass.BLOCKED
-                
+
         results.append(ClassifiedStatement(
             sql=raw_sql,
             stmt_class=stmt_class,
             tables=tables,
             is_multistatement=is_multi
         ))
-        
+
     return results
 
 def extract_tables_from_ast(ast):

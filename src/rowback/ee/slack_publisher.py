@@ -106,7 +106,7 @@ class SlackPublisher:
                     team = next(iter(self.team_allowlist))
                 if not ts or not team:
                     raise ValueError("Slack response lacked message ts/team")
-            except Exception as e:  # noqa: BLE001 - outcome unknown: never re-send
+            except Exception as e:
                 logger.error("Slack publish outcome unknown for %s (%s); not retrying", public_id, type(e).__name__)
                 await asyncio.to_thread(self._record, public_id, "unknown")
                 continue
@@ -118,7 +118,7 @@ class SlackPublisher:
         while not stop.is_set():
             try:
                 await self.publish_pending()
-            except Exception as e:  # noqa: BLE001 - keep the loop alive; DB may be briefly down
+            except Exception as e:
                 logger.error("Slack publisher pass failed: %s", type(e).__name__)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)

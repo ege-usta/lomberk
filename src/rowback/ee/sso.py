@@ -88,7 +88,7 @@ class OidcVerifier:
                 leeway=CLOCK_LEEWAY_SECONDS, options={"require": ["exp", "iat", "iss", "aud", "sub"]})
         except SsoError:
             raise
-        except Exception as e:  # noqa: BLE001 - any parse/verify/fetch failure means "not authenticated"
+        except Exception as e:
             raise SsoError(type(e).__name__) from None
         if nonce is not None and not hmac.compare_digest(str(claims.get("nonce", "")), nonce):
             raise SsoError("nonce mismatch")

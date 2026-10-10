@@ -1,12 +1,14 @@
-import pytest
-import time
-import httpx
-import threading
 import socket
+import threading
+import time
+
+import httpx
+import pytest
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from rowback.recovery import execute_with_recovery, TransientError, RecoveryBudgetExhausted
+
+from rowback.recovery import RecoveryBudgetExhausted, TransientError, execute_with_recovery
 
 app = FastAPI()
 health_check_passed = False
@@ -51,7 +53,7 @@ class HTTPClientAdapter:
                 self._map_errors(res)
                 return res.json()
         except (httpx.TimeoutException, httpx.NetworkError) as e:
-            raise TransientError(f"Network/Timeout Error: {e}")
+            raise TransientError(f"Network/Timeout Error: {e}") from e
 
     def status_fn(self, endpoint: str, resume_id: str, timeout: float):
         try:
@@ -60,8 +62,8 @@ class HTTPClientAdapter:
                 self._map_errors(res)
                 return res.json().get("status")
         except (httpx.TimeoutException, httpx.NetworkError) as e:
-            raise TransientError(f"Network/Timeout Error: {e}")
-            
+            raise TransientError(f"Network/Timeout Error: {e}") from e
+
     def _map_errors(self, res):
         if res.status_code in (401, 403, 400):
             raise ValueError(f"Terminal Auth/Validation Error: {res.status_code}")
@@ -76,15 +78,15 @@ def mock_server():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(('127.0.0.1', 0))
     port = sock.getsockname()[1]
-    
+
     config = uvicorn.Config(app, log_level="critical")
     server = uvicorn.Server(config)
-    
+
     thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
     thread.start()
-    
+
     base_url = f"http://127.0.0.1:{port}"
-    
+
     # Readiness probe
     ready = False
     for _ in range(20):
@@ -95,12 +97,12 @@ def mock_server():
                 break
         except Exception:
             time.sleep(0.1)
-            
+
     if not ready:
         server.should_exit = True
         thread.join(timeout=1)
         pytest.fail("Mock server failed to start or bind.")
-        
+
     yield base_url
     server.should_exit = True
     thread.join(timeout=2)
@@ -110,10 +112,10 @@ def test_real_transport_timeout(mock_server):
     adapter = HTTPClientAdapter(mock_server)
     request_counts["slow"] = 0
     attempts = 0
-    
+
     # We record the exact string of the last TransientError raised
     last_transient_error = None
-    
+
     def submit_with_count(timeout):
         nonlocal attempts, last_transient_error
         attempts += 1
@@ -123,7 +125,7 @@ def test_real_transport_timeout(mock_server):
             last_transient_error = str(e)
             raise e
 
-    # The server sleeps for 1.0s. 
+    # The server sleeps for 1.0s.
     # The HTTPX client is given a timeout of ~0.3s (based on remaining budget).
     # Thus, the request will begin, wait for read, and hit a ReadTimeout.
     # Note: HTTPX phase timeouts do not strictly guarantee an absolute elapsed monotonic deadline.
@@ -136,7 +138,7 @@ def test_real_transport_timeout(mock_server):
             timeout_seconds=0.3,
             base_delay=0.01
         )
-        
+
     # It attempts exactly once because the ReadTimeout consumes the entire 0.3s budget
     assert attempts == 1
     # Verify the request actually hit the server
@@ -151,7 +153,7 @@ def test_terminal_error_no_retry(mock_server):
         nonlocal attempts
         attempts += 1
         return adapter.submit("/fatal-error", "op1", timeout)
-        
+
     with pytest.raises(ValueError, match="Terminal Auth/Validation Error: 401"):
         execute_with_recovery("op1", submit_with_count, lambda i, t: "x", timeout_seconds=1.0)
     assert attempts == 1
@@ -163,7 +165,7 @@ def test_conflict_error_no_retry(mock_server):
         nonlocal attempts
         attempts += 1
         return adapter.submit("/conflict-error", "op1", timeout)
-        
+
     with pytest.raises(Exception, match="HTTPConflict"):
         execute_with_recovery("op1", submit_with_count, lambda i, t: "x", timeout_seconds=1.0)
     assert attempts == 1
@@ -172,15 +174,15 @@ def test_transient_error_retry(mock_server):
     adapter = HTTPClientAdapter(mock_server)
     request_counts["502"] = 0
     attempts = 0
-    
+
     def submit_with_count(timeout):
         nonlocal attempts
         attempts += 1
         return adapter.submit("/transient-error", "op1", timeout)
-        
+
     with pytest.raises(RecoveryBudgetExhausted):
         execute_with_recovery("op1", submit_with_count, lambda i, t: "x", timeout_seconds=0.2, base_delay=0.01)
-        
+
     # Proves 502 was actively retried multiple times before budget exhaustion
     assert attempts > 1
     assert request_counts["502"] == attempts

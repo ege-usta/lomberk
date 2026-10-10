@@ -1,5 +1,6 @@
 """Database-level guarantees that no single code change should quietly undo."""
 import os
+
 import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer

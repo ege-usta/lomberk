@@ -1,7 +1,7 @@
-import dotenv; dotenv.load_dotenv()
 import os
 import sys
 
+import dotenv
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -11,6 +11,8 @@ from rowback.config import load_config
 from rowback.executor import RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sql.classify import classify_sql
+
+dotenv.load_dotenv()
 
 app = typer.Typer(help="Rowback: every agent write, reversible", no_args_is_help=True)
 
@@ -34,14 +36,14 @@ def preview(sql: str, rows_affected: int = typer.Option(None, help="Mock rows af
     config = load_config()
     policy = PolicyEngine(config)
     statements = classify_sql(sql)
-    
+
     table = Table(title="SQL Classification Preview")
     table.add_column("Statement")
     table.add_column("Class")
     table.add_column("Tables")
     table.add_column("Decision")
     table.add_column("Reason")
-    
+
     for stmt in statements:
         eval = policy.evaluate(stmt, rows_affected=rows_affected)
         table.add_row(
@@ -51,7 +53,7 @@ def preview(sql: str, rows_affected: int = typer.Option(None, help="Mock rows af
             eval.decision.value,
             eval.reason
         )
-        
+
     console.print(table)
 
 @app.command()
@@ -98,7 +100,7 @@ def register(
             unprotected = conn.execute("SELECT rowback.unprotected_cascade_child(%s::regclass)", (f'"{schema}"."{name}"',)).fetchone()[0]
     except psycopg.Error as e:
         console.print(f"[red]Failed to register {table}: {str(e).splitlines()[0]}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     console.print(f"[green]{table} is now protected.[/green]")
     if hidden:
         console.print(f"Hidden from the agent by the database itself: {', '.join(hidden)}")
@@ -149,11 +151,11 @@ def get_dsns():
     config = load_config()
     control = os.environ.get(config.database.admin_dsn_env)
     runtime = os.environ.get(config.database.agent_dsn_env)
-    
+
     if not control:
         console.print(f"[red]Error: Admin DSN env var '{config.database.admin_dsn_env}' not set.[/red]")
         raise typer.Exit(1)
-        
+
     if not runtime:
         console.print(f"[red]Error: Agent DSN env var '{config.database.agent_dsn_env}' not set.[/red]")
         raise typer.Exit(1)
@@ -164,10 +166,10 @@ def get_dsns():
 def undo(token: str):
     """Undo an applied SQL statement."""
     control, runtime = get_dsns()
-            
+
     executor = RowbackExecutor(control, runtime)
     res = executor.execute_undo(token, agent_label=cli_actor())
-    
+
     if res.status == "undone":
         console.print(f"[green]Successfully undid checkpoint {token}. Rows affected: {res.rows_affected}[/green]")
     else:

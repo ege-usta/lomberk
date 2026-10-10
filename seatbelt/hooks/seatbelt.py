@@ -109,7 +109,8 @@ def main():
     try:
         event = json.load(sys.stdin)
         found = check(event) if isinstance(event, dict) else None
-    except Exception:  # noqa: BLE001 - a seatbelt must never break the session
+    except Exception:
+        # A seatbelt must never break the session: on any error, stay silent and allow.
         return
     if not found:
         return

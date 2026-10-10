@@ -1,5 +1,4 @@
 import pytest
-
 from offline_pilot import (
     InMemoryBindingStore,
     OfflinePublisher,

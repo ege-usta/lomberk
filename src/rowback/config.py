@@ -98,7 +98,7 @@ def weak_key_reason(key: str) -> str | None:
 def load_config(path: str = "rowback.yaml") -> RowbackConfig:
     if not os.path.exists(path):
         return RowbackConfig()
-    with open(path, "r") as f:
+    with open(path) as f:
         data = yaml.safe_load(f) or {}
     return RowbackConfig(**data)
 

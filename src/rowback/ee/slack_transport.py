@@ -32,7 +32,7 @@ class SlackTransport:
         self.client_factory = client_factory
         self.dedup_ttl_seconds = dedup_ttl_seconds
         self.max_dedup_size = max_dedup_size
-        
+
         self.client: SocketModeClient | None = None
         self._processed_envelopes: OrderedDict[str, tuple[float, str]] = OrderedDict()
         self._shutdown_event = asyncio.Event()
@@ -61,7 +61,7 @@ class SlackTransport:
                 async with self._connect_lock:
                     if self.client or self._shutdown_event.is_set():
                         return
-                        
+
                     logger.info("Initializing Slack Socket Mode Transport...")
                     try:
                         self.client = self.client_factory(self.app_token)
@@ -132,7 +132,7 @@ class SlackTransport:
 
         # 4. Mark INFLIGHT
         self._processed_envelopes[envelope_id] = (now, "INFLIGHT")
-        
+
         try:
             await self.business_adapter.handle_interaction(req.payload)
         except TaskCapacityExceededError:
@@ -186,14 +186,14 @@ class SlackTransport:
                                         await client_to_close.close()
                                 except BaseException as e:
                                     logger.error(f"Error closing Slack client: {type(e).__name__}")
-                            
+
                             dt = asyncio.create_task(_safe_close_disconnect())
                             self._cleanup_tasks.add(dt)
                             dt.add_done_callback(self._cleanup_tasks.discard)
-                            
+
                         if self._cleanup_tasks:
                             logger.info(f"Draining {len(self._cleanup_tasks)} Slack Transport cleanup tasks...")
-                            done, pending = await asyncio.wait(self._cleanup_tasks, timeout=3.0)
+                            _done, pending = await asyncio.wait(self._cleanup_tasks, timeout=3.0)
                             if pending:
                                 logger.error(f"Transport disconnect complete, but {len(pending)} cleanup tasks are still hanging.")
         except TimeoutError:

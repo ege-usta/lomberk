@@ -24,13 +24,13 @@ SETTLE_INTERVAL = 0.1
 
 class SlackInteractionAdapter:
     def __init__(
-        self, 
-        admin_allowlist: set[str], 
+        self,
+        admin_allowlist: set[str],
         team_allowlist: set[str],
         target_resolver: Callable[[str, str, str], Awaitable[str | None]],
-        approve_callback: Callable[[str], Awaitable[dict[str, Any]]], 
+        approve_callback: Callable[[str], Awaitable[dict[str, Any]]],
         reject_callback: Callable[[str], Awaitable[dict[str, Any]]],
-        status_callback: Callable[[str], Awaitable[str]], 
+        status_callback: Callable[[str], Awaitable[str]],
         slack_update_callback: Callable[[str, str, str], Awaitable[None]],
         max_concurrent_tasks: int = 100,
         shutdown_timeout: float = 5.0
@@ -44,7 +44,7 @@ class SlackInteractionAdapter:
         self.slack_update_callback = slack_update_callback
         self.max_concurrent_tasks = max_concurrent_tasks
         self.shutdown_timeout = shutdown_timeout
-        
+
         self._active_tasks: set[asyncio.Task] = set()
         self._update_locks: dict[tuple, dict[str, Any]] = {}
         self._stopping = False
@@ -80,7 +80,7 @@ class SlackInteractionAdapter:
         if len(self._active_tasks) >= self.max_concurrent_tasks: raise TaskCapacityExceededError("Server is too busy.")
 
         is_approve = (action_id == "approve_button")
-        
+
         task = asyncio.create_task(self._process_interaction(team_id, channel_id, message_ts, public_id, is_approve, actor=f"slack:{user_id}"))
         self._active_tasks.add(task)
         task.add_done_callback(self._active_tasks.discard)
@@ -110,16 +110,16 @@ class SlackInteractionAdapter:
                 await callback(public_id)
             finally:
                 slack_actor.reset(token)
-                
+
         except asyncio.CancelledError:
             return
         except Exception as e:
             logger.error(f"Internal error processing checkpoint {public_id}: {type(e).__name__}")
-            
+
         target_key = (team_id, channel_id, message_ts)
         lock_entry = self._update_locks.setdefault(target_key, {"lock": asyncio.Lock(), "refs": 0})
         lock_entry["refs"] += 1
-        
+
         try:
             async with lock_entry["lock"]:
                 try:
@@ -160,7 +160,7 @@ class SlackInteractionAdapter:
         self._stopping = True
         if self._active_tasks:
             logger.info(f"Draining {len(self._active_tasks)} active Slack interactions...")
-            done, pending = await asyncio.wait(self._active_tasks, timeout=self.shutdown_timeout)
+            _done, pending = await asyncio.wait(self._active_tasks, timeout=self.shutdown_timeout)
             if pending:
                 logger.warning(f"{len(pending)} Slack interaction tasks did not finish in time and will be cancelled.")
                 for task in pending: task.cancel()

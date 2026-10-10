@@ -1,4 +1,5 @@
 import os
+
 import psycopg
 import pytest
 from hypothesis import given, settings
@@ -66,11 +67,11 @@ def get_checksum(dsn):
 )
 def test_undo_property(dsn, runtime_dsn, setup_db, ops):
     executor = RowbackExecutor(dsn, runtime_dsn)
-    
-    
+
+
     # 1. Capture initial state
     initial_checksum = get_checksum(dsn)
-    
+
     # 2. Execute random operations in one checkpoint
     sql_statements = []
     for op, val in ops:
@@ -80,24 +81,24 @@ def test_undo_property(dsn, runtime_dsn, setup_db, ops):
             sql_statements.append(f"UPDATE public.prop_users SET val = {val} WHERE id IN (SELECT id FROM public.prop_users ORDER BY random() LIMIT 1);")
         elif op == "DELETE":
             sql_statements.append("DELETE FROM public.prop_users WHERE id IN (SELECT id FROM public.prop_users ORDER BY random() LIMIT 1);")
-            
+
     sql_text = " ".join(sql_statements)
-    
+
     stmt = ClassifiedStatement(sql=sql_text, stmt_class=StatementClass.WRITE_DML, tables=["public.prop_users"], is_multistatement=True)
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
-    
+
     res = executor.execute(eval)
-    
+
     # If the transaction somehow failed (e.g., deadlock or syntax, though unlikely here), we skip
     if res.status != "applied":
         return
-        
-    cp_id = res.checkpoint_id
-    
+
+    _cp_id = res.checkpoint_id
+
     # 3. Undo
     res_undo = executor.execute_undo(res.public_id)
     assert res_undo.status == 'undone'
-    
+
     # 4. Verify checksum matches
     final_checksum = get_checksum(dsn)
     assert final_checksum == initial_checksum

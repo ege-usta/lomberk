@@ -7,10 +7,10 @@ logger = logging.getLogger("rowback.offline_pilot")
 class InMemoryBindingStore:
     def __init__(self):
         self.store: dict[tuple[str, str, str], str] = {}
-    
+
     async def resolve(self, team_id: str, channel_id: str, message_ts: str) -> str | None:
         return self.store.get((team_id, channel_id, message_ts))
-        
+
     def bind(self, team_id: str, channel_id: str, message_ts: str, public_id: str):
         self.store[(team_id, channel_id, message_ts)] = public_id
 
@@ -45,11 +45,11 @@ class OfflineUpdater:
     def __init__(self):
         self.updates = []
         self.event = asyncio.Event()
-        
+
     async def update_message(self, channel_id: str, message_ts: str, text: str):
         self.updates.append((channel_id, message_ts, text))
         self.event.set()
-        
+
     async def wait_for_update(self, timeout=2.0) -> tuple[str, str, str] | None:
         """Waits for a single UI update callback to trigger, or times out."""
         try:

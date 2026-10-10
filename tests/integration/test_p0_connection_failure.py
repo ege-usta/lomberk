@@ -1,11 +1,14 @@
 import os
-import pytest
+
 import psycopg
+import pytest
 from testcontainers.community.postgres import PostgresContainer
+
 from rowback.capture.install import install_rowback
 from rowback.executor import RowbackExecutor
 from rowback.models import ClassifiedStatement, StatementClass
-from rowback.policy import StatementEvaluation, PolicyDecision
+from rowback.policy import PolicyDecision, StatementEvaluation
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -47,20 +50,20 @@ def test_p0_connection_open_failure(dsn, control_dsn, runtime_dsn, setup_db, mon
     broken_dsn = urlunparse((p.scheme, f"{p.username}:{p.password}@{p.hostname}:9999", p.path, p.params, p.query, p.fragment))
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(dsn, broken_dsn)
-    
+
     sql = "INSERT INTO public.test_fail (id, val) VALUES (1, 'fail');"
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
-    
+
     res = executor.execute(eval_result, agent_label="test")
     assert res.status == "failed"
     assert "Connection refused" in res.message or "could not connect" in res.message
-    
+
     # Ledger must say failed
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         assert cur.fetchone()[0] == 'failed'
-        
+
     # Table must be empty
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM public.test_fail WHERE id = 1")
@@ -69,7 +72,7 @@ def test_p0_connection_open_failure(dsn, control_dsn, runtime_dsn, setup_db, mon
 def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(control_dsn, runtime_dsn)
-    
+
     # A CHECK constraint fails on id = 3, so execution starts, the first row (id=2) is
     # written (and captured), and then the statement fails. (A user trigger would make the
     # table non-undoable, and such writes are now held for a person instead of running.)
@@ -78,29 +81,29 @@ def test_p0_execution_rollback(dsn, control_dsn, runtime_dsn, setup_db, monkeypa
 
     sql = "INSERT INTO public.test_fail (id, val) VALUES (2, 'fail'), (3, 'error');"
     from rowback.models import ClassifiedStatement, StatementClass
-    from rowback.policy import StatementEvaluation, PolicyDecision
+    from rowback.policy import PolicyDecision, StatementEvaluation
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
-    
+
     res = executor.execute(eval_result, agent_label="test")
     assert res.status == "failed"
     assert "simulated_error_on_3" in res.message
-    
+
     # Data is not inserted
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM public.test_fail WHERE id IN (2, 3)")
         assert cur.fetchone()[0] == 0
-        
+
         # Verify NO capture record was left behind for id=2 either!
         # Because we rollback the entire transaction!
         cur.execute("SELECT COUNT(*) FROM rowback.row_changes WHERE pk->>'id' = '2'")
         assert cur.fetchone()[0] == 0
-    
+
     # Ledger must say failed
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         assert cur.fetchone()[0] == 'failed'
-        
+
         # Cleanup
         cur.execute("ALTER TABLE public.test_fail DROP CONSTRAINT simulated_error_on_3")
 
@@ -108,27 +111,27 @@ def test_p0_commit_network_loss(dsn, control_dsn, runtime_dsn, setup_db, monkeyp
 
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(control_dsn, runtime_dsn)
-    
+
     # We mock Transaction.__exit__ to raise an error during commit, ONLY for runtime_dsn
     original_exit = psycopg.Transaction.__exit__
     def mock_exit(self_tx, exc_type, exc_val, exc_tb):
         if self_tx.connection.info.user == 'mcp_agent':
             raise psycopg.OperationalError("Simulated network drop during commit")
         return original_exit(self_tx, exc_type, exc_val, exc_tb)
-        
+
     monkeypatch.setattr(psycopg.Transaction, "__exit__", mock_exit)
-    
+
     sql = "INSERT INTO public.test_fail (id, val) VALUES (3, 'unknown');"
     from rowback.models import ClassifiedStatement, StatementClass
-    from rowback.policy import StatementEvaluation, PolicyDecision
+    from rowback.policy import PolicyDecision, StatementEvaluation
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
-    
+
     res = executor.execute(eval_result, agent_label="test")
-    
+
     assert res.status == "unknown"
     assert "Network failure" in res.message
-    
+
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         assert cur.fetchone()[0] == 'approved'
@@ -136,43 +139,43 @@ def test_p0_commit_network_loss(dsn, control_dsn, runtime_dsn, setup_db, monkeyp
 def test_p0_status_check(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(control_dsn, runtime_dsn)
-    
+
     # 1. Test not found
     assert executor.check_status("cp_invalid123") == "not_found"
-    
+
     # 2. Test execution success state (applied)
     sql = "INSERT INTO public.test_fail (id, val) VALUES (10, 'success');"
     from rowback.models import ClassifiedStatement, StatementClass
-    from rowback.policy import StatementEvaluation, PolicyDecision
+    from rowback.policy import PolicyDecision, StatementEvaluation
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
-    
+
     res = executor.execute(eval_result, agent_label="test")
     assert res.status == "applied"
-    
+
     assert executor.check_status(res.public_id) == "applied"
 
     # 3. Test execution executing state via lock
-    # We will manually set a checkpoint to executing and hold a ROW EXCLUSIVE lock on it, 
+    # We will manually set a checkpoint to executing and hold a ROW EXCLUSIVE lock on it,
     # to simulate another backend actively running it.
-    
+
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM rowback.begin_checkpoint('SELECT 1', 'WRITE_DML', 'test', 'system', 'system')")
         row = cur.fetchone()
-        cp_id, pub_id = row[0], row[1]
-        
+        _cp_id, pub_id = row[0], row[1]
+
         # Approve it
         cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (pub_id,))
         token = cur.fetchone()[0]
         conn.commit()
-        
+
         # Claim it (sets it to executing and locks the row if we don't commit)
         cur.execute("SELECT rowback.claim_checkpoint(%s)", (token,))
-        
-        # Now, in a separate connection, check_status should see it as 'executing' 
+
+        # Now, in a separate connection, check_status should see it as 'executing'
         # because it will hit LockNotAvailable
         assert executor.check_status(pub_id) == "busy"
-        
+
         # If we commit, it becomes 'executing' but unlocked, so check_status can read it
         conn.commit()
         assert executor.check_status(pub_id) == "executing"
@@ -180,13 +183,13 @@ def test_p0_status_check(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
 def test_p0_commit_network_loss_after_commit(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(control_dsn, runtime_dsn)
-    
+
     # We patch Transaction.__exit__ to call original_exit successfully,
-    # and THEN raise OperationalError to simulate the connection dropping 
+    # and THEN raise OperationalError to simulate the connection dropping
     # while waiting for the server's ReadyForQuery message after COMMIT.
     import psycopg
     original_exit = psycopg.Transaction.__exit__
-    
+
     runtime_commit_count = 0
     def mocked_exit(self, exc_type, exc_val, exc_tb):
         nonlocal runtime_commit_count
@@ -195,34 +198,34 @@ def test_p0_commit_network_loss_after_commit(dsn, control_dsn, runtime_dsn, setu
             runtime_commit_count += 1
             if runtime_commit_count == 1:
                 raise psycopg.OperationalError("Simulated network loss after commit")
-        
+
     monkeypatch.setattr(psycopg.Transaction, "__exit__", mocked_exit)
-    
+
     sql = "INSERT INTO public.test_fail (id, val) VALUES (4, 'commit_loss_after');"
     from rowback.models import ClassifiedStatement, StatementClass
-    from rowback.policy import StatementEvaluation, PolicyDecision
+    from rowback.policy import PolicyDecision, StatementEvaluation
     stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="")
-    
+
     res = executor.execute(eval_result, agent_label="test")
-    # Even though execution technically completed on DB side, 
+    # Even though execution technically completed on DB side,
     # psycopg raised OperationalError which means executor sees it as outcome_unknown!
     assert res.status == "unknown"
-    
+
     # We can check the true status with check_status which will return 'applied'
     # since it actually committed!
     assert executor.check_status(res.public_id) == "applied"
-    
+
     # Verify data is actually inserted
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM public.test_fail WHERE id = 4")
         assert cur.fetchone()[0] == 1
-        
+
         # Verify exact capture record exists for this operation
         # We need the checkpoint_id. We can get it from public_id.
         cur.execute("SELECT id FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
         cp_id = cur.fetchone()[0]
-        
+
         cur.execute("SELECT op, pk, old_row, new_row FROM rowback.row_changes WHERE checkpoint_id = %s", (cp_id,))
         changes = cur.fetchall()
         assert len(changes) == 1

@@ -1,10 +1,10 @@
 """Production Slack approval path: pending checkpoints are posted by the built-in
 outbox publisher, bindings live in the database (survive restarts), only the bound
 (team, channel, ts) authorizes a click, and the approver's Slack ID is audited."""
-import os
 import asyncio
 import json
 import logging
+import os
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlparse, urlunparse
 
@@ -15,9 +15,9 @@ from testcontainers.community.postgres import PostgresContainer
 import rowback.api
 from rowback.capture.install import install_rowback
 from rowback.config import RowbackConfig
-from rowback.policy import PolicyEngine
 from rowback.ee.slack import UnauthorizedUserError
 from rowback.ee.slack_publisher import SlackPublisher
+from rowback.policy import PolicyEngine
 from rowback.sql.classify import classify_sql
 
 

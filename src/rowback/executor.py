@@ -108,7 +108,7 @@ class RowbackExecutor:
         return True
 
     def _execute_undo(self, public_id: str, agent_label: str) -> ExecutionResult:
-        
+
         try:
             with psycopg.connect(self.dsn, autocommit=False) as conn:
                 try:
@@ -116,8 +116,8 @@ class RowbackExecutor:
                         cur.execute("SELECT rowback.execute_undo(%s, %s)", (public_id, agent_label))
                         result = cur.fetchone()[0]
                         return ExecutionResult(
-                            status='undone', 
-                            public_id=public_id, 
+                            status='undone',
+                            public_id=public_id,
                             rows_affected=result['rows_affected'], message='Undo successful.'
                         )
                 except psycopg.errors.LockNotAvailable:
@@ -145,7 +145,7 @@ class RowbackExecutor:
                 except psycopg.Error as e:
                     # Other postgres errors (foreign key violation, check constraint violation, etc)
                     if e.sqlstate and e.sqlstate.startswith('08'):
-                        raise psycopg.OperationalError(str(e)) # Let it bubble up for outcome_unknown
+                        raise psycopg.OperationalError(str(e)) from e # Let it bubble up for outcome_unknown
                     return ExecutionResult(operation_id=None, status="failed", message=str(e).split('\n')[0], public_id=public_id, rows_affected=0)
         except psycopg.OperationalError as e:
             return ExecutionResult(operation_id=None, status="unknown", message=str(e), public_id=public_id)
@@ -164,7 +164,7 @@ class RowbackExecutor:
             return is_secret(name, self.sensitive_columns)
         fetched_data = []
         for row in rows:
-            row_dict = dict(zip(columns, row))
+            row_dict = dict(zip(columns, row, strict=True))
             for col in columns:
                 if secret(col) and row_dict[col]:
                     row_dict[col] = MASK
@@ -205,20 +205,20 @@ class RowbackExecutor:
     def execute(self, eval_result, agent_label: str = "agent", principal: str = "system", operation_id: str | None = None):
         if not self.dsn or not self.runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required for execution.")
-            
+
         from rowback.policy import PolicyDecision
         from rowback.sentinel import AISentinel
-        
-        
+
+
         safe, reason = AISentinel()._ast_firewall(eval_result.statement.sql)
         if not safe:
             audit("denied", actor=principal, sql=eval_result.statement.sql, reason=reason)
             return ExecutionResult(operation_id=operation_id, status="denied", message=f"Hard Gate Denied: {reason}")
-            
+
         if eval_result.decision == PolicyDecision.DENY:
             audit("denied", actor=principal, sql=eval_result.statement.sql, reason=eval_result.reason)
             return ExecutionResult(operation_id=operation_id, status="denied", message=eval_result.reason)
-            
+
         if eval_result.decision == PolicyDecision.REQUIRE_APPROVAL:
             import psycopg
             try:
@@ -236,7 +236,7 @@ class RowbackExecutor:
                 if e.diag.constraint_name == 'idx_checkpoints_idempotency':
                     return self._resolve_duplicate(principal, operation_id, eval_result.statement.sql)
                 raise
-            
+
         # READ ONLY PATH
         if eval_result.statement.stmt_class.value == "READ":
             import psycopg
@@ -253,7 +253,7 @@ class RowbackExecutor:
                             sens_cols = check_sensitive_columns(ast, self.sensitive_columns)
                             if sens_cols:
                                 raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
-                            
+
                             cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{self.statement_timeout_ms}ms",))
                             cur.execute("SET TRANSACTION READ ONLY")
                             cur.execute(eval_result.statement.sql)
@@ -263,17 +263,17 @@ class RowbackExecutor:
                                 fetched_data = self._mask_and_sanitize_rows(columns, rows)
             except Exception as e:
                 error_msg = _agent_message(e)
-                
+
             if error_msg:
                 return ExecutionResult(operation_id=operation_id, status="failed", message=error_msg)
             return ExecutionResult(status="applied", message="Success", data=fetched_data)
-            
+
         return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, principal, operation_id)
 
     def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str, enforce_row_limit: bool = False, actor: str = "system"):
         import psycopg
-        
-        
+
+
         error_msg = None
         fetched_data = None
         rows_affected = 0
@@ -287,7 +287,7 @@ class RowbackExecutor:
                         cur.execute("SELECT set_config('rowback.checkpoint_id', %s, true)", (str(cp_id),))
                         cur.execute("SELECT set_config('rowback.capability_token', %s, true)", (str(exec_token),))
                         cur.execute("SELECT set_config('rowback.seq', '0', true)")
-                        
+
                         import pglast
 
                         from rowback.sql.classify import (
@@ -296,35 +296,35 @@ class RowbackExecutor:
                         )
                         ast = pglast.parse_sql(sql_to_execute)
                         tables = extract_tables_from_ast(ast)
-                        
+
                         sens_cols = check_sensitive_columns(ast, self.sensitive_columns)
                         if sens_cols:
                             raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
-                        
+
                         for schema, table in tables:
                             if schema in ('rowback', 'rowback_trash', 'information_schema', 'pg_catalog'):
                                 raise Exception(f"Direct DML on system schema {schema} is forbidden.")
                             cur.execute(sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE;").format(sql.Identifier(schema), sql.Identifier(table)))
-                            
+
                             cur.execute("""
-                                SELECT 
-                                    c.oid AS table_oid, 
-                                    r.table_oid AS reg_oid, 
-                                    r.pk_column, 
-                                    t.tgenabled, 
-                                    t.tgtype, 
-                                    t.tgattr, 
-                                    t.tgqual, 
-                                    t.tgfoid, 
+                                SELECT
+                                    c.oid AS table_oid,
+                                    r.table_oid AS reg_oid,
+                                    r.pk_column,
+                                    t.tgenabled,
+                                    t.tgtype,
+                                    t.tgattr,
+                                    t.tgqual,
+                                    t.tgfoid,
                                     p.oid AS expected_foid,
                                     a.attname AS pk_exists,
                                     (
                                         SELECT a2.attname
-                                        FROM pg_index i 
+                                        FROM pg_index i
                                         JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[0]
                                         WHERE i.indrelid = c.oid AND i.indisprimary AND i.indnatts = 1
                                     ) AS actual_pk_column
-                                FROM pg_class c 
+                                FROM pg_class c
                                 JOIN pg_namespace n ON n.oid = c.relnamespace
                                 LEFT JOIN rowback.registered_tables r ON r.schema_name = n.nspname AND r.table_name = c.relname
                                 LEFT JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = 'rowback_capture'
@@ -333,36 +333,36 @@ class RowbackExecutor:
                                 WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'
                             """, (schema, table))
                             row2 = cur.fetchone()
-                            
+
                             if not row2: raise Exception(f"Table {schema}.{table} does not exist.")
-                            
+
                             (c_oid, r_table_oid, pk_column, tgenabled, tgtype, tgattr, tgqual, tgfoid, expected_foid, pk_exists, actual_pk_column) = row2
-                            
+
                             if r_table_oid is None:
                                 raise Exception(f"Table {schema}.{table} is not registered for mutation.")
                             if c_oid != r_table_oid:
                                 raise Exception(f"Registration mismatch for {schema}.{table}: OID has changed.")
-                            
+
                             if pk_exists is None:
                                 raise Exception(f"Primary key column '{pk_column}' does not exist on table {schema}.{table}.")
-                                
+
                             if actual_pk_column is None:
                                 raise Exception(f"Table {schema}.{table} must have exactly one single-column primary key.")
                             if actual_pk_column != pk_column:
                                 raise Exception(f"Registered primary key '{pk_column}' does not match actual primary key '{actual_pk_column}' on table {schema}.{table}.")
-                            
+
                             if tgenabled is None:
                                 raise Exception(f"Trigger missing on {schema}.{table}.")
                             tge = tgenabled.decode('utf-8') if isinstance(tgenabled, bytes) else str(tgenabled)
                             if tge not in ('O', 'A'):
                                 raise Exception(f"Trigger disabled or replica-only on {schema}.{table}.")
-                            
+
                             if tgfoid != expected_foid or expected_foid is None:
                                 raise Exception(f"Trigger function OID mismatch for {schema}.{table}. Suspected spoofing.")
-                            
+
                             if tgtype != 29:
                                 raise Exception(f"Trigger type mismatch on {schema}.{table}. Expected AFTER EACH ROW INSERT/UPDATE/DELETE.")
-                                
+
                             if tgqual is not None:
                                 raise Exception(f"Trigger condition (WHEN) is not allowed on {schema}.{table}.")
                             # Rows reached through inheritance children or rewrite rules never pass
@@ -383,7 +383,7 @@ class RowbackExecutor:
                                 # --allow-triggers, so this write could not be undone.
                                 raise HoldForApproval(f"Table {schema}.{table} has its own triggers, so this write can't be undone. "
                                                       "If they only change the row itself (like updated_at), register it with --allow-triggers.")
-                                
+
                             if tgattr and str(tgattr) != '' and str(tgattr) != 'b\'\'':
                                 raise Exception(f"Trigger column restrictions (UPDATE OF) are not allowed on {schema}.{table}.")
 
@@ -391,7 +391,7 @@ class RowbackExecutor:
                             unprotected = cur.fetchone()[0]
                             if unprotected:
                                 raise Exception(f"Write on {schema}.{table} could cascade into {unprotected}, which is not registered with Rowback; its rows could not be undone.")
-                            
+
                         if enforce_row_limit and self.protected_tables:
                             # FK cascades can reach a protected table the SQL never names.
                             cur.execute("""
@@ -414,7 +414,7 @@ class RowbackExecutor:
                             columns = [desc[0] for desc in cur.description]
                             rows = cur.fetchmany(100)
                             fetched_data = self._mask_and_sanitize_rows(columns, rows)
-                                
+
                         rows_affected = max(cur.rowcount, 0)
                         limit = self.max_rows_without_approval
                         if enforce_row_limit and limit is not None:
@@ -437,11 +437,11 @@ class RowbackExecutor:
             return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="approval_required", message=f"{e} Write was rolled back and requires explicit approval.")
         except Exception as e:
             error_msg = _agent_message(e)
-            
+
         if error_msg:
             if execution_completed:
                 return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="unknown", message="Network failure during commit. Checkpoint state is unknown.")
-            
+
             try:
                 with psycopg.connect(self.dsn, autocommit=True) as fail_conn:
                     with fail_conn.cursor() as fail_cur:
@@ -449,7 +449,7 @@ class RowbackExecutor:
             except Exception as e:
                 # The write itself failed; only the bookkeeping did too. Surface it so an operator can close the checkpoint.
                 logger.error("Could not mark checkpoint %s as failed: %s", public_id, type(e).__name__)
-                
+
             audit("failed", actor=actor, public_id=public_id, sql=sql_to_execute, error=error_msg)
             safe_error_msg = error_msg if "exec_token" not in error_msg else "An error occurred during execution."
             return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="failed", message=safe_error_msg)
@@ -470,7 +470,7 @@ class RowbackExecutor:
                         row = cur.fetchone()
                         cp_id = row[0]
                         public_id = row[1]
-                    
+
                         cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                         exec_token = cur.fetchone()[0]
                 except psycopg.errors.UniqueViolation as e:
@@ -487,8 +487,8 @@ class RowbackExecutor:
     def execute_pending(self, public_id: str, actor: str = "unknown_approver"):
         import psycopg
         try:
-        
-        
+
+
             with psycopg.connect(self.dsn, autocommit=False) as conn:
                 with conn.transaction(), conn.cursor() as cur:
                     cur.execute("SELECT id, sql_text, status FROM rowback.get_pending_checkpoint(%s)", (public_id,))

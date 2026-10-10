@@ -4,22 +4,23 @@ import inspect
 import logging
 import os
 import secrets
-from datetime import datetime
-
-logger = logging.getLogger(__name__)
-
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from starlette.routing import Route
 
 from rowback.audit import audit
 from rowback.config import load_config, pro_features, weak_key_reason
 from rowback.executor import RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sentinel import AISentinel
+from rowback.server import build_mcp
 from rowback.sql.classify import classify_sql
+
+logger = logging.getLogger(__name__)
 
 # Global references for lifespan
 _executor_instance = None
@@ -42,23 +43,23 @@ _PRO = False  # a valid Rowback Pro license is present
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _SESSION_SECRET, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY, _PRO
-    
+
     # Local registry ownership for safe and strict shutdown drainage
     local_db_workers = set()
     local_shutdown_event = asyncio.Event()
     publisher_task = None
-    
-    # Still attach to app.state for testing and observability, 
+
+    # Still attach to app.state for testing and observability,
     # but internal processing strictly uses the local references.
     app.state._db_workers = local_db_workers
     app.state._shutdown_event = local_shutdown_event
-    
+
     config = load_config()
     dsn = os.environ.get(config.database.agent_dsn_env)
-    
+
     agent_key = os.environ.get("ROWBACK_API_KEY")
     admin_key = os.environ.get("ROWBACK_ADMIN_KEY")
-    
+
     if not dsn:
         raise ValueError(f"Startup Refusal: Database DSN must be provided via {config.database.agent_dsn_env}.")
     if not agent_key or not admin_key:
@@ -71,7 +72,7 @@ async def lifespan(app: FastAPI):
         for env, key in (("ROWBACK_API_KEY", agent_key), ("ROWBACK_ADMIN_KEY", admin_key)):
             if reason := weak_key_reason(key):
                 raise ValueError(f"Startup Refusal: {env} {reason}. Generate one with: openssl rand -hex 32")
-        
+
     _API_KEY = agent_key
     _ADMIN_KEY = admin_key
     _SESSION_SECRET = secrets.token_bytes(32)
@@ -89,46 +90,46 @@ async def lifespan(app: FastAPI):
         _ALLOW_ADMIN_KEY = bool(config.sso.allow_admin_key)
     elif config.sso.allow_admin_key is False:
         raise ValueError("Startup Refusal: sso.allow_admin_key is false but no sso.issuer is configured.")
-        
+
     try:
         admin_dsn = os.environ.get(config.database.admin_dsn_env)
         if not admin_dsn:
             raise ValueError('Startup Refusal: Admin DSN missing')
-            
+
         import psycopg
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)")
                 control_user, control_super = cur.fetchone()
-                
+
         with psycopg.connect(dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)")
                 runtime_user, runtime_super = cur.fetchone()
-                
+
         if control_user == runtime_user:
             raise ValueError("Startup Refusal: Admin DSN and Agent DSN must resolve to distinct database roles.")
         if control_super:
             raise ValueError("Startup Refusal: Admin role must not be a superuser.")
         if runtime_super:
             raise ValueError("Startup Refusal: Agent role must not be a superuser.")
-            
+
         _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns)
         _policy_engine_instance = PolicyEngine(config)
-        
+
         # Production Slack Transport Wiring
         if slack_enabled:
             app_token = os.environ.get("ROWBACK_SLACK_APP_TOKEN")
             bot_token = os.environ.get("ROWBACK_SLACK_BOT_TOKEN")
-            
+
             if not app_token or not bot_token:
                 raise ValueError("Startup Refusal: ROWBACK_SLACK_APP_TOKEN and ROWBACK_SLACK_BOT_TOKEN are required when Slack is enabled.")
-                
+
             if not hasattr(config, "slack") or not config.slack.admin_allowlist:
                 raise ValueError("Startup Refusal: config.slack.admin_allowlist is missing or empty.")
             if not config.slack.team_allowlist:
                 raise ValueError("Startup Refusal: config.slack.team_allowlist is missing or empty.")
-                
+
             slack_update_cb = getattr(app.state, "slack_update_callback", None)
             slack_resolver = getattr(app.state, "slack_target_resolver", None)
             # Built-in publisher mode: config names a channel and nothing is injected.
@@ -138,7 +139,7 @@ async def lifespan(app: FastAPI):
                     raise ValueError("Startup Refusal: slack_update_callback dependency missing or not an async function.")
                 if not slack_resolver or not inspect.iscoroutinefunction(slack_resolver):
                     raise ValueError("Startup Refusal: slack_target_resolver dependency missing or not an async function.")
-                
+
             try:
                 from slack_sdk.socket_mode.aiohttp import SocketModeClient
                 from slack_sdk.web.async_client import AsyncWebClient
@@ -149,7 +150,7 @@ async def lifespan(app: FastAPI):
                 def make_callbacks(executor, policy, resolver, updater, workers_set, shutdown_evt):
                     async def resolve_cb(team, channel, ts):
                         return await resolver(team, channel, ts)
-                    
+
                     async def _run_tracked(func, *args):
                         if shutdown_evt.is_set():
                             from rowback.ee.slack import TaskCapacityExceededError
@@ -157,7 +158,7 @@ async def lifespan(app: FastAPI):
                         if len(workers_set) >= 50:
                             from rowback.ee.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("DB worker capacity exceeded. Server is busy.")
-                        
+
                         t = asyncio.create_task(asyncio.to_thread(func, *args))
                         workers_set.add(t)
                         def _done_cb(fut):
@@ -166,23 +167,23 @@ async def lifespan(app: FastAPI):
                                 logger.error(f"Background DB worker failed: {type(fut.exception()).__name__}")
                         t.add_done_callback(_done_cb)
                         return await asyncio.shield(t)
-                    
+
                     async def status_cb(pid):
                         return await _run_tracked(executor.check_status, pid)
-                        
+
                     async def approve_cb(pid):
                         res = await _run_tracked(executor.execute_pending, pid, slack_actor.get() or "slack")
                         return {"status": res.status}
-                        
+
                     async def reject_cb(pid):
                         await _run_tracked(executor.reject, pid, slack_actor.get() or "slack")
                         return {"status": "denied"}
-                        
+
                     async def update_cb(channel, ts, msg):
                         return await updater(channel, ts, msg)
-                        
+
                     return resolve_cb, status_cb, approve_cb, reject_cb, update_cb
-                
+
                 web_factory = getattr(app.state, "slack_web_client_factory", None) or AsyncWebClient
                 if use_publisher:
                     from rowback.ee.slack_publisher import SlackPublisher
@@ -196,7 +197,7 @@ async def lifespan(app: FastAPI):
                 resolve_cb, status_cb, approve_cb, reject_cb, update_cb = make_callbacks(
                     _executor_instance, _policy_engine_instance, slack_resolver, slack_update_cb, local_db_workers, local_shutdown_event
                 )
-                
+
                 adapter = SlackInteractionAdapter(
                     admin_allowlist=set(config.slack.admin_allowlist),
                     team_allowlist=set(config.slack.team_allowlist) if hasattr(config.slack, "team_allowlist") else set(),
@@ -206,12 +207,12 @@ async def lifespan(app: FastAPI):
                     status_callback=status_cb,
                     slack_update_callback=update_cb
                 )
-                
+
                 def client_factory(token: str):
                     return SocketModeClient(app_token=token, web_client=web_factory(token=bot_token))
-                
+
                 factory_override = getattr(app.state, "slack_client_factory", None)
-                
+
                 _slack_transport_instance = SlackTransport(
                     app_token=app_token,
                     business_adapter=adapter,
@@ -247,13 +248,13 @@ async def lifespan(app: FastAPI):
         if _slack_transport_instance:
             await _slack_transport_instance.disconnect()
             _slack_transport_instance = None
-            
+
         if local_db_workers:
             logger.info(f"Draining {len(local_db_workers)} outstanding DB workers...")
-            done, pending = await asyncio.wait(local_db_workers, timeout=5.0)
+            _done, pending = await asyncio.wait(local_db_workers, timeout=5.0)
             if pending:
                 logger.error(f"Shutdown timeout: {len(pending)} DB workers remain outstanding/unknown.")
-            
+
         _executor_instance = None
         _policy_engine_instance = None
 
@@ -293,10 +294,6 @@ def _mcp_deps():
         raise RuntimeError("Gateway not initialized")
     return _executor_instance, _policy_engine_instance
 
-
-from starlette.routing import Route
-
-from rowback.server import build_mcp
 
 _mcp_gate = _AgentKeyGate()
 app.router.routes.append(Route("/mcp", endpoint=_mcp_gate))
@@ -355,7 +352,7 @@ class ExecuteRequest(BaseModel):
 
 @app.post("/v1/execute")
 def execute_query(
-    req: ExecuteRequest, 
+    req: ExecuteRequest,
     api_key: str = Depends(verify_api_key),
     executor: RowbackExecutor = Depends(get_executor),
     policy_engine: PolicyEngine = Depends(get_policy_engine)
@@ -372,15 +369,15 @@ def execute_query(
         # Note: the hard gate evaluation is done inside executor.execute()
         # It will return 'denied' if AST fails
         exec_res = executor.execute(
-            eval_result, 
+            eval_result,
             agent_label=req.agent_label,
             principal="api_user",
             operation_id=req.operation_id
         )
-        
+
         if exec_res.status == "failed" and exec_res.error_code == "conflict":
             raise HTTPException(status_code=409, detail=exec_res.message)
-            
+
         results.append({
             "sql": stmt.sql,
             "classification": stmt.stmt_class.value,
@@ -428,7 +425,7 @@ def check_checkpoint_status(
 @app.post("/v1/checkpoints/{public_id}/approve")
 
 def approve_checkpoint(
-    public_id: str, 
+    public_id: str,
     actor: str = Depends(verify_approver),
     executor: RowbackExecutor = Depends(get_executor)
 ):
@@ -451,18 +448,18 @@ def approve_checkpoint(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.post("/v1/checkpoints/{public_id}/reject")
 def reject_checkpoint(
-    public_id: str, 
+    public_id: str,
     actor: str = Depends(verify_approver),
     executor: RowbackExecutor = Depends(get_executor)
 ):
     if not executor.reject(public_id, actor=actor):
         raise HTTPException(status_code=404, detail="Token not found or not pending")
     return {"status": "denied"}
-            
+
 _UNDO_HTTP_STATUS = {"already_undone": 409, "conflict": 409, "busy": 423, "denied": 404, "failed": 400}
 
 

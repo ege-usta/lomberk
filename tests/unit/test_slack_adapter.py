@@ -1,6 +1,13 @@
-import pytest
 import asyncio
-from rowback.ee.slack import SlackInteractionAdapter, UnauthorizedUserError, InvalidPayloadError, TaskCapacityExceededError
+
+import pytest
+
+from rowback.ee.slack import (
+    InvalidPayloadError,
+    SlackInteractionAdapter,
+    UnauthorizedUserError,
+)
+
 
 @pytest.fixture
 def mock_callbacks():
@@ -12,7 +19,7 @@ def mock_callbacks():
             self.current_state = "pending"
             self.resolver_event = asyncio.Event()
             self.resolver_event.set()
-            
+
         async def resolve_target(self, team, channel, ts):
             await self.resolver_event.wait()
             if channel == "valid_chan" and ts == "valid_ts":
@@ -30,11 +37,11 @@ def mock_callbacks():
                     return {"status": "applied"}
                 else:
                     return {"status": "conflict"}
-            
+
         async def reject(self, public_id):
             self.current_state = "denied"
             return {"status": "denied"}
-            
+
         async def status(self, public_id):
             return self.current_state
 
@@ -92,12 +99,12 @@ async def test_slack_concurrent_double_click(mock_callbacks):
         "container": {"channel_id": "valid_chan", "message_ts": "valid_ts"},
         "actions": [{"action_id": "approve_button", "value": "cp_123"}]
     }
-    
+
     ack1 = await adapter.handle_interaction(payload)
     ack2 = await adapter.handle_interaction(payload)
     assert ack1["acknowledged"] is True
     assert ack2["acknowledged"] is True
-    
+
     if adapter._active_tasks: await asyncio.gather(*adapter._active_tasks)
     await adapter.shutdown()
     assert mock_callbacks.approve_calls == 2
@@ -113,13 +120,13 @@ async def test_slack_state_mappings(mock_callbacks):
         "container": {"channel_id": "valid_chan", "message_ts": "valid_ts"},
         "actions": [{"action_id": "approve_button", "value": "cp_123"}]
     }
-    
+
     mock_callbacks.current_state = "approved"
     await adapter.handle_interaction(payload)
     if adapter._active_tasks: await asyncio.gather(*adapter._active_tasks)
     await adapter.shutdown()
     assert ":white_check_mark: Checkpoint cp_123 approved, pending execution verification." in mock_callbacks.update_calls[-1][2]
-    
+
     adapter._stopping = False
     mock_callbacks.current_state = "unknown"
     await adapter.handle_interaction(payload)
@@ -137,14 +144,14 @@ async def test_slack_state_mappings(mock_callbacks):
 @pytest.mark.asyncio
 async def test_slack_out_of_order_callbacks_with_barrier(mock_callbacks):
     adapter = SlackInteractionAdapter({"U123"}, {"T1"}, mock_callbacks.resolve_target, mock_callbacks.approve, mock_callbacks.reject, mock_callbacks.status, mock_callbacks.update)
-    payload = {
+    _payload = {
         "team": {"id": "T1"}, "user": {"id": "U123"},
         "container": {"channel_id": "valid_chan", "message_ts": "valid_ts"},
         "actions": [{"action_id": "approve_button", "value": "cp_123"}]
     }
 
     mock_callbacks.current_state = "busy"
-    
+
     # Task 1 starts
     # Override approve to not touch current_state
     async def mock_app(pid): return {"status": "conflict"}
@@ -152,16 +159,16 @@ async def test_slack_out_of_order_callbacks_with_barrier(mock_callbacks):
     t1 = asyncio.create_task(adapter._process_interaction("T1", "valid_chan", "valid_ts", "cp_123", is_approve=True))
     # Give it a moment to lock and read 'busy'
     await asyncio.sleep(0.01)
-    
+
     # Task 2 starts. It waits for the lock.
     t2 = asyncio.create_task(adapter._process_interaction("T1", "valid_chan", "valid_ts", "cp_123", is_approve=True))
-    
+
     # Task 1 finishes its update, releasing lock.
     # Task 2 acquires lock. By this time current_state is 'applied'.
     mock_callbacks.current_state = "applied"
-    
+
     await asyncio.gather(t1, t2)
-    
+
     # The second update MUST be "applied". Task 1's "busy" should not overwrite Task 2.
     assert len(mock_callbacks.update_calls) == 2
     assert "busy" in mock_callbacks.update_calls[0][2]

@@ -16,7 +16,7 @@ class AISentinel:
         import pglast
         violations = []
         dml_nodes = []
-        
+
         ALLOWED_STMTS = {'RawStmt', 'SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt'}
         # Pure built-ins only. Anything that touches GUCs, files, sessions, sleep,
         # sequences or other databases (set_config, pg_*, dblink, lo_*, nextval...) stays banned.
@@ -33,11 +33,11 @@ class AISentinel:
         def traverse(node):
             if isinstance(node, dict):
                 node_type = node.get('@')
-                
+
                 if node_type and node_type.endswith('Stmt'):
                     if node_type not in ALLOWED_STMTS:
                         violations.append(f"Command {node_type} is structurally banned")
-                
+
                 if node_type == 'SelectStmt':
                     if node.get('intoClause') is not None:
                         violations.append("SELECT INTO is structurally banned")
@@ -47,13 +47,13 @@ class AISentinel:
                 elif node_type == 'DeleteStmt':
                     if node.get('whereClause') is None:
                         violations.append("DELETE statement missing WHERE clause")
-                
+
                 if node_type in ['InsertStmt', 'UpdateStmt', 'DeleteStmt']:
                     dml_nodes.append(node_type)
                     relation = node.get('relation')
                     if relation and isinstance(relation, dict) and relation.get('schemaname') is None:
                         violations.append(f"Unqualified relation write in {node_type} (missing schema)")
-                        
+
                 if node_type == 'RangeVar':
                     # System catalogs hold copies of table data: pg_stats keeps sampled column
                     # values (secrets included), pg_proc function sources, user mappings passwords.
@@ -69,8 +69,8 @@ class AISentinel:
                     schema_ok = len(parts) == 1 or (len(parts) == 2 and parts[0] == 'pg_catalog')
                     if not (schema_ok and parts[-1] in ALLOWED_FUNCS):
                         violations.append(f"Function {'.'.join(str(p) for p in parts)}() is not on the allowlist")
-                            
-                for k, v in node.items():
+
+                for v in node.values():
                     traverse(v)
             elif isinstance(node, (list, tuple)):
                 for item in node:
@@ -90,7 +90,7 @@ class AISentinel:
             ast = pglast.parse_sql(sql)
             if len(ast) > 1:
                 return False, "AST Firewall: Multiple stacked SQL statements detected."
-                
+
             for raw_stmt in ast:
                 traverse(raw_stmt(skip_none=True))
                 # Only the top-level statement may write. A write nested in a CTE or
@@ -98,15 +98,15 @@ class AISentinel:
                 top_is_dml = type(raw_stmt.stmt).__name__ in ('InsertStmt', 'UpdateStmt', 'DeleteStmt')
                 if len(dml_nodes) > (1 if top_is_dml else 0):
                     violations.append("Writes nested inside another statement (e.g. data-modifying CTE) are structurally banned")
-            
+
             if violations:
                 return False, "AST Firewall: " + " | ".join(violations)
-                
+
         except pglast.parser.ParseError as e:
             return False, f"AST Firewall: Malformed SQL syntax. {e!s}"
         except Exception as e:
             return False, f"AST Firewall: Unexpected error during parsing: {e!s}"
-            
+
         return True, ""
 
     def evaluate_intent(self, sql: str, tables: list[str]) -> tuple[bool, str]:
@@ -121,7 +121,7 @@ class AISentinel:
             if "balance = balance *" in lowered or "salary = salary *" in lowered or "drop" in lowered:
                 return False, "Sentinel Mock: Suspicious multiplier or structural change detected."
             return True, "Sentinel Mock: No anomalies detected."
-            
+
         system_prompt = (
             "You are a PostgreSQL security sentinel. Analyze the SQL query executed by an autonomous AI agent. "
             "Determine if the query represents financial sabotage, accidental logic errors (e.g. missing WHERE clause), "
@@ -152,7 +152,7 @@ class AISentinel:
                 {"role": "user", "content": user_content}
             ]
         }
-        
+
         req = urllib.request.Request(
             "https://api.openai.com/v1/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -162,7 +162,7 @@ class AISentinel:
             },
             method="POST"
         )
-        
+
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 res_data = json.loads(response.read().decode())

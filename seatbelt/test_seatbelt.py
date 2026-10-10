@@ -1,9 +1,9 @@
 """Run: python3 -m unittest seatbelt/test_seatbelt.py  (stdlib only)"""
+import importlib.util
 import json
 import pathlib
 import subprocess
 import sys
-import importlib.util
 import unittest
 
 HOOK = pathlib.Path(__file__).parent / "hooks" / "seatbelt.py"
@@ -96,7 +96,7 @@ class Seatbelt(unittest.TestCase):
         self.assertIsNotNone(seatbelt.check({"tool_name": "Bash", "tool_input": {"command": bomb}}))
 
     def test_hook_protocol(self):
-        run = lambda payload, env=None: subprocess.run(  # noqa: E731
+        run = lambda payload, env=None: subprocess.run(
             [sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env)
         out = run({"tool_name": "Bash", "tool_input": {"command": "dropdb prod"}})
         decision = json.loads(out.stdout)["hookSpecificOutput"]

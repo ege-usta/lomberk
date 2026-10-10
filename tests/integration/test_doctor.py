@@ -1,5 +1,6 @@
 """rowback doctor: every problem gets a plain message and a fix, and the exit code says if it's safe to start."""
 import os
+
 import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer

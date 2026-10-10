@@ -33,6 +33,30 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/rowback"]
 
+[tool.ruff]
+# Pin the ruleset so lint is deterministic and the project owns its own rules
+# (ruff's ambient default pulls in opinionated families this code never opted into).
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# High-signal bug, import and modernization rules. Style rules that fight a
+# deliberate design decision are off, each with a reason.
+select = ["F", "E4", "E7", "E9", "W", "I", "B", "UP", "RUF", "PERF", "PIE", "T10"]
+ignore = [
+    "BLE001",  # blind `except` is deliberate: the seatbelt and sentinel fail closed and must never crash the caller
+    "B008",    # FastAPI puts Depends()/Query() in argument defaults by design (see CLAUDE.md)
+    "B023",    # loop-variable-in-closure false positives in parametrized tests
+    "E701",    # this codebase deliberately uses terse single-line `if x: return y` statements
+    "E702",    # same: a couple of intentional one-line compound statements
+    "E731",    # assigning a lambda to a local name is fine and reads clearly here
+    "E741",    # short names like `l`/`e` are fine in tight local scopes
+    "RUF003",  # "ambiguous" unicode lives only in Turkish/prose comments, which is intentional
+    "UP042",   # (str, Enum) is intentional; migrating to StrEnum would change str() output
+    "RUF043",  # pytest.raises patterns in tests are intentional literal substrings
+    "PERF401", # these are conditional appends in cold paths; a comprehension reads worse
+]
+
 [tool.uv]
 dev-dependencies = [
     "httpx>=0.28",

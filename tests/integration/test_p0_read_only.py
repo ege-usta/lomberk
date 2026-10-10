@@ -1,9 +1,12 @@
 import os
-import pytest
+
 import psycopg
+import pytest
 from testcontainers.community.postgres import PostgresContainer
+
 from rowback.capture.install import install_rowback
 from rowback.executor import RowbackExecutor
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -39,7 +42,7 @@ def setup_db(dsn):
         cur.execute("INSERT INTO public.read_users (id, name, password) VALUES (1, 'alice', 'secret');")
         cur.execute("GRANT SELECT ON public.read_users TO mcp_agent;")
         cur.execute("GRANT INSERT, UPDATE, DELETE ON public.read_users TO mcp_agent;")
-        
+
         # A function that attempts to write
         cur.execute("""
             CREATE OR REPLACE FUNCTION public.attempt_write() RETURNS INT AS $$
@@ -55,24 +58,24 @@ def test_p0_read_only_path(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch)
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(control_dsn, runtime_dsn)
 
-    from rowback.sql.classify import classify_sql
-    from rowback.policy import PolicyEngine
     from rowback.config import load_config
+    from rowback.policy import PolicyEngine
+    from rowback.sql.classify import classify_sql
     policy = PolicyEngine(config=load_config())
-    
+
     # We will verify that transaction_read_only is 'on'
     stmts = classify_sql("SELECT current_setting('transaction_read_only');")
     eval_result = policy.evaluate(stmts[0])
     res = executor.execute(eval_result, agent_label="test")
-    
+
     assert res.status == "applied"
     assert res.data[0]['current_setting'] == 'on'
-    
+
     # Verify statement_timeout works
     stmts = classify_sql("SELECT pg_sleep(6);")
     eval_result = policy.evaluate(stmts[0])
     res = executor.execute(eval_result, agent_label="test")
-    
+
     assert res.status == "failed"
     assert "canceling statement due to statement timeout" in res.message.lower()
 
@@ -83,12 +86,12 @@ def test_p0_read_only_db_level_enforcement(dsn, control_dsn, runtime_dsn, setup_
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(control_dsn, runtime_dsn)
     from rowback.models import ClassifiedStatement, StatementClass
-    from rowback.policy import StatementEvaluation, PolicyDecision
-    
+    from rowback.policy import PolicyDecision, StatementEvaluation
+
     stmt = ClassifiedStatement(sql="SELECT public.attempt_write();", stmt_class=StatementClass.READ, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Bypassed AST")
-    
+
     res = executor.execute(eval_result, agent_label="test")
-    
+
     assert res.status == "failed"
     assert "cannot execute INSERT in a read-only transaction" in res.message or "read-only" in res.message

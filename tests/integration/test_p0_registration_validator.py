@@ -1,11 +1,14 @@
 import os
-import pytest
+
 import psycopg
+import pytest
 from testcontainers.community.postgres import PostgresContainer
+
 from rowback.capture.install import install_rowback
 from rowback.executor import RowbackExecutor
 from rowback.models import ClassifiedStatement, StatementClass
-from rowback.policy import StatementEvaluation, PolicyDecision
+from rowback.policy import PolicyDecision, StatementEvaluation
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -45,28 +48,28 @@ def get_stmt(sql):
 def test_p0_registration_validator_strict(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
     monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     executor = RowbackExecutor(control_dsn, runtime_dsn)
-    
+
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.test_reg (id INT PRIMARY KEY, val TEXT);")
         cur.execute("SELECT rowback.register_table('public', 'test_reg', 'id', 'mcp_agent');")
-        
+
     res = executor.execute(get_stmt("INSERT INTO public.test_reg (id, val) VALUES (1, 'val');"), agent_label="test")
     assert res.status == "applied"
-    
+
     # 1. Disable trigger to replica-only ('O' to 'R')
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE public.test_reg ENABLE REPLICA TRIGGER rowback_capture;")
     res = executor.execute(get_stmt("INSERT INTO public.test_reg (id, val) VALUES (2, 'val');"), agent_label="test")
     assert res.status == "failed"
     assert "Trigger disabled or replica-only" in res.message
-    
+
     # 2. Disable trigger completely ('D')
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE public.test_reg DISABLE TRIGGER rowback_capture;")
     res = executor.execute(get_stmt("INSERT INTO public.test_reg (id, val) VALUES (2, 'val');"), agent_label="test")
     assert res.status == "failed"
     assert "Trigger disabled or replica-only" in res.message
-    
+
     # 3. OID mismatch
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP TABLE public.test_reg;")
@@ -76,7 +79,7 @@ def test_p0_registration_validator_strict(dsn, control_dsn, runtime_dsn, setup_d
     res = executor.execute(get_stmt("INSERT INTO public.test_reg (id, val) VALUES (2, 'val');"), agent_label="test")
     assert res.status == "failed"
     assert "Registration mismatch" in res.message and "OID has changed" in res.message
-    
+
     # 4. Dropped PK column
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT rowback.register_table('public', 'test_reg', 'id', 'mcp_agent');")
@@ -133,7 +136,7 @@ def test_p0_registration_validator_strict(dsn, control_dsn, runtime_dsn, setup_d
         cur.execute("CREATE TRIGGER rowback_capture AFTER INSERT OR UPDATE OF val OR DELETE ON public.test_reg6 FOR EACH ROW EXECUTE FUNCTION rowback.capture_row_change();")
     res = executor.execute(get_stmt("INSERT INTO public.test_reg6 (id, val) VALUES (6, 'val');"), agent_label="test")
     assert res.status == "failed"
-    # Actually UPDATE OF changes tgtype (not 29 anymore!), so it might fail on tgtype or tgattr. 
+    # Actually UPDATE OF changes tgtype (not 29 anymore!), so it might fail on tgtype or tgattr.
     # Just check it failed.
     assert res.status == "failed"
 

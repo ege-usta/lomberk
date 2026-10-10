@@ -122,7 +122,7 @@ def test_sentinel_fence_is_an_unpredictable_per_request_nonce(monkeypatch):
     assert len(msgs) == 2
     fences = [re.search(r"--([0-9a-f]{32})-SQL--", m).group(1) for m in msgs]
     assert fences[0] != fences[1]  # a fresh nonce each request, not a fixed marker
-    for m, fence in zip(msgs, fences):
+    for m, fence in zip(msgs, fences, strict=True):
         assert "ROWBACK_SQL" not in m          # the old public marker is gone
         assert fence not in attack             # the agent could not have embedded the real fence
         assert attack in m                     # its injected text is carried only as data

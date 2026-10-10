@@ -1,6 +1,7 @@
 """A write Rowback lets through must be fully captured. Inheritance children and rewrite
 rules move rows the capture trigger never sees, so such tables are refused before the write."""
 import os
+
 import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer

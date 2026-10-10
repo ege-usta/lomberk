@@ -1,11 +1,13 @@
 import os
-import pytest
+
 import psycopg
+import pytest
 from testcontainers.community.postgres import PostgresContainer
 
 from rowback.capture.install import install_rowback
 from rowback.executor import RowbackExecutor
-from rowback.models import ClassifiedStatement, StatementClass, PolicyDecision, StatementEvaluation
+from rowback.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -29,7 +31,7 @@ def setup_db(dsn, runtime_dsn):
         cur.execute("DROP ROLE IF EXISTS rowback_control")
         cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
-    
+
     install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:

@@ -1,17 +1,17 @@
-import pytest
-import psycopg
 import json
 import os
 import urllib.error
+
+import psycopg
+import pytest
 from fastapi.testclient import TestClient
-
-from rowback.models import ClassifiedStatement, StatementClass, StatementEvaluation, PolicyDecision
-
 from testcontainers.community.postgres import PostgresContainer
 
 from rowback.api import app
 from rowback.capture.install import install_rowback
 from rowback.executor import RowbackExecutor
+from rowback.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -35,7 +35,7 @@ def setup_db(dsn, runtime_dsn):
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
         cur.execute("DROP ROLE IF EXISTS rowback_control")
         cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-    
+
     install_rowback(dsn, control_role='rowback_control', agent_role='mcp_agent')
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.users (id SERIAL PRIMARY KEY, data TEXT, role TEXT, password TEXT)")
@@ -46,7 +46,7 @@ def setup_db(dsn, runtime_dsn):
 
 def test_llm_safe_boolean_mock(monkeypatch):
     from rowback.sentinel import AISentinel
-    
+
     payloads = [
         {"safe": "false", "reason": "string false"},
         {"safe": 1, "reason": "int 1"},
@@ -54,19 +54,19 @@ def test_llm_safe_boolean_mock(monkeypatch):
         {"reason": "missing safe"},
         "invalid_json"
     ]
-    
+
     for p in payloads:
         class MockResponse:
             def read(self):
                 return json.dumps({"choices": [{"message": {"content": json.dumps(p) if isinstance(p, dict) else p}}]}).encode()
             def __enter__(self): return self
             def __exit__(self, *args): pass
-            
+
         def mock_urlopen(*args, **kwargs):
             return MockResponse()
-            
+
         monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
-        
+
         sentinel = AISentinel()
         sentinel.api_key = "test"
         safe, reason = sentinel.evaluate_intent("SELECT 1", [])
@@ -78,13 +78,13 @@ def test_timeout_mock(monkeypatch):
     def mock_timeout(*args, **kwargs):
         raise urllib.error.URLError("Timeout")
     monkeypatch.setattr("urllib.request.urlopen", mock_timeout)
-    
+
     sentinel = AISentinel()
     sentinel.api_key = "test"
     safe, reason = sentinel.evaluate_intent("SELECT 1", [])
     assert safe is False
     assert "Network/API failure" in reason
-    
+
 
 def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
     monkeypatch.setenv("ROWBACK_AGENT_DSN", runtime_dsn)
@@ -94,7 +94,7 @@ def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
     monkeypatch.setenv("ROWBACK_ADMIN_DSN", admin_dsn)
     monkeypatch.setenv("ROWBACK_API_KEY", "agent")
     monkeypatch.setenv("ROWBACK_ADMIN_KEY", "admin")
-    
+
     # Mock config
     import rowback.config
     original_load = rowback.config.load_config
@@ -104,25 +104,25 @@ def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
         cfg.protected_tables = ["public.users"]
         return cfg
     monkeypatch.setattr(rowback.config, "load_config", mock_load)
-    
+
     import rowback.api
     rowback.api._executor_instance = None
     rowback.api._policy_engine_instance = None
-    
+
     with TestClient(app) as client:
         # Step 1: Agent tries valid DML write
         resp = client.post("/v1/execute", json={"sql": "UPDATE public.users SET data = 'updated' WHERE id = 1;"}, headers={"X-API-Key": "agent"})
         assert resp.status_code == 200
         res_data = resp.json()["results"][0]
         assert res_data["status"] == "approval_required"
-        
+
         token = res_data["checkpoint_id"]
-        
+
         # Step 2: Target row should remain unchanged
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute("SELECT data FROM public.users WHERE id = 1")
             assert cur.fetchone()[0] == "test_admin"
-            
+
         # Step 3: Admin approves
         approve_resp = client.post(f"/v1/checkpoints/{token}/approve", headers={"X-API-Key": "admin"})
         print(approve_resp.json())
@@ -130,7 +130,7 @@ def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
         assert approve_resp.status_code == 200
         assert approve_resp.json()["status"] == "approved"
         assert approve_resp.json()["rows_affected"] == 1
-        
+
         # Step 4: Target row should be updated
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute("SELECT data FROM public.users WHERE id = 1")
@@ -141,66 +141,63 @@ def test_api_valid_approval_flow(monkeypatch, dsn, runtime_dsn, setup_db):
 
 
 def test_p0_quoted_identifier_injection(dsn, runtime_dsn, setup_db):
-    from rowback.executor import RowbackExecutor
     import psycopg
     executor = RowbackExecutor(dsn, runtime_dsn)
-    
+
     # 1. Canary check: Ensure the injected SQL was NOT executed.
     # If `SELECT 1; --` was executed, it would just return. But if we put an INSERT into a canary table, we could check it.
     # However, since `execute` fails at `LOCK TABLE public."users; SELECT 1; --"`, it never reaches execution.
     # Let's verify the error message explicitly points to the locked table, proving it was parsed as a single literal.
-    
+
     stmt = ClassifiedStatement(sql='UPDATE public."users; SELECT 1; --" SET data=\'x\' WHERE id=1', stmt_class=StatementClass.WRITE_DML, tables=[])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
-    
+
     res = executor.execute(eval)
     assert res.status == "failed"
     assert 'relation "public.users; SELECT 1; --" does not exist' in res.message or "not registered" in res.message
-    
+
     # 2. Valid dotted/quoted identifier check
     # Let's create a valid table with a quoted name and register it
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute('CREATE TABLE IF NOT EXISTS public."Valid.Table" (id SERIAL PRIMARY KEY, data TEXT)')
         cur.execute("SELECT rowback.register_table('public', 'Valid.Table', 'id', 'mcp_agent')")
         cur.execute('INSERT INTO public."Valid.Table" (data) VALUES (\'test\')')
-        
+
     stmt_valid = ClassifiedStatement(sql='UPDATE public."Valid.Table" SET data=\'y\' WHERE id=1', stmt_class=StatementClass.WRITE_DML, tables=[])
     eval_valid = StatementEvaluation(statement=stmt_valid, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
     res_valid = executor.execute(eval_valid)
-    
+
     assert res_valid.status == "applied", res_valid.message
 
 def test_p0_sensitive_alias_leak(dsn, runtime_dsn, setup_db):
-    from rowback.executor import RowbackExecutor
     import psycopg
     executor = RowbackExecutor(dsn, runtime_dsn)
-    
+
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("UPDATE public.users SET password = 'real-synthetic-secret' WHERE id = 1")
-        
+
     stmt = ClassifiedStatement(sql='SELECT password AS safe_val FROM public.users', stmt_class=StatementClass.READ, tables=["public.users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Test")
-    
+
     res = executor.execute(eval)
     assert res.status == "failed"
     assert "Access denied: Query contains sensitive columns" in res.message
 
 
 def test_p0_sensitive_returning_leak(dsn, runtime_dsn, setup_db):
-    from rowback.executor import RowbackExecutor
     import psycopg
     executor = RowbackExecutor(dsn, runtime_dsn)
-    
+
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("UPDATE public.users SET data = 'old', password = 'synthetic-secret' WHERE id = 1")
-    
+
     stmt = ClassifiedStatement(sql='UPDATE public.users SET data=\'x\' WHERE id=1 RETURNING password', stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
-    
+
     res = executor.execute(eval)
     assert res.status == "failed"
     assert "Access denied: Query contains sensitive columns" in res.message or "permission denied" in res.message
-    
+
     # Verify DB state didn't change!
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT data, password FROM public.users WHERE id = 1")
@@ -209,12 +206,11 @@ def test_p0_sensitive_returning_leak(dsn, runtime_dsn, setup_db):
         assert row[1] == 'synthetic-secret'
 
 def test_p0_whole_row_wildcard_leak(dsn, runtime_dsn, setup_db):
-    from rowback.executor import RowbackExecutor
     executor = RowbackExecutor(dsn, runtime_dsn)
-    
+
     stmt = ClassifiedStatement(sql='SELECT * FROM public.users', stmt_class=StatementClass.READ, tables=["public.users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Test")
-    
+
     res = executor.execute(eval)
     assert res.status == "failed"
     assert "Access denied" in res.message or "permission denied" in res.message
@@ -232,7 +228,7 @@ def test_p0_forged_context_rejected(dsn, runtime_dsn, setup_db):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM rowback.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         cp_id = cur.fetchone()[0]
-        
+
     with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT set_config('rowback.checkpoint_id', %s, true)", (str(cp_id),))
         with pytest.raises(psycopg.errors.RaiseException, match="Invalid checkpoint context|Security Violation"):
@@ -241,22 +237,22 @@ def test_p0_forged_context_rejected(dsn, runtime_dsn, setup_db):
 def test_p0_approval_claim_fail_rejected(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
-    
+
     # Control plane creates a pending checkpoint
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM rowback.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         row = cur.fetchone()
-        cp_id = row[0]
+        _cp_id = row[0]
         public_id = row[1]
-        
+
     # Agent tries to approve/claim/fail using public_id
     with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
         with pytest.raises(psycopg.errors.InsufficientPrivilege, match="permission denied"):
             cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
-            
+
         with pytest.raises(psycopg.errors.InsufficientPrivilege, match="permission denied"):
             cur.execute("SELECT rowback.fail_checkpoint(%s)", (public_id,))
-            
+
         with pytest.raises(psycopg.errors.InvalidTextRepresentation):
             # public_id is not a UUID, so claim_checkpoint(UUID) will fail parsing, but even if it passed, it would fail
             cur.execute("SELECT rowback.claim_checkpoint(%s)", (public_id,))
@@ -268,8 +264,8 @@ def test_p0_capability_spoofing(dsn, runtime_dsn, setup_db):
         cur.execute("SELECT * FROM rowback.begin_checkpoint('SELECT 1', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         public_id = cur.fetchone()[1]
         cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
-        token = cur.fetchone()[0]
-        
+        _token = cur.fetchone()[0]
+
     with psycopg.connect(runtime_dsn, autocommit=True) as conn, conn.cursor() as cur:
         # Agent has some OTHER capability token or invalid uuid
         invalid_token = '00000000-0000-0000-0000-000000000000'
@@ -279,23 +275,23 @@ def test_p0_capability_spoofing(dsn, runtime_dsn, setup_db):
 def test_p0_token_stealing_different_backend(dsn, runtime_dsn, setup_db):
     import psycopg
     import pytest
-    
+
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM rowback.begin_checkpoint('INSERT INTO public.users(data) VALUES (''x'')', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         row = cur.fetchone()
         cp_id = row[0]
         public_id = row[1]
-        
+
         cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
         token = cur.fetchone()[0]
-        
+
     # The real executor claims it
     real_conn = psycopg.connect(runtime_dsn, autocommit=False)
     real_conn.autocommit = False
     cur = real_conn.cursor()
     cur.execute("BEGIN")
     cur.execute("SELECT rowback.claim_checkpoint(%s)", (str(token),))
-    
+
     # Now in a DIFFERENT connection (attacker), try to use the stolen token
     with psycopg.connect(runtime_dsn, autocommit=False) as attacker_conn:
         with attacker_conn.transaction():
@@ -304,7 +300,7 @@ def test_p0_token_stealing_different_backend(dsn, runtime_dsn, setup_db):
                 attacker_cur.execute("SELECT set_config('rowback.checkpoint_id', %s, true)", (str(cp_id),))
                 attacker_cur.execute("SELECT set_config('rowback.capability_token', %s, true)", (str(token),))
                 attacker_cur.execute("SELECT set_config('rowback.seq', '0', true)")
-                
+
                 # The state is 'executing', but txid_current() doesn't match!
                 with pytest.raises(psycopg.errors.RaiseException, match="Checkpoint is not in executing state"):
                     attacker_cur.execute("INSERT INTO public.users(data) VALUES ('stolen')")
@@ -314,30 +310,29 @@ def test_p0_token_stealing_different_backend(dsn, runtime_dsn, setup_db):
 
 def test_p0_valid_claim_dml_finish(dsn, runtime_dsn, setup_db):
     import psycopg
-    import pytest
-    
+
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM rowback.begin_checkpoint('INSERT INTO public.users(data) VALUES (''valid'')', 'WRITE_DML', 'mcp_agent', 'system', gen_random_uuid()::text)")
         row = cur.fetchone()
         cp_id = row[0]
         public_id = row[1]
-        
+
         cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
         token = cur.fetchone()[0]
-        
+
     with psycopg.connect(runtime_dsn, autocommit=False) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
                 cur.execute("SELECT rowback.claim_checkpoint(%s)", (str(token),))
-                
+
                 cur.execute("SELECT set_config('rowback.checkpoint_id', %s, true)", (str(cp_id),))
                 cur.execute("SELECT set_config('rowback.capability_token', %s, true)", (str(token),))
                 cur.execute("SELECT set_config('rowback.seq', '0', true)")
-                
+
                 cur.execute("INSERT INTO public.users(data) VALUES ('valid')")
-                
+
                 cur.execute("SELECT rowback.finish_checkpoint(%s, 1)", (str(token),))
-                
+
     # Verify success
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM public.users WHERE data = 'valid'")

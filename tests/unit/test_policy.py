@@ -33,7 +33,7 @@ def test_policy_protected_table_write(policy_engine):
     stmt = ClassifiedStatement(sql="UPDATE public.users SET name='a'", stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
     eval = policy_engine.evaluate(stmt)
     assert eval.decision == PolicyDecision.REQUIRE_APPROVAL
-    
+
 def test_policy_unprotected_table_write(policy_engine):
     stmt = ClassifiedStatement(sql="UPDATE public.orders SET amount=1 WHERE id=1", stmt_class=StatementClass.WRITE_DML, tables=["public.orders"])
     eval = policy_engine.evaluate(stmt)
@@ -44,7 +44,7 @@ def test_policy_rows_affected_limit(policy_engine):
     stmt = ClassifiedStatement(sql="DELETE FROM public.orders WHERE id=1", stmt_class=StatementClass.WRITE_DML, tables=["public.orders"])
     eval = policy_engine.evaluate(stmt, rows_affected=40)
     assert eval.decision == PolicyDecision.ALLOW_WITH_CAPTURE
-    
+
     eval_over = policy_engine.evaluate(stmt, rows_affected=51)
     assert eval_over.decision == PolicyDecision.REQUIRE_APPROVAL
 

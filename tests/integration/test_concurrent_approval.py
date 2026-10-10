@@ -1,10 +1,13 @@
 import os
-import pytest
-import psycopg
 import threading
+
+import psycopg
+import pytest
 from testcontainers.community.postgres import PostgresContainer
+
 from rowback.capture.install import install_rowback
 from rowback.executor import RowbackExecutor
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -40,19 +43,19 @@ def test_concurrent_approval(dsn, runtime_dsn, setup_db):
     import uuid
     public_id = f"cp_{uuid.uuid4().hex[:8]}"
     sql_text = "UPDATE public.test_race SET val = val + 1 WHERE id = 1;"
-    
+
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO rowback.checkpoints (public_id, agent_label, sql_text, classification, decision, status) VALUES (%s, %s, %s, %s, %s, %s)",
                 (public_id, "test_agent", sql_text, "DML_WRITE", "REQUIRE_APPROVAL", "pending")
             )
-            
+
     # We will spawn 5 threads to approve concurrently
     results = []
     exceptions = []
     barrier = threading.Barrier(5)
-    
+
     def worker():
         try:
             barrier.wait(timeout=5)
@@ -71,12 +74,12 @@ def test_concurrent_approval(dsn, runtime_dsn, setup_db):
 # Only 1 should succeed
     successes = [r for r in results if r.status == "applied"]
     failures = [r for r in results if r.status == "failed"]
-    
+
     assert len(successes) == 1
     print([r.status for r in results]); assert len(failures) == 4
     for f in failures:
         assert "not pending" in f.message or "Token not found" in f.message
-        
+
     # Verify the value was only incremented ONCE
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:

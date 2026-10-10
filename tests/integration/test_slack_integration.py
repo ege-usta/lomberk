@@ -1,14 +1,17 @@
-import os
-import pytest
-import psycopg
 import asyncio
+import os
+
 import httpx
+import psycopg
+import pytest
 from fastapi.testclient import TestClient
 from testcontainers.community.postgres import PostgresContainer
-from rowback.api import app, verify_api_key, verify_admin_key, get_executor, get_policy_engine
+
 import rowback.api
 import rowback.config
+from rowback.api import app, get_executor, get_policy_engine
 from rowback.ee.slack import SlackInteractionAdapter
+
 
 @pytest.fixture(scope="module")
 def postgres():
@@ -40,10 +43,10 @@ def setup_db(dsn, runtime_dsn):
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
         cur.execute("DROP ROLE IF EXISTS rowback_control")
         cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-    
+
     from rowback.capture.install import install_rowback
     install_rowback(dsn, control_role='rowback_control', agent_role='mcp_agent')
-    
+
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.users (id SERIAL PRIMARY KEY, data TEXT)")
         cur.execute("INSERT INTO public.users (data) VALUES ('val1')")
@@ -58,23 +61,23 @@ def auth_and_config(monkeypatch, runtime_dsn, admin_dsn):
     monkeypatch.setenv("ROWBACK_ADMIN_DSN", admin_dsn)
     monkeypatch.setenv("ROWBACK_API_KEY", "real_agent_key")
     monkeypatch.setenv("ROWBACK_ADMIN_KEY", "real_admin_key")
-    
+
     old_api_key = rowback.api._API_KEY
     old_admin_key = rowback.api._ADMIN_KEY
     rowback.api._API_KEY = "real_agent_key"
     rowback.api._ADMIN_KEY = "real_admin_key"
-    
+
     original_load = rowback.config.load_config
     def mock_load(*a, **kw):
         cfg = original_load(*a, **kw)
         cfg.limits.max_rows_without_approval = 0
         cfg.protected_tables = ["public.users"]
         return cfg
-        
+
     def override_get_executor():
         from rowback.executor import RowbackExecutor
         return RowbackExecutor(admin_dsn, runtime_dsn)
-        
+
     def override_get_policy_engine():
         from rowback.policy import PolicyEngine
         return PolicyEngine(mock_load())
@@ -82,9 +85,9 @@ def auth_and_config(monkeypatch, runtime_dsn, admin_dsn):
     app.dependency_overrides.clear()
     app.dependency_overrides[get_executor] = override_get_executor
     app.dependency_overrides[get_policy_engine] = override_get_policy_engine
-    
+
     yield
-    
+
     rowback.api._API_KEY = old_api_key
     rowback.api._ADMIN_KEY = old_admin_key
     app.dependency_overrides.clear()
@@ -103,11 +106,11 @@ async def test_slack_adapter_db_concurrency_and_auth(setup_db, auth_and_config, 
         async def approve_cb(pid):
             r = await acl.post(f"/v1/checkpoints/{pid}/approve", headers={"X-API-Key": "real_admin_key"})
             return {"status": "conflict"} if r.status_code == 409 or (r.status_code == 400 and ("applied" in r.text or "approved" in r.text)) else {"status": r.json().get("status")}
-            
+
         async def reject_cb(pid):
             r = await acl.post(f"/v1/checkpoints/{pid}/reject", headers={"X-API-Key": "real_admin_key"})
             return r.json()
-            
+
         async def status_cb(pid):
             r = await acl.get(f"/v1/checkpoints/{pid}/status", headers={"X-API-Key": "real_admin_key"})
             return r.json().get("status", "unknown") if r.status_code == 200 else "unknown"
@@ -117,23 +120,23 @@ async def test_slack_adapter_db_concurrency_and_auth(setup_db, auth_and_config, 
             update_calls.append(msg)
 
         adapter = SlackInteractionAdapter({"U123"}, {"T1"}, resolve_target, approve_cb, reject_cb, status_cb, update_cb)
-        
+
         payload = {
             "team": {"id": "T1"}, "user": {"id": "U123"},
             "container": {"channel_id": "C1", "message_ts": "123"},
             "actions": [{"action_id": "approve_button", "value": public_id}]
         }
-        
+
         # Test Negative Auth
         async def bad_approve_cb(pid):
-            r = await acl.post(f"/v1/checkpoints/{pid}/approve", headers={"X-API-Key": "bad_key"})
+            _r = await acl.post(f"/v1/checkpoints/{pid}/approve", headers={"X-API-Key": "bad_key"})
             return {"status": "error"}
-        
+
         bad_adapter = SlackInteractionAdapter({"U123"}, {"T1"}, resolve_target, bad_approve_cb, reject_cb, status_cb, update_cb)
         await bad_adapter.handle_interaction(payload)
         if bad_adapter._active_tasks: await asyncio.gather(*bad_adapter._active_tasks)
         await bad_adapter.shutdown()
-        
+
         # Still pending after a failed click: the message (and its buttons) stay untouched.
         assert update_calls == []
         assert await status_cb(public_id) == "pending"
@@ -144,10 +147,10 @@ async def test_slack_adapter_db_concurrency_and_auth(setup_db, auth_and_config, 
         await adapter.shutdown()
 
         assert len(update_calls) == 2
-        # Because final_state is queried right before updating the UI, 
+        # Because final_state is queried right before updating the UI,
         # both calls will either say "successfully applied" or "status is busy" depending on the race.
         assert all("successfully applied" in msg or "status is busy" in msg or "status is applied" in msg for msg in update_calls)
-        
+
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM public.users")
             assert cur.fetchone()[0] == 2
@@ -161,7 +164,7 @@ async def test_api_lifespan_slack_transport_disabled(setup_db, auth_and_config, 
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake_token")
     monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake_token")
     monkeypatch.delenv("ROWBACK_SLACK_ENABLED", raising=False)
-    
+
     async with rowback.api.lifespan(app):
         assert getattr(rowback.api, "_slack_transport_instance", None) is None
 
@@ -181,26 +184,26 @@ async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_
     monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
     monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
-    
+
     original_config = rowback.config.load_config()
     original_config.slack.admin_allowlist = ["U1"]
     original_config.slack.team_allowlist = []
     monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
-    
+
     # 1. Missing team allowlist
     with pytest.raises(ValueError, match="team_allowlist is missing or empty"):
         async with rowback.api.lifespan(app):
             pass
-            
+
     original_config.slack.team_allowlist = ["T1"]
-    
+
     # 2. Missing update callback
     async def fake_resolver(t, c, ts): return "cp_test"
     app.state.slack_target_resolver = fake_resolver
     with pytest.raises(ValueError, match="slack_update_callback dependency missing or not an async function"):
         async with rowback.api.lifespan(app):
             pass
-            
+
     # 3. Missing resolver
     del app.state.slack_target_resolver
     async def fake_update(c, ts, m): pass
@@ -208,7 +211,7 @@ async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_
     with pytest.raises(ValueError, match="slack_target_resolver dependency missing or not an async function"):
         async with rowback.api.lifespan(app):
             pass
-            
+
     # 4. Sync function bypass prevention
     app.state.slack_target_resolver = lambda t, c, ts: "cp_test"
     with pytest.raises(ValueError, match="slack_target_resolver dependency missing or not an async function"):
@@ -221,80 +224,79 @@ async def test_api_lifespan_slack_transport_successful_fake(setup_db, auth_and_c
     monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
     monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
-    
+
     original_config = rowback.config.load_config()
     original_config.slack.admin_allowlist = ["U1"]
     original_config.slack.team_allowlist = ["T1"]
     monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
-    
+
     from unittest.mock import AsyncMock, MagicMock
-    
+
     resolver_calls = []
     async def mock_resolver(t, c, ts):
         resolver_calls.append((t, c, ts))
         if c == "C_MISMATCH": return "cp_other"
         return "cp_test"
     app.state.slack_target_resolver = mock_resolver
-    
+
     update_calls = []
     async def mock_update(c, ts, m):
         update_calls.append((c, ts, m))
     app.state.slack_update_callback = mock_update
-    
+
     def fake_factory(token):
         m = MagicMock()
         m.connect = AsyncMock()
         m.close = AsyncMock()
         m.socket_mode_request_listeners = []
         return m
-        
+
     app.state.slack_client_factory = fake_factory
-    
+
     # Mock executor to observe business calls
     approve_called = False
     async def mock_approve(pid):
         nonlocal approve_called
         approve_called = True
         return MagicMock(status="applied")
-    
+
     async with rowback.api.lifespan(app):
         adapter = rowback.api._slack_transport_instance.business_adapter
-        
+
         # Override the bound callback for this test to avoid real DB execution
         # (Alternatively, we could let it hit the real DB if setup_db provides one)
         # We'll just override the adapter's approve_callback to intercept it.
         adapter.approve_callback = mock_approve
-        
+
         # We also need to override status_callback so it doesn't query the real DB
         # if we aren't creating the checkpoint.
         adapter.status_callback = AsyncMock(return_value="applied")
-        
+
         payload_match = {
             "team": {"id": "T1"}, "user": {"id": "U1"},
             "container": {"channel_id": "C1", "message_ts": "123"},
             "actions": [{"action_id": "approve_button", "value": "cp_test"}]
         }
-        
+
         await adapter.handle_interaction(payload_match)
         # Wait for internal processing to finish
-        import time
         for _ in range(50):
             if len(adapter._active_tasks) == 0: break
             await asyncio.sleep(0.01)
-            
+
         assert resolver_calls == [("T1", "C1", "123")]
         assert approve_called is True
         adapter.status_callback.assert_called_once_with("cp_test")
         assert len(update_calls) == 1
         assert update_calls[0][0] == "C1"
         assert "successfully applied" in update_calls[0][2]
-        
+
         # Test Mismatch Scenario
         resolver_calls.clear()
         update_calls.clear()
         approve_called = False
         adapter.status_callback.reset_mock()
-        
+
         payload_mismatch = {
             "team": {"id": "T1"}, "user": {"id": "U1"},
             "container": {"channel_id": "C_MISMATCH", "message_ts": "999"},
@@ -304,7 +306,7 @@ async def test_api_lifespan_slack_transport_successful_fake(setup_db, auth_and_c
         for _ in range(50):
             if len(adapter._active_tasks) == 0: break
             await asyncio.sleep(0.01)
-            
+
         assert resolver_calls == [("T1", "C_MISMATCH", "999")]
         assert approve_called is False  # Mutation did not happen
         adapter.status_callback.assert_not_called()
@@ -314,33 +316,31 @@ async def test_api_lifespan_slack_transport_successful_fake(setup_db, auth_and_c
 async def test_api_lifespan_slack_transport_exception_cleanup(setup_db, auth_and_config, monkeypatch):
     import rowback.api
     from rowback.config import load_config
-    
+
     monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
     monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
-    
-    import rowback.api
+
     original_config = load_config()
     original_config.slack.admin_allowlist = ["U123"]
     original_config.slack.team_allowlist = ["T1"]
     monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
-    
 
-    
+
+
     def failing_factory(token):
         raise Exception("Failed to connect fake client")
-        
+
     app.state.slack_client_factory = failing_factory
-    
-    from unittest.mock import AsyncMock
+
     async def dummy_cb(*args, **kwargs): pass
     app.state.slack_update_callback = dummy_cb
     app.state.slack_target_resolver = dummy_cb
-    
+
     async with rowback.api.lifespan(app):
-        assert getattr(rowback.api, "_slack_transport_instance") is not None
+        assert rowback.api._slack_transport_instance is not None
         assert rowback.api._slack_transport_instance.client is None
-        
+
     del app.state.slack_client_factory
 
 @pytest.mark.asyncio
@@ -349,12 +349,12 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
     monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
     monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
-    
+
     original_config = rowback.config.load_config()
     original_config.slack.admin_allowlist = ["U_ADMIN"]
     original_config.slack.team_allowlist = ["T1"]
     monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
-    
+
     from unittest.mock import AsyncMock, MagicMock
     def mock_factory(token):
         m = MagicMock()
@@ -362,19 +362,19 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
         m.socket_mode_request_listeners = []
         return m
     app.state.slack_client_factory = mock_factory
-    
+
     app.state.slack_update_callback = AsyncMock()
     app.state.slack_target_resolver = AsyncMock(return_value="cp_mock")
-    
+
     async with rowback.api.lifespan(app):
         adapter = rowback.api._slack_transport_instance.business_adapter
         adapter.shutdown_timeout = 0.05  # Force very short wait
-        
+
         import threading
         thread_started = threading.Event()
         thread_release = threading.Event()
         thread_finished = threading.Event()
-        
+
         def slow_execute(*args):
             thread_started.set()
             # Wait for main test to tell us to proceed
@@ -382,19 +382,19 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
                 return MagicMock(status="failed_timeout")
             thread_finished.set()
             return MagicMock(status="applied")
-            
+
         monkeypatch.setattr(rowback.api._executor_instance, "execute_pending", slow_execute)
-        
+
         async def resolve_target(*args):
             return "cp_mock"
         adapter.target_resolver = resolve_target
-        
+
         payload = {
             "team": {"id": "T1"}, "user": {"id": "U_ADMIN"},
             "container": {"channel_id": "C1", "message_ts": "123"},
             "actions": [{"action_id": "approve_button", "value": "cp_mock"}]
         }
-        
+
         # Intercept the approve_callback to prove Cancellation happens
         cancellation_observed = False
         original_approve = adapter.approve_callback
@@ -406,35 +406,35 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
                 cancellation_observed = True
                 raise
         adapter.approve_callback = tracking_approve
-        
+
         await adapter.handle_interaction(payload)
-        
+
         import time
         start_wait = time.time()
         while not thread_started.is_set():
             if time.time() - start_wait > 1.0:
                 pytest.fail("Thread never started")
             await asyncio.sleep(0.01)
-            
-        interaction_task = list(adapter._active_tasks)[0]
-        
+
+        interaction_task = next(iter(adapter._active_tasks))
+
         await adapter.shutdown()
-        
+
         # Wait for the event loop to actually process the cancellation
         try:
             await interaction_task
         except asyncio.CancelledError:
             pass
-            
+
         # Verification 1: Coroutine was cancelled
         assert interaction_task.cancelled() or cancellation_observed
-        
+
         # Verification 2: Thread is still waiting (not killed!)
         assert not thread_finished.is_set()
-        
+
         # Release the thread
         thread_release.set()
-        
+
         # Verification 3: Thread can finish its work despite task cancellation
         start_wait = time.time()
         while not thread_finished.is_set():
@@ -446,22 +446,23 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
 @pytest.mark.asyncio
 async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, monkeypatch, caplog):
     # Test worker completion within budget and exceeding budget on lifespan exit
-    import rowback.api
     import logging
+
+    import rowback.api
     monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
     monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
-    
+
     original_config = rowback.config.load_config()
     original_config.slack.admin_allowlist = ["U1"]
     original_config.slack.team_allowlist = ["T1"]
     monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
-    
+
     from unittest.mock import AsyncMock, MagicMock
     app.state.slack_target_resolver = AsyncMock(return_value="cp_test")
     app.state.slack_update_callback = AsyncMock()
     app.state.slack_client_factory = lambda token: MagicMock(connect=AsyncMock(), close=AsyncMock(), socket_mode_request_listeners=[])
-    
+
     # Variant 1: Finishes within budget
     with caplog.at_level(logging.INFO, logger="rowback.api"):
         async with rowback.api.lifespan(app):
@@ -470,13 +471,13 @@ async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, mon
             t = asyncio.create_task(fake_worker())
             app.state._db_workers.add(t)
             t.add_done_callback(app.state._db_workers.discard)
-            
+
         assert "Draining 1 outstanding DB workers" in caplog.text
         assert "Shutdown timeout" not in caplog.text
         assert len(app.state._db_workers) == 0
 
     caplog.clear()
-    
+
     # Variant 2: Exceeds budget
     with caplog.at_level(logging.INFO, logger="rowback.api"):
         async with rowback.api.lifespan(app):
@@ -485,16 +486,16 @@ async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, mon
             t = asyncio.create_task(slow_worker())
             app.state._db_workers.add(t)
             t.add_done_callback(app.state._db_workers.discard)
-            
+
             # mock wait to be faster in test
             original_wait = asyncio.wait
             async def fast_wait(ws, timeout=5.0):
                 return await original_wait(ws, timeout=0.1)
             monkeypatch.setattr(asyncio, "wait", fast_wait)
-            
+
         assert "Draining 1 outstanding DB workers" in caplog.text
         assert "Shutdown timeout: 1 DB workers remain outstanding/unknown." in caplog.text
-        
+
         # Cleanup
         t.cancel()
         try: await t
@@ -502,86 +503,87 @@ async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, mon
 
 @pytest.mark.asyncio
 async def test_api_worker_tracking_capacity_and_exception(setup_db, auth_and_config, monkeypatch, caplog):
+
     import rowback.api
-    import logging
     monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
     monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
-    
+
     original_config = rowback.config.load_config()
     original_config.slack.admin_allowlist = ["U1"]
     original_config.slack.team_allowlist = ["T1"]
     monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
-    
+
     from unittest.mock import AsyncMock, MagicMock
     app.state.slack_target_resolver = AsyncMock(return_value="cp_test")
     app.state.slack_update_callback = AsyncMock()
     app.state.slack_client_factory = lambda token: MagicMock(connect=AsyncMock(), close=AsyncMock(), socket_mode_request_listeners=[])
-    
+
     async with rowback.api.lifespan(app):
-        from rowback.ee.slack import TaskCapacityExceededError
         import threading
-        
+
+        from rowback.ee.slack import TaskCapacityExceededError
+
         release_event = threading.Event()
-        
+
         def hanging_execute(*args):
             release_event.wait(timeout=5.0)
             if args[0] == "cp_new":
                 return MagicMock(status="applied")
             raise ValueError("Test detached exception")
-            
+
         monkeypatch.setattr(rowback.api._executor_instance, "execute_pending", hanging_execute)
-        
+
         adapter = rowback.api._slack_transport_instance.business_adapter
-        
+
         tasks = []
         try:
             # Start 50 workers
             for i in range(50):
                 tasks.append(asyncio.create_task(adapter.approve_callback(f"cp_{i}")))
-                
+
             # Allow event loop to schedule them
             await asyncio.sleep(0.05)
-            
+
             # Assert capacity is strictly full
             assert len(app.state._db_workers) == 50
-            
+
             with pytest.raises(TaskCapacityExceededError):
                 await adapter.approve_callback("cp_50")
-                
+
             with pytest.raises(TaskCapacityExceededError):
                 await adapter.status_callback("cp_50")
-                
+
             # Cancel callers
             for t in tasks: t.cancel()
             await asyncio.sleep(0.01) # let cancellation propagate
-            
+
             # Registry MUST still be full
             assert len(app.state._db_workers) == 50
-            
+
             with pytest.raises(TaskCapacityExceededError):
                 await adapter.approve_callback("cp_50")
-                
+
         finally:
             # Release workers inside finally
             release_event.set()
-                
+
             # Wait for internal worker completion
             for _ in range(50):
                 if len(app.state._db_workers) == 0: break
                 await asyncio.sleep(0.01)
-                
+
             for t in tasks:
                 try: await t
                 except asyncio.CancelledError: pass
-                
+
         # Registry must be completely zeroed
         assert len(app.state._db_workers) == 0
-        
+
         # Test subsequent working request
         res = await adapter.approve_callback("cp_new")
         assert res == {"status": "applied"}
-        
+
         # Verify exception from detached task was cleanly consumed
         assert "Background DB worker failed: ValueError" in caplog.text
 
@@ -591,16 +593,17 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     # -------------------------------------------------------------------
     # Offline Pilot Runbook Test
     # -------------------------------------------------------------------
-    import rowback.api
     import asyncio
     import os
     import uuid
-    from rowback.api import app
-    from fastapi.testclient import TestClient
     from unittest.mock import AsyncMock, MagicMock
-    from rowback.policy import PolicyDecision
+
+    from fastapi.testclient import TestClient
     from offline_pilot import InMemoryBindingStore, OfflinePublisher, OfflineUpdater, PublishOutcomeUnknown
     from slack_sdk.socket_mode.request import SocketModeRequest
+
+    import rowback.api
+    from rowback.api import app
 
     monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
     monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake_app_token")
@@ -612,7 +615,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     # Force real policy to block this table
     config.protected_tables = ["public.test_e2e"]
     monkeypatch.setattr(rowback.api, "load_config", lambda: config)
-    
+
     from rowback.policy import PolicyEngine
     app.dependency_overrides[rowback.api.get_policy_engine] = lambda: PolicyEngine(config)
 
@@ -632,7 +635,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
 
     import psycopg
     admin_dsn = os.environ.get("ROWBACK_ADMIN_DSN")
-    
+
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_e2e (id int PRIMARY KEY);")
         cur.execute("SELECT rowback.register_table('public', 'test_e2e', 'id', 'mcp_agent');")
@@ -652,7 +655,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         assert res.status_code == 200, res.json()
         assert res.json()["results"][0]["status"] == "approval_required", res.json()
         pid = res.json()["results"][0]["checkpoint_id"]
-        
+
         # Verify completely pending and empty before action
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
@@ -664,7 +667,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM public.test_e2e")
                 assert cur.fetchone()[0] == 0
-                
+
         # Publish
         ts = await publisher.publish_checkpoint("T_VALID", "C_VALID", pid)
         return pid, ts
@@ -697,7 +700,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         # Wait for update
         update = await updater.wait_for_update(timeout=2.0)
         assert update is not None
-        assert f"successfully applied" in update[2]
+        assert "successfully applied" in update[2]
 
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
@@ -719,7 +722,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         await deliver(req1, "envelope-1")
         assert len(updater.updates) == before_updates
         assert fake_socket_client.send_socket_mode_response.await_count == before_acks + 1
-        
+
         # Duplicate B: Different envelope, same button value
         req1b = {
             "team": {"id": "T_VALID"},
@@ -760,7 +763,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         await deliver(req2, "envelope-reject")
         update = await updater.wait_for_update(timeout=2.0)
         assert update is not None
-        assert f"rejected" in update[2]
+        assert "rejected" in update[2]
 
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
@@ -800,7 +803,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         await deliver(req4, "envelope-lost")
         update = await updater.wait_for_update(timeout=0.5)
         assert update is None, "Should fail closed, no UI update, no execution"
-        
+
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (pid4,))

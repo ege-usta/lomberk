@@ -41,33 +41,33 @@ def execute_with_recovery(
     sleeper: Callable[[float], None] = time.sleep,
     cancel_event: threading.Event | None = None
 ) -> RecoveryResult:
-    
+
     if math.isnan(timeout_seconds) or math.isinf(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be a positive finite number")
     if base_delay <= 0 or max_delay <= 0 or base_delay > max_delay:
         raise ValueError("Invalid delay parameters")
     if max_attempts <= 0:
         raise ValueError("max_attempts must be positive")
-        
+
     deadline = clock() + timeout_seconds
     last_known_state = "unknown"
     resume_id = None
     attempt = 0
     message = None
-    
+
     while True:
         if cancel_event and cancel_event.is_set():
             raise RecoveryBudgetExhausted(last_known_state, resume_id, operation_id)
-            
+
         remaining_time = deadline - clock()
         if remaining_time <= 0 or attempt >= max_attempts:
             break
-        
+
         attempt += 1
         try:
             if not resume_id:
                 res = submit_fn(remaining_time)
-                
+
                 if "results" in res:
                     if len(res["results"]) != 1:
                         raise ValueError(f"Expected exactly 1 result in array, got {len(res['results'])}")
@@ -81,48 +81,48 @@ def execute_with_recovery(
                     current_id = res.get("checkpoint_id") or res.get("public_id")
                     ret_op_id = res.get("operation_id")
                     message = res.get("message")
-                    
+
                 if not status:
                     raise ValueError("Response missing status field.")
-                
+
                 if ret_op_id and ret_op_id != operation_id:
                     raise IdMismatchError(f"Response operation_id '{ret_op_id}' does not match requested '{operation_id}'")
-                    
+
                 last_known_state = status
                 if current_id:
                     resume_id = current_id
             else:
                 status = status_fn(resume_id, remaining_time)
                 last_known_state = status
-                
+
             is_terminal = status in ["applied", "undone", "already_undone", "failed", "denied", "approval_required", "approved"]
-            
+
             late = clock() > deadline
             if is_terminal:
                 if late:
                     late_res = RecoveryResult(operation_id=operation_id, status=status, resume_id=resume_id, message=message, is_late=True)
                     raise RecoveryBudgetExhausted(last_known_state, resume_id, operation_id, late_result=late_res)
                 return RecoveryResult(operation_id=operation_id, status=status, resume_id=resume_id, message=message, is_late=False)
-                
+
         except TransientError:
             pass
         except RecoveryBudgetExhausted:
             raise
         except Exception as e:
             raise e
-            
+
         remaining_time = deadline - clock()
         if remaining_time <= 0:
             break
-            
+
         delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
         jitter = random.uniform(0, 0.1 * delay)
         sleep_time = min(delay + jitter, remaining_time)
-        
+
         # If sleep is going to be interrupted by cancel_event
         if cancel_event:
             cancel_event.wait(sleep_time)
         else:
             sleeper(sleep_time)
-        
+
     raise RecoveryBudgetExhausted(last_known_state, resume_id, operation_id)

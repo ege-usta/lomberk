@@ -90,6 +90,6 @@ def test_undo_restores_identity_and_generated_tables(db, sql):
 
 def test_new_rows_after_undo_do_not_collide(db):
     # Re-inserted ids came from the sequence already, so later inserts must still work.
-    dsn, ex = db
+    _dsn, ex = db
     res = run(ex, "INSERT INTO public.accounts (email) VALUES ('new@x.com')")
     assert res.status == "applied", res.message
