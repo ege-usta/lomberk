@@ -6,7 +6,7 @@ MCP gateway that puts AI agents' SQL behind a firewall, human approval and undo.
 - Tests (Docker must be running, testcontainers): `PYTHONPATH=src uv run pytest tests/ -q`
 - Fast, no Docker: `PYTHONPATH=src uv run pytest tests/unit -q`
 - Core without Enterprise must still pass. Check with a copy that has `src/rowback/ee/` removed.
-- Lint: `uv run ruff check src tests`. Existing B008 warnings in api.py are the FastAPI idiom, so leave them.
+- Lint: `uv run ruff check src tests` (and `seatbelt`) — both clean. The rule set and the reasoned ignores (incl. B008, the FastAPI `Depends()` idiom) live in `[tool.ruff]` in pyproject.toml; keep lint clean, and add an ignore with a reason rather than a bare `# noqa`.
 
 ## Layout
 - `src/rowback/policy.py`: AST hard gate + policy. `executor.py`: execution, capture, holds.
