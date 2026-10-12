@@ -132,7 +132,9 @@ def test_panel_needs_a_license(gateway, monkeypatch):
 
 def test_admin_key_sign_in_session_and_csrf(gateway):
     start, control = gateway
-    with start("approvals:\n  required: 2\n") as c:
+    # SSO_YAML (required: 2 WITH an SSO identity source and allow_admin_key) is a valid quorum config;
+    # a bare `required: 2` with no SSO/Slack is now a Startup Refusal (admin-key approvals never count).
+    with start(SSO_YAML) as c:
         page = c.get("/panel/")
         assert page.status_code == 200 and "script-src 'self'" in page.headers["content-security-policy"]
         assert c.get("/panel/api/session").json()["actor"] is None

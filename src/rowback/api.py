@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from starlette.routing import Route
 
 from rowback.audit import audit
-from rowback.config import load_config, pro_features, weak_key_reason
+from rowback.config import load_config, pro_features, quorum_without_identity_source, weak_key_reason
 from rowback.executor import RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sentinel import AISentinel
@@ -90,6 +90,9 @@ async def lifespan(app: FastAPI):
         _ALLOW_ADMIN_KEY = bool(config.sso.allow_admin_key)
     elif config.sso.allow_admin_key is False:
         raise ValueError("Startup Refusal: sso.allow_admin_key is false but no sso.issuer is configured.")
+    if quorum_without_identity_source(config):
+        raise ValueError("Startup Refusal: approvals.required > 1 needs an identity source (SSO issuer or Slack); "
+                         "admin-key and CLI approvals never count toward the quorum, so held checkpoints would be un-approvable.")
 
     try:
         admin_dsn = os.environ.get(config.database.admin_dsn_env)

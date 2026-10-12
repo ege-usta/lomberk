@@ -82,7 +82,49 @@ class RowbackExecutor:
             cur.execute(
                 "SELECT public_id, status, classification, decision, agent_label, principal, sql_text, "
                 "rows_affected, created_at FROM rowback.checkpoints WHERE public_id = %s", (public_id,))
-            return cur.fetchone()
+            cp = cur.fetchone()
+            if cp and cp["status"] == "pending":
+                # Tell an approver, before they decide, if this write could not be undone — they
+                # see only the SQL otherwise. Best-effort: any introspection error adds no warning.
+                cp["undo_warning"] = self._undo_warning(conn, cp["sql_text"])
+            return cp
+
+    def _undo_warning(self, conn, sql_text: str) -> str | None:
+        """Name any target table whose own schema makes this write impossible to undo: its own
+        triggers (without --allow-triggers), rewrite rules, or inheritance — the same conditions
+        rowback.execute_undo refuses on. Read-only and defensive; returns None on any error."""
+        try:
+            import pglast
+
+            from rowback.sql.classify import extract_tables_from_ast
+            tables = extract_tables_from_ast(pglast.parse_sql(sql_text))
+            blocked = []
+            with conn.cursor() as cur:
+                for schema, table in tables:
+                    cur.execute(
+                        "SELECT "
+                        "EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND t.tgname <> 'rowback_capture') "
+                        "  AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = c.oid), false), "
+                        "EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class = c.oid AND rulename <> '_RETURN'), "
+                        "EXISTS(SELECT 1 FROM pg_inherits WHERE inhparent = c.oid OR inhrelid = c.oid) "
+                        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'",
+                        (schema, table))
+                    row = cur.fetchone()
+                    if not row:
+                        continue
+                    trig, rules, inh = row
+                    if trig:
+                        blocked.append(f"{schema}.{table} has its own triggers (register it with --allow-triggers to make this undoable)")
+                    elif rules:
+                        blocked.append(f"{schema}.{table} has rewrite rules")
+                    elif inh:
+                        blocked.append(f"{schema}.{table} is part of an inheritance tree")
+            if blocked:
+                return "This write cannot be undone once approved: " + "; ".join(blocked)
+        except Exception:
+            return None
+        return None
 
     def list_checkpoints(self, since=None, limit: int | None = None) -> list[dict]:
         """Newest first, with who approved each one. limit None = all (for exports)."""

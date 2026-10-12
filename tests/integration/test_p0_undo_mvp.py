@@ -335,3 +335,32 @@ def test_undo_with_allowed_triggers(control_dsn, runtime_dsn, dsn, setup_db, mon
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         modes = dict(cur.execute("SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'public.trg_items'::regclass").fetchall())
         assert modes == {"touch": "O", "log_ins": "A", "rowback_capture": "O"}
+
+
+def test_pending_checkpoint_warns_approver_when_write_is_not_undoable(control_dsn, runtime_dsn, dsn, setup_db, monkeypatch):
+    """A pending checkpoint on a trigger-bearing table (no --allow-triggers) carries an undo_warning
+    so the approver sees it won't be undoable; an ordinary table carries none (security-audit UX)."""
+    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("CREATE TABLE public.warn_trig (id INT PRIMARY KEY, val TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT '2020-01-01');")
+        cur.execute("CREATE FUNCTION public.warn_touch() RETURNS trigger AS $$ BEGIN NEW.updated_at := clock_timestamp(); RETURN NEW; END $$ LANGUAGE plpgsql;")
+        cur.execute("INSERT INTO public.warn_trig (id, val) VALUES (1, 'a');")
+        cur.execute("CREATE TRIGGER warn_touch BEFORE UPDATE ON public.warn_trig FOR EACH ROW EXECUTE FUNCTION public.warn_touch();")
+        cur.execute("SELECT rowback.register_table('public', 'warn_trig', 'id', 'mcp_agent');")  # no --allow-triggers
+        cur.execute("CREATE TABLE public.warn_plain (id INT PRIMARY KEY, val TEXT);")
+        cur.execute("INSERT INTO public.warn_plain (id, val) VALUES (1, 'a');")
+        cur.execute("SELECT rowback.register_table('public', 'warn_plain', 'id', 'mcp_agent');")
+
+    def pend(sql):
+        stmt = ClassifiedStatement(sql=sql, stmt_class=StatementClass.WRITE_DML, tables=[], is_multistatement=False)
+        return executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason="protected"))
+
+    trig_cp = pend("UPDATE public.warn_trig SET val = 'x' WHERE id = 1;")
+    plain_cp = pend("UPDATE public.warn_plain SET val = 'x' WHERE id = 1;")
+    assert trig_cp.status == "approval_required", trig_cp.message
+    assert plain_cp.status == "approval_required", plain_cp.message
+
+    warn = executor.get_checkpoint(trig_cp.public_id)["undo_warning"]
+    assert warn and "warn_trig" in warn and "allow-triggers" in warn, warn
+    assert executor.get_checkpoint(plain_cp.public_id)["undo_warning"] is None

@@ -20,7 +20,6 @@ class LimitsConfig(_Strict):
     trash_retention_days: int = 7
 
 class AgentConfig(_Strict):
-    allow_self_undo: bool = True
     approval_timeout_minutes: int = 30
 
 class SlackConfig(_Strict):
@@ -108,3 +107,11 @@ def pro_features(config: RowbackConfig) -> list[str]:
     slack = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
     return [name for name, on in (("SSO", bool(config.sso.issuer)), ("Slack approvals", slack),
                                   ("two-person approval", config.approvals.required > 1)) if on]
+
+
+def quorum_without_identity_source(config: RowbackConfig) -> bool:
+    """True if a >1 approval quorum is configured with no identity source. Admin-key and CLI
+    approvals never count toward the quorum, so with neither SSO nor Slack every held checkpoint
+    would be permanently un-approvable — a silent, self-inflicted deadlock caught at startup."""
+    slack = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
+    return config.approvals.required > 1 and not config.sso.issuer and not slack
