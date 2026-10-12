@@ -45,7 +45,9 @@ SQL_STATEMENT_RULES = [
     (r"^\s*truncate\b", "TRUNCATE"),
     (r"^\s*alter\s+table\b.*\bdrop\b", "ALTER TABLE ... DROP"),
 ]
-TRIVIAL_WHERE = re.compile(r"\bwhere\s+(1\s*=\s*1|true|'1'\s*=\s*'1')\s*$", re.I)
+# `_strip` runs first and rewrites every string literal to '', so a quoted trivially-true
+# comparison like WHERE 'x'='x' arrives here as WHERE ''='' — match that, not the pre-strip '1'='1'.
+TRIVIAL_WHERE = re.compile(r"\bwhere\s+(1\s*=\s*1|true|''\s*=\s*'')\s*$", re.I)
 
 
 def _strip(sql):
@@ -77,7 +79,26 @@ def _sql_in_command(cmd):
     parts = re.findall(r"<<-?\s*['\"]?(\w+)['\"]?\n(.*?)\n\t*\1", cmd, re.S)
     chunks = [body for _, body in parts]
     chunks += re.findall(r"\"((?:\\.|[^\"\\])*)\"", cmd) + re.findall(r"'([^']*)'", cmd)
+    # An unquoted argument with backslash-escaped spaces (psql -c DROP\ TABLE\ users) carries no
+    # quote or heredoc, so the patterns above miss it. Grab the value after a -c/-e/--command/
+    # --execute flag as a run of escaped-or-non-space chars, then resolve the backslashes.
+    for val in re.findall(r"(?:--command|--execute|-c|-e)(?:=|\s+)((?:\\.|\S)+)", cmd):
+        if val[:1] not in ("'", '"'):
+            chunks.append(re.sub(r"\\(.)", r"\1", val))
     return chunks
+
+
+def _iter_strings(value):
+    """Every string leaf in a nested tool_input, so SQL that an MCP tool nests or batches
+    (e.g. {"statements": ["DROP TABLE x"]}) is scanned, not just top-level string values."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _iter_strings(v)
 
 
 def check(event):
@@ -97,11 +118,12 @@ def check(event):
                     return found
         return None
     if tool.startswith("mcp__"):
-        for value in data.values():
-            if isinstance(value, str):
-                found = check_sql(value)
-                if found:
-                    return found
+        for value in _iter_strings(data):
+            if len(value) > MAX_CMD:  # same ReDoS fail-safe as the Bash path
+                return "input too long to inspect safely"
+            found = check_sql(value)
+            if found:
+                return found
     return None
 
 

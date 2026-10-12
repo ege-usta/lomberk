@@ -42,6 +42,12 @@ DANGEROUS_BASH = [
     "./psql -c 'delete from public.users'",
     # F4: a tab-indented `<<-` heredoc terminator must not escape extraction
     "psql <<-SQL\n\tDROP SCHEMA public CASCADE;\n\tSQL",
+    # run-2 S1: a quoted trivially-true WHERE ('x'='x') must still count as no real WHERE
+    "psql -c \"DELETE FROM orders WHERE '1'='1'\"",
+    "psql -c \"UPDATE accounts SET balance = 0 WHERE 'a' = 'a'\"",
+    # run-2 S2: an unquoted, backslash-escaped client argument must still be inspected
+    "psql -c DROP\\ TABLE\\ users",
+    "psql -c DELETE\\ FROM\\ orders",
 ]
 
 SAFE_BASH = [
@@ -56,6 +62,8 @@ SAFE_BASH = [
     "ls -la",
     "echo 'TRUNCATE is scary'",
     "cat schema.sql",
+    "psql -c SELECT\\ 1",                       # unquoted but harmless: the -c fallback must not false-positive
+    "psql -c \"SELECT count(*) FROM orders WHERE 1=1\"",  # 1=1 on a SELECT is not a destructive write
 ]
 
 
@@ -94,6 +102,16 @@ class Seatbelt(unittest.TestCase):
         # so a heredoc-bomb can neither hang the hook nor slip through unscanned.
         bomb = "psql <<X\n" * 20000
         self.assertIsNotNone(seatbelt.check({"tool_name": "Bash", "tool_input": {"command": bomb}}))
+
+    def test_nested_and_batched_mcp_sql_is_caught(self):
+        # run-2 S3: SQL nested in a dict or batched in a list must be scanned, not skipped.
+        self.assertIsNotNone(seatbelt.check({"tool_name": "mcp__db__batch", "tool_input": {"statements": ["SELECT 1", "DROP TABLE users"]}}))
+        self.assertIsNotNone(seatbelt.check({"tool_name": "mcp__db__run", "tool_input": {"query": {"sql": "TRUNCATE payments"}}}))
+        self.assertIsNone(seatbelt.check({"tool_name": "mcp__db__batch", "tool_input": {"statements": ["SELECT 1", "SELECT 2"]}}))
+
+    def test_oversized_mcp_input_fails_closed(self):
+        # run-2 S-ReDoS: the MCP path caps input length before its regexes run, like the Bash path.
+        self.assertIsNotNone(seatbelt.check({"tool_name": "mcp__postgres__query", "tool_input": {"sql": "/*" * 20000}}))
 
     def test_hook_protocol(self):
         run = lambda payload, env=None: subprocess.run(
