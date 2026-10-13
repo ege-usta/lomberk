@@ -9,7 +9,11 @@ COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12-slim
-RUN useradd --system --uid 10001 --home /nonexistent rowback
+# Pick up Debian security fixes released after the base image was built, and drop pip:
+# the gateway runs from /opt/venv and never installs packages, so pip is only attack surface.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/* \
+ && python -m pip uninstall -y pip \
+ && useradd --system --uid 10001 --home /nonexistent rowback
 COPY --from=build /opt/venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 \
     ROWBACK_AUDIT_LOG=/var/log/rowback/audit.jsonl

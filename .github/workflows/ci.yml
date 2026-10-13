@@ -57,6 +57,16 @@ jobs:
         if: matrix.pg == '16'
         run: docker build -t rowback:ci .
 
+      # Fail on any FIXABLE medium+ CVE or leaked secret in the shipped image. Unfixed Debian
+      # CVEs are skipped: there is nothing to upgrade to yet, and the next rebuild picks them up.
+      # Trivy runs from its image pinned by digest, not trivy-action (whose tags were hijacked in 2026).
+      - name: Scan container image
+        if: matrix.pg == '16'
+        run: >
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+          image --scanners vuln,secret --ignore-unfixed --severity MEDIUM,HIGH,CRITICAL --exit-code 1 rowback:ci
+
       - name: Upload Test Results
         if: always()
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
