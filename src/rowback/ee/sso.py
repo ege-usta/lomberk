@@ -27,8 +27,8 @@ def _require_https(url: str) -> None:
 
 
 def _get_json(url: str) -> dict:
-    _require_https(url)
-    with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as r:
+    _require_https(url)  # scheme is validated here; only https:// reaches urlopen
+    with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as r:  # _require_https restricts to https  # nosec B310
         return json.load(r)
 
 

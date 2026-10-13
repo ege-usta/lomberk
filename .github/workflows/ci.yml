@@ -104,3 +104,18 @@ jobs:
       - run: |
           uv export --frozen --no-dev --no-hashes --no-emit-project > requirements.txt
           uvx pip-audit -r requirements.txt --disable-pip --no-deps
+
+  sast:
+    name: Static analysis (bandit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.11.18"
+      # Fail on medium+ severity at medium+ confidence. Known-safe sites carry a
+      # reasoned `# nosec <id>`; a bare noqa is not allowed (see CLAUDE.md).
+      - run: uvx bandit -r src seatbelt --severity-level medium --confidence-level medium

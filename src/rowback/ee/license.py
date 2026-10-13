@@ -31,7 +31,7 @@ def validate_key(key: str) -> str:
     req = urllib.request.Request(POLAR_VALIDATE_URL, data=body, method="POST",
                                  headers={"Content-Type": "application/json", "User-Agent": "rowback"})
     try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as r:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as r:  # hardcoded https POLAR_VALIDATE_URL constant  # nosec B310
             return "granted" if json.load(r).get("status") == "granted" else "invalid"
     except urllib.error.HTTPError as e:
         # 404: unknown, revoked, disabled or expired key. 400/422: malformed.

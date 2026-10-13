@@ -164,7 +164,7 @@ class AISentinel:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:  # hardcoded api.openai.com URL  # nosec B310
                 res_data = json.loads(response.read().decode())
                 content = res_data["choices"][0]["message"]["content"]
                 result = json.loads(content)

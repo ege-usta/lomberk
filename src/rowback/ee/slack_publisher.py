@@ -43,7 +43,7 @@ class SlackPublisher:
         with psycopg.connect(self.dsn) as conn:
             conn.execute(
                 f"UPDATE rowback.slack_messages SET state = 'unknown' "
-                f"WHERE state = 'publishing' AND claimed_at < now() - interval '{STALE_CLAIM}'")
+                f"WHERE state = 'publishing' AND claimed_at < now() - interval '{STALE_CLAIM}'")  # STALE_CLAIM is a module constant  # nosec B608
             return conn.execute("""
                 WITH claimed AS (
                     INSERT INTO rowback.slack_messages (public_id, channel_id, state)

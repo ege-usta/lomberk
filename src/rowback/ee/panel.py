@@ -151,7 +151,7 @@ def _exchange_code(cfg, doc: dict, code: str, verifier: str) -> str:
     req = urllib.request.Request(doc["token_endpoint"], data=urllib.parse.urlencode(form).encode(),
                                  headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as r:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as r:  # token_endpoint https-validated in _discovery  # nosec B310
             token = json.load(r)["id_token"]
     except (OSError, ValueError, KeyError, TypeError):
         raise HTTPException(status_code=502, detail="The identity provider did not return a token.") from None

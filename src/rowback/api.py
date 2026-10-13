@@ -236,7 +236,7 @@ async def lifespan(app: FastAPI):
         # The SDK session manager runs once per instance, so build a fresh one per lifespan.
         mcp = build_mcp(_mcp_deps, principal="remote_mcp_agent")
         # host="0.0.0.0" skips the SDK's localhost-only Host check; the agent key gate authenticates instead.
-        mcp_http = mcp.streamable_http_app(streamable_http_path="/mcp", stateless_http=True, json_response=True, host="0.0.0.0")
+        mcp_http = mcp.streamable_http_app(streamable_http_path="/mcp", stateless_http=True, json_response=True, host="0.0.0.0")  # container bind; agent-key gate authenticates  # nosec B104
         async with mcp.session_manager.run():
             _mcp_gate.inner = mcp_http.routes[0].app
             try:

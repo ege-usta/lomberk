@@ -7,6 +7,9 @@ MCP gateway that puts AI agents' SQL behind a firewall, human approval and undo.
 - Fast, no Docker: `PYTHONPATH=src uv run pytest tests/unit -q`
 - Core without Enterprise must still pass. Check with a copy that has `src/rowback/ee/` removed.
 - Lint: `uv run ruff check src tests` (and `seatbelt`) — both clean. The rule set and the reasoned ignores (incl. B008, the FastAPI `Depends()` idiom) live in `[tool.ruff]` in pyproject.toml; keep lint clean, and add an ignore with a reason rather than a bare `# noqa`.
+- Security scanners (run in CI, reproducible locally, no install needed):
+  - Deps/CVEs: `uv export --no-emit-project --format requirements-txt | uvx pip-audit -r /dev/stdin` — must be clean.
+  - SAST: `uvx bandit -r src seatbelt --severity-level medium --confidence-level medium` — must be clean. Known-safe hits carry a reasoned `# <why>  # nosec <id>` (reason first so bandit doesn't parse it as a test id); never a bare suppression.
 
 ## Layout
 - `src/rowback/policy.py`: AST hard gate + policy. `executor.py`: execution, capture, holds.
