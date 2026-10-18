@@ -36,13 +36,14 @@ _ADMIN_KEY = None
 # the admin key is deliberately excluded from the approval quorum, so it must not be able to
 # mint (forge) panel sessions — least of all an `oidc:` identity. A restart ends all sessions.
 _SESSION_SECRET = None
+_METRICS_KEY = None  # ROWBACK_METRICS_KEY; unset = /metrics is off
 _SSO = None  # ee OidcVerifier when sso.issuer is set
 _ALLOW_ADMIN_KEY = True
 _PRO = False  # a valid Rowback Pro license is present
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _SESSION_SECRET, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY, _PRO
+    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _SESSION_SECRET, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY, _PRO, _METRICS_KEY
 
     # Local registry ownership for safe and strict shutdown drainage
     local_db_workers = set()
@@ -68,10 +69,14 @@ async def lifespan(app: FastAPI):
         raise ValueError("Startup Refusal: Agent and Admin keys must NOT be identical.")
     # A guessable key is the one thing a rate limit would have to save; a random 32+ character
     # key can't be brute-forced, so refuse anything else. Demos opt out explicitly.
+    metrics_key = os.environ.get("ROWBACK_METRICS_KEY") or None
+    if metrics_key in (agent_key, admin_key):
+        raise ValueError("Startup Refusal: ROWBACK_METRICS_KEY must differ from the agent and admin keys.")
     if os.environ.get("ROWBACK_ALLOW_WEAK_KEYS", "").lower() != "true":
-        for env, key in (("ROWBACK_API_KEY", agent_key), ("ROWBACK_ADMIN_KEY", admin_key)):
-            if reason := weak_key_reason(key):
+        for env, key in (("ROWBACK_API_KEY", agent_key), ("ROWBACK_ADMIN_KEY", admin_key), ("ROWBACK_METRICS_KEY", metrics_key)):
+            if key and (reason := weak_key_reason(key)):
                 raise ValueError(f"Startup Refusal: {env} {reason}. Generate one with: openssl rand -hex 32")
+    _METRICS_KEY = metrics_key
 
     _API_KEY = agent_key
     _ADMIN_KEY = admin_key
@@ -546,6 +551,38 @@ app.mount("/panel", _PanelGate())
 def healthz():
     """Liveness: the process is up."""
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(cred: HTTPAuthorizationCredentials | None = Security(_bearer)):
+    """Prometheus text format, scraped with `Authorization: Bearer $ROWBACK_METRICS_KEY`. Counts
+    only: no SQL, rows or identities. Off (404) unless that key is set."""
+    from fastapi.responses import PlainTextResponse
+
+    from rowback.audit import EVENTS
+    if not _METRICS_KEY:
+        raise HTTPException(status_code=404)
+    if not _key_matches(cred.credentials if cred else None, _METRICS_KEY):
+        raise HTTPException(status_code=401, detail="Invalid metrics key")
+    out = ["# HELP rowback_events_total Security decisions since the gateway started, by audit event.",
+           "# TYPE rowback_events_total counter"]
+    out += [f'rowback_events_total{{event="{e}"}} {n}' for e, n in sorted(EVENTS.items())]  # event names are fixed strings
+    import psycopg
+    try:
+        with psycopg.connect(_executor_instance.dsn, connect_timeout=3) as conn:
+            pending, oldest = conn.execute(
+                "SELECT count(*), coalesce(extract(epoch FROM now() - min(created_at)), 0) "
+                "FROM rowback.checkpoints WHERE status = 'pending'").fetchone()
+        up = 1
+    except psycopg.Error:
+        pending, oldest, up = 0, 0, 0
+    out += ["# HELP rowback_database_up Whether the control role could reach the database for this scrape.",
+            "# TYPE rowback_database_up gauge", f"rowback_database_up {up}",
+            "# HELP rowback_pending_checkpoints Held writes waiting for a person.",
+            "# TYPE rowback_pending_checkpoints gauge", f"rowback_pending_checkpoints {pending}",
+            "# HELP rowback_oldest_pending_seconds How long the oldest held write has waited.",
+            "# TYPE rowback_oldest_pending_seconds gauge", f"rowback_oldest_pending_seconds {float(oldest):.0f}"]
+    return PlainTextResponse("\n".join(out) + "\n", media_type="text/plain; version=0.0.4")
 
 
 @app.get("/readyz", include_in_schema=False)

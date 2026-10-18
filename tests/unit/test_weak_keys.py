@@ -25,3 +25,19 @@ def test_gateway_refuses_to_start_with_a_weak_admin_key(monkeypatch, tmp_path):
         monkeypatch.setenv(k, v)
     with pytest.raises(ValueError, match="ROWBACK_ADMIN_KEY is a public demo key"), TestClient(app):
         pass
+
+
+@pytest.mark.parametrize("metrics_key, error", [
+    ("demo-admin-key", "ROWBACK_METRICS_KEY is a public demo key"),
+    ("7a1c9e3f5b2d8064a1c3e5f7b9d2a4c6", "must differ from the agent and admin keys"),
+])
+def test_gateway_refuses_a_weak_or_reused_metrics_key(monkeypatch, tmp_path, metrics_key, error):
+    from rowback.api import app
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ROWBACK_ALLOW_WEAK_KEYS", raising=False)
+    admin = "7a1c9e3f5b2d8064a1c3e5f7b9d2a4c6"
+    for k, v in {"ROWBACK_AGENT_DSN": "postgresql://unused", "ROWBACK_ADMIN_DSN": "postgresql://unused",
+                 "ROWBACK_API_KEY": STRONG, "ROWBACK_ADMIN_KEY": admin, "ROWBACK_METRICS_KEY": metrics_key}.items():
+        monkeypatch.setenv(k, v)
+    with pytest.raises(ValueError, match=error), TestClient(app):
+        pass

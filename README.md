@@ -120,7 +120,7 @@ agent:
 ```
 Unknown keys fail startup, so a typo can never silently turn protection off.
 
-Environment: `ROWBACK_ADMIN_DSN` (control role), `ROWBACK_AGENT_DSN` (agent role), `ROWBACK_API_KEY` (agent), `ROWBACK_ADMIN_KEY` (approvers), `ROWBACK_AUDIT_LOG` (JSONL path), `ROWBACK_LICENSE_KEY` (Pro). Keys must be 32+ random characters (`openssl rand -hex 32`); the gateway refuses weak or demo keys unless `ROWBACK_ALLOW_WEAK_KEYS=true` (laptop demos only).
+Environment: `ROWBACK_ADMIN_DSN` (control role), `ROWBACK_AGENT_DSN` (agent role), `ROWBACK_API_KEY` (agent), `ROWBACK_ADMIN_KEY` (approvers), `ROWBACK_AUDIT_LOG` (JSONL path), `ROWBACK_LICENSE_KEY` (Pro), `ROWBACK_METRICS_KEY` (turns on `/metrics`). Keys must be 32+ random characters (`openssl rand -hex 32`); the gateway refuses weak or demo keys unless `ROWBACK_ALLOW_WEAK_KEYS=true` (laptop demos only).
 
 ## Installing on your own database
 ```bash
@@ -145,6 +145,15 @@ Local, single-user development without the service: `rowback serve` (stdio MCP).
 3. **Capture**: a `SECURITY DEFINER` row trigger records every change (cascades included), bound to a single-use capability token.
 4. **Undo**: an order that respects foreign keys (parents are restored before children), with conflict and schema-drift checks. It refuses rather than touching rows written later.
 5. **Ledger**: append-only, SHA-256 hash-chained checkpoints.
+
+### Monitoring
+`/healthz` (process up) and `/readyz` (both database roles reachable) need no key. Set `ROWBACK_METRICS_KEY` to turn on `/metrics` for Prometheus: decisions by event (`denied`, `held`, `applied`, `undone`, ...), held writes waiting, and the age of the oldest one, so you can alert when approvals pile up. It carries counts only, never SQL, rows or names.
+```yaml
+scrape_configs:
+  - job_name: rowback
+    authorization: { credentials: "<ROWBACK_METRICS_KEY>" }
+    static_configs: [{ targets: ["rowback:8000"] }]
+```
 
 **Current limits:** every registered table needs a primary key (one column or several; `rowback register` reads it from the table). Partitioned tables are supported: register the partitioned table and every partition, including ones added later, is covered, and a row moved to another partition comes back where it was. Writes to tables with rules or classic inheritance are refused, and so are partitioned tables with their own triggers. Writes to tables with their own triggers wait for a person, unless you register the table with `--allow-triggers` (for triggers like `updated_at` that only change the row itself or tables Rowback also protects); undo then switches them off while it restores rows, so rows come back exactly. DDL is blocked, not reversible. Full list in [SECURITY.md](SECURITY.md).
 

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from collections import Counter
 from datetime import UTC, datetime
 
 # Configure standard logger to write JSON to a file or stream
@@ -18,6 +19,10 @@ handler = logging.FileHandler(log_path)
 handler.setFormatter(logging.Formatter('%(message)s'))
 logger.addHandler(handler)
 
+# Per-event counts since the process started, for /metrics.
+# ponytail: Counter += under the GIL can drop a count under heavy thread contention; good enough for a dashboard.
+EVENTS: Counter[str] = Counter()
+
 def audit(event: str, *, actor: str, public_id: str | None = None, **fields) -> None:
     """One JSON line per security-relevant decision, for shipping to a SIEM.
 
@@ -25,6 +30,7 @@ def audit(event: str, *, actor: str, public_id: str | None = None, **fields) -> 
            undo_failed | exported | panel_login | panel_login_failed
     actor: who caused it (agent principal, or approver such as "cli:alice" / "api_admin").
     """
+    EVENTS[event] += 1
     record = {
         "timestamp": datetime.now(UTC).isoformat(),
         "event_type": f"rowback.{event}",
