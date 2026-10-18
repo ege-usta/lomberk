@@ -137,6 +137,15 @@ def show(token: str):
         console.print(f"[bold]{key}[/bold]: {cp[key]}")
     console.print("[bold]sql[/bold]:")
     console.print(cp["sql_text"], markup=False, highlight=False)
+    p = cp.get("preview")
+    if p:
+        import json
+        tables = ", ".join(f"{t} ({n})" for t, n in p["tables"].items())
+        more = f", first {len(p['sample'])} shown" if p["truncated"] else ""
+        console.print(f"[bold]would change[/bold]: {p['rows']} row(s) in {tables} (dry run when held{more})")
+        for s in p["sample"]:  # agent data: never parsed as markup
+            detail = json.dumps(s.get("changes") or s.get("row"), default=str)
+            console.print(f"  {s['op']:<6} {s['table']} {json.dumps(s['key'])}: {detail}", markup=False, highlight=False)
 
 
 @app.command()

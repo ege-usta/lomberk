@@ -55,6 +55,28 @@ async function act(id, action, button) {
   await refresh();
 }
 
+// What the held write would change, from its dry run. Agent data: text nodes only.
+function cellText(v) { return v === null || v === undefined ? "NULL" : typeof v === "object" ? JSON.stringify(v) : String(v); }
+
+function previewBlock(p) {
+  if (!p) return "";
+  const tables = Object.entries(p.tables).map(([t, n]) => `${t} (${n})`).join(", ");
+  const head = el("p", { className: "meta" }, `Would change ${p.rows} row${p.rows === 1 ? "" : "s"}: ${tables}`
+    + (p.truncated ? ` · first ${p.sample.length} shown` : "") + " · dry run when held");
+  const rows = p.sample.map((s) => {
+    const detail = s.changes
+      ? Object.entries(s.changes).map(([c, [a, b]]) => `${c}: ${cellText(a)} → ${cellText(b)}`).join("; ")
+      : Object.entries(s.row || {}).map(([c, v]) => `${c}=${cellText(v)}`).join(", ");
+    return el("tr", {},
+      el("td", {}, el("span", { className: `op ${s.op}` }, s.op.toUpperCase())),
+      el("td", {}, s.table),
+      el("td", { className: "nowrap" }, Object.values(s.key || {}).join(", ")),
+      el("td", {}, el("code", {}, detail)));
+  });
+  return el("div", { className: "preview" }, head,
+    el("div", { className: "scroll" }, el("table", {}, el("tbody", {}, ...rows))));
+}
+
 function pendingItem(cp) {
   const approve = el("button", { className: "btn allow", type: "button" }, "Approve");
   const reject = el("button", { className: "btn deny", type: "button" }, "Reject");
@@ -66,7 +88,8 @@ function pendingItem(cp) {
   const count = required > 1
     ? el("p", { className: "meta" }, got ? `Approved so far by ${cp.approved_by.join(", ")}` : "No approvals yet")
     : "";
-  return el("li", {}, meta, el("pre", { className: "sql" }, cp.sql_text), count, el("div", { className: "actions" }, approve, reject));
+  return el("li", {}, meta, el("pre", { className: "sql" }, cp.sql_text), previewBlock(cp.preview), count,
+    el("div", { className: "actions" }, approve, reject));
 }
 
 function historyRow(cp) {

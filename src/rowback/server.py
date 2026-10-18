@@ -72,6 +72,7 @@ def build_executor() -> tuple[RowbackExecutor, PolicyEngine]:
         protected_tables=config.protected_tables,
         statement_timeout_ms=config.limits.statement_timeout_ms,
         sensitive_columns=config.sensitive_columns,
+        preview_writes=config.approvals.preview,
     )
     return executor, PolicyEngine(config)
 

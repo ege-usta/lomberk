@@ -37,6 +37,11 @@ input { font: 1rem var(--mono); background: var(--ink-2); color: var(--paper); b
 .meta { margin: 0 0 .5rem; color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
 .sql { margin: 0 0 .75rem; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .95rem; }
 .actions { display: flex; gap: .75rem; flex-wrap: wrap; }
+.preview { margin: 0 0 .75rem; }
+.preview table { font-size: .85rem; }
+.preview code { overflow-wrap: anywhere; }
+.op { font: 700 .75rem var(--mono); letter-spacing: .04em; }
+.op.delete { color: var(--deny); } .op.update { color: var(--amber); } .op.insert { color: var(--allow); }
 .verdict { font-weight: 700; font-size: .8rem; letter-spacing: .04em; }
 .verdict.held, .verdict.pending { color: var(--amber); }
 .verdict.applied, .verdict.undone { color: var(--allow); }

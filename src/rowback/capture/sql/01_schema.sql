@@ -127,3 +127,11 @@ CREATE TABLE IF NOT EXISTS rowback.approvals (
     approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (public_id, actor)
 );
+
+-- What a held write would change, recorded by a dry run (executed, read, rolled back) when it
+-- was held, so an approver sees rows, not just SQL. A snapshot of that moment, not a promise.
+CREATE TABLE IF NOT EXISTS rowback.previews (
+    public_id   TEXT PRIMARY KEY REFERENCES rowback.checkpoints(public_id),
+    preview     JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

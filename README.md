@@ -43,6 +43,15 @@ curl -H "$H" -X POST localhost:8000/v1/checkpoints/cp_…/undo       # users AND
 ```
 Pending requests expire after `agent.approval_timeout_minutes`. Review the exact SQL first with `GET /v1/checkpoints/cp_…` or `rowback show cp_…`.
 
+**See the rows, not just the SQL.** When a write is held, Rowback runs it once, records what it changed and rolls it back, so the approver sees the effect before deciding, cascades included:
+```
+$ rowback show cp_…
+would change: 3 row(s) in public.users (1), public.payments (2) (dry run when held)
+  delete public.users {"id": "1"}: {"email": "a@x.io", "plan": "free", "api_token": "***MASKED***"}
+  delete public.payments {"id": "10"}: {"user_id": 1, "amount": 5}
+```
+The same preview is in the web panel and the API; Slack gets the counts only. Secret columns are masked, and columns hidden from the agent role never appear. A held write that would fail (a duplicate key, a missing parent) is refused at once instead of waiting for a person. The preview is a snapshot of the moment it was held. If a table's own triggers do something a rollback can't take back, set `approvals.preview: false`.
+
 ### Or approve in Slack (Pro)
 Create the app from [`slack/app-manifest.json`](slack/app-manifest.json) (bot scope `chat:write` only, Socket Mode, so no public URL is needed), invite the bot to your approvals channel, then:
 ```yaml

@@ -448,6 +448,8 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_agent_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.primary_key_columns TO %I', p_agent_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.inheritance_problem TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.preview_changes TO %I', p_agent_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON rowback.previews TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.inheritance_problem TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.primary_key_columns TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_control_role);
@@ -844,6 +846,38 @@ BEGIN
         'status', 'applied',
         'public_id', v_undo_public_id,
         'rows_affected', v_affected
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+
+-- The rows the in-flight write captured so far, for an approval preview. Callable only inside
+-- the write's own transaction with its live capability token (the same proof the capture
+-- trigger demands), and it drops every column the calling role can't SELECT, so it never shows
+-- more than that role could read anyway. The executor reads it, then rolls the write back.
+CREATE OR REPLACE FUNCTION rowback.preview_changes(p_capability_token UUID, p_limit INT DEFAULT 20)
+RETURNS JSONB AS $$
+DECLARE
+    v_cp BIGINT;
+BEGIN
+    SELECT id INTO v_cp FROM rowback.checkpoints
+     WHERE capability_token = p_capability_token AND status = 'executing' AND exec_txid = txid_current();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Security Violation: a preview needs the live execution token of this transaction.';
+    END IF;
+    RETURN jsonb_build_object(
+        'rows', (SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = v_cp),
+        'tables', (SELECT coalesce(jsonb_object_agg(t, n), '{}') FROM (
+                       SELECT table_schema || '.' || table_name AS t, count(*) AS n
+                       FROM rowback.row_changes WHERE checkpoint_id = v_cp GROUP BY 1) x),
+        'sample', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                       'table', s.table_schema || '.' || s.table_name, 'op', s.op, 'key', s.pk,
+                       'before', (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(s.old_row) e
+                                  WHERE has_column_privilege(session_user, s.table_oid, e.key, 'SELECT')),
+                       'after',  (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(s.new_row) e
+                                  WHERE has_column_privilege(session_user, s.table_oid, e.key, 'SELECT')))
+                     ORDER BY s.seq), '[]')
+                   FROM (SELECT * FROM rowback.row_changes WHERE checkpoint_id = v_cp
+                         ORDER BY seq LIMIT greatest(0, least(p_limit, 100))) s)
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;

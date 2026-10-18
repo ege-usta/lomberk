@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
         if runtime_super:
             raise ValueError("Startup Refusal: Agent role must not be a superuser.")
 
-        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns)
+        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns, preview_writes=config.approvals.preview)
         _policy_engine_instance = PolicyEngine(config)
 
         # Production Slack Transport Wiring

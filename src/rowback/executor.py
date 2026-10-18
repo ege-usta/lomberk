@@ -52,7 +52,16 @@ def _mask_json(value, secret):
 
 
 class HoldForApproval(Exception):
-    """Auto-approved write must be rolled back and sent to a human instead."""
+    """Write must be rolled back and sent to a human instead. `preview` is what it changed
+    before the rollback; `policy` marks a hold the policy asked for up front."""
+
+    def __init__(self, message: str, preview: dict | None = None, policy: bool = False):
+        super().__init__(message)
+        self.preview = preview
+        self.policy = policy
+
+
+PREVIEW_ROWS = 20
 
 
 class RowbackExecutor:
@@ -80,8 +89,9 @@ class RowbackExecutor:
     def get_checkpoint(self, public_id: str) -> dict | None:
         with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT public_id, status, classification, decision, agent_label, principal, sql_text, "
-                "rows_affected, created_at FROM rowback.checkpoints WHERE public_id = %s", (public_id,))
+                "SELECT c.public_id, c.status, c.classification, c.decision, c.agent_label, c.principal, c.sql_text, "
+                "c.rows_affected, c.created_at, p.preview FROM rowback.checkpoints c "
+                "LEFT JOIN rowback.previews p USING (public_id) WHERE c.public_id = %s", (public_id,))
             cp = cur.fetchone()
             if cp and cp["status"] == "pending":
                 # Tell an approver, before they decide, if this write could not be undone — they
@@ -132,7 +142,8 @@ class RowbackExecutor:
             cur.execute(
                 "SELECT c.public_id, c.created_at, c.status, c.classification, c.agent_label, c.principal, "
                 "c.sql_text, c.rows_affected, c.chain_seq, c.hash, "
-                "coalesce(array_agg(a.actor ORDER BY a.approved_at) FILTER (WHERE a.actor IS NOT NULL), '{}') AS approved_by "
+                "coalesce(array_agg(a.actor ORDER BY a.approved_at) FILTER (WHERE a.actor IS NOT NULL), '{}') AS approved_by, "
+                "(SELECT p.preview FROM rowback.previews p WHERE p.public_id = c.public_id) AS preview "
                 "FROM rowback.checkpoints c LEFT JOIN rowback.approvals a USING (public_id) "
                 "WHERE %(since)s::timestamptz IS NULL OR c.created_at >= %(since)s "
                 "GROUP BY c.id ORDER BY c.id DESC LIMIT %(limit)s",
@@ -217,7 +228,7 @@ class RowbackExecutor:
             fetched_data.append(row_dict)
         return fetched_data
 
-    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1, sensitive_columns: list[str] | None = None):
+    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1, sensitive_columns: list[str] | None = None, preview_writes: bool = False):
         if not dsn or not runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required")
         self.dsn = dsn
@@ -229,6 +240,7 @@ class RowbackExecutor:
         self.statement_timeout_ms = int(statement_timeout_ms)
         self.required_approvals = int(required_approvals)  # distinct people per held write
         self.sensitive_columns = tuple(sensitive_columns or ())  # config names treated like `password`
+        self.preview_writes = preview_writes  # dry-run held writes for an approval preview (config.approvals.preview)
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str, principal: str = "system", operation_id: str | None = None) -> str:
         import psycopg
@@ -260,6 +272,13 @@ class RowbackExecutor:
         if eval_result.decision == PolicyDecision.DENY:
             audit("denied", actor=principal, sql=eval_result.statement.sql, reason=eval_result.reason)
             return ExecutionResult(operation_id=operation_id, status="denied", message=eval_result.reason)
+
+        if eval_result.decision == PolicyDecision.REQUIRE_APPROVAL and self.preview_writes \
+                and eval_result.statement.stmt_class.value == "WRITE_DML":
+            # Dry run: execute, record what changed, roll back, then queue for a person.
+            return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value,
+                                          eval_result.decision.value, agent_label, principal, operation_id,
+                                          hold_reason=f"Policy requires explicit approval: {eval_result.reason}")
 
         if eval_result.decision == PolicyDecision.REQUIRE_APPROVAL:
             import psycopg
@@ -312,7 +331,35 @@ class RowbackExecutor:
 
         return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, principal, operation_id)
 
-    def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str, enforce_row_limit: bool = False, actor: str = "system"):
+    def _preview(self, cur, exec_token) -> dict:
+        """What the in-flight write changed, masked like agent results. Updates list only the
+        columns that changed; inserts and deletes list the row."""
+        from rowback.sql.classify import is_secret
+
+        def secret(name) -> bool:
+            return is_secret(name, self.sensitive_columns)
+
+        def clean(row):
+            if row is None:
+                return None
+            return {k: (MASK if secret(k) and v not in (None, "") else _mask_json(v, secret)) for k, v in row.items()}
+
+        cur.execute("SELECT rowback.preview_changes(%s, %s)", (exec_token, PREVIEW_ROWS))
+        p = cur.fetchone()[0]
+        sample = []
+        for item in p["sample"]:
+            before, after = clean(item["before"]), clean(item["after"])
+            entry = {"table": item["table"], "op": {"I": "insert", "U": "update", "D": "delete"}[item["op"]],
+                     "key": clean(item["key"])}
+            if entry["op"] == "update":
+                entry["changes"] = {k: [before.get(k), after.get(k)] for k in after if before.get(k) != after.get(k)}
+            else:
+                entry["row"] = before if entry["op"] == "delete" else after
+            sample.append(entry)
+        return {"rows": p["rows"], "tables": p["tables"], "sample": sample, "truncated": p["rows"] > len(sample)}
+
+    def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str, enforce_row_limit: bool = False,
+                     actor: str = "system", hold_reason: str | None = None):
         import psycopg
 
 
@@ -420,8 +467,11 @@ class RowbackExecutor:
                             if has_user_triggers and enforce_row_limit:
                                 # Undo refuses tables with their own triggers unless registered with
                                 # --allow-triggers, so this write could not be undone.
-                                raise HoldForApproval(f"Table {schema}.{table} has its own triggers, so this write can't be undone. "
-                                                      "If they only change the row itself (like updated_at), register it with --allow-triggers.")
+                                # Held before it runs: a dry run would fire triggers a rollback might not take back.
+                                raise HoldForApproval(((hold_reason + " ") if hold_reason else "")
+                                                      + f"Table {schema}.{table} has its own triggers, so this write can't be undone. "
+                                                      "If they only change the row itself (like updated_at), register it with --allow-triggers.",
+                                                      policy=bool(hold_reason and hold_reason.startswith("Policy requires")))
 
                             if tgattr and str(tgattr) != '' and str(tgattr) != 'b\'\'':
                                 raise Exception(f"Trigger column restrictions (UPDATE OF) are not allowed on {schema}.{table}.")
@@ -446,7 +496,8 @@ class RowbackExecutor:
                             """, ([s for s, _ in tables], [t for _, t in tables]))
                             hit = sorted({r[0] for r in cur.fetchall()} & self.protected_tables)
                             if hit:
-                                raise HoldForApproval(f"Write can cascade into protected table(s) {', '.join(hit)}.")
+                                # Held after it runs (and is rolled back), so the preview shows the cascade.
+                                hold_reason = hold_reason or f"Write can cascade into protected table(s) {', '.join(hit)}."
 
                         cur.execute(sql_to_execute)
                         if cur.description:
@@ -461,19 +512,28 @@ class RowbackExecutor:
                             # includes FK cascades and anything nested in the statement.
                             cur.execute("SELECT current_setting('rowback.seq')::bigint")
                             changed = max(rows_affected, cur.fetchone()[0])
-                            if changed > limit:
-                                # Leaving the with-block via exception rolls the write back.
-                                raise HoldForApproval(f"Rows changed ({changed}) exceeds limit ({limit}).")
+                            if changed > limit and not hold_reason:
+                                hold_reason = f"Rows changed ({changed}) exceeds limit ({limit})."
+                        if hold_reason:
+                            # Leaving the with-block via exception rolls the write back.
+                            preview = self._preview(cur, exec_token) if self.preview_writes else None
+                            raise HoldForApproval(hold_reason, preview, policy=hold_reason.startswith("Policy requires"))
                         cur.execute("SELECT rowback.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
                         execution_completed = True
         except HoldForApproval as e:
             try:
-                with psycopg.connect(self.dsn, autocommit=True) as rq_conn, rq_conn.cursor() as rq_cur:
+                # One transaction: an approver never sees the held write without its preview.
+                with psycopg.connect(self.dsn) as rq_conn, rq_conn.transaction(), rq_conn.cursor() as rq_cur:
                     rq_cur.execute("SELECT rowback.requeue_checkpoint(%s)", (public_id,))
+                    if e.preview is not None:
+                        rq_cur.execute("INSERT INTO rowback.previews (public_id, preview) VALUES (%s, %s) "
+                                       "ON CONFLICT (public_id) DO UPDATE SET preview = EXCLUDED.preview, created_at = now()",
+                                       (public_id, psycopg.types.json.Jsonb(e.preview)))
             except psycopg.Error:
                 return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="unknown", message=f"{e} Write was rolled back but the checkpoint could not be re-queued.")
             audit("held", actor=actor, public_id=public_id, sql=sql_to_execute, reason=str(e))
-            return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="approval_required", message=f"{e} Write was rolled back and requires explicit approval.")
+            message = str(e) if e.policy else f"{e} Write was rolled back and requires explicit approval."
+            return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="approval_required", message=message)
         except Exception as e:
             error_msg = _agent_message(e)
 
@@ -496,7 +556,8 @@ class RowbackExecutor:
         audit("applied", actor=actor, public_id=public_id, sql=sql_to_execute, rows_affected=rows_affected)
         return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, rows_affected=rows_affected, status="applied", message="Success", data=fetched_data)
 
-    def _execute_internal(self, sql_to_execute: str, classification: str, decision: str, agent_label: str, principal: str = "system", operation_id: str | None = None):
+    def _execute_internal(self, sql_to_execute: str, classification: str, decision: str, agent_label: str, principal: str = "system",
+                          operation_id: str | None = None, hold_reason: str | None = None):
         import psycopg
         try:
             with psycopg.connect(self.dsn, autocommit=False) as conn:
@@ -517,7 +578,8 @@ class RowbackExecutor:
                         return self._resolve_duplicate(principal, operation_id, sql_to_execute)
                     raise
 
-            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute, enforce_row_limit=True, actor=principal)
+            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute, enforce_row_limit=True, actor=principal,
+                                     hold_reason=hold_reason)
 
         except psycopg.OperationalError as e:
             if operation_id:

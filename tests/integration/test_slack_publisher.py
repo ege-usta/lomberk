@@ -192,3 +192,15 @@ def test_agent_controlled_fields_cannot_inject_slack_markup():
         agent_line = text.splitlines()[1]
         assert agent_line.count("`") == 2, agent_line  # label cannot close its code span
         assert "&lt;!channel&gt;" in text
+
+
+def test_preview_reaches_slack_as_counts_only():
+    import datetime
+    preview = {"rows": 3, "tables": {"public.users": 1, "public.payments": 2}, "truncated": False,
+               "sample": [{"table": "public.users", "op": "delete", "key": {"id": "1"}, "row": {"email": "a@secret.io"}}]}
+    pub = SlackPublisher("unused", FakeWeb(), "C", {"T1"})
+    _, blocks = pub._blocks("cp_1", "agent", "p", "WRITE_DML", "DELETE FROM public.users WHERE id = 1",
+                            datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC), preview)
+    text = blocks[0]["text"]["text"]
+    assert "Would change *3* row(s): `public.users` (1), `public.payments` (2)" in text
+    assert "a@secret.io" not in text  # row values never leave for Slack

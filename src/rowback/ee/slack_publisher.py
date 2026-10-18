@@ -54,8 +54,9 @@ class SlackPublisher:
                     ON CONFLICT DO NOTHING
                     RETURNING public_id
                 )
-                SELECT c.public_id, c.agent_label, c.principal, c.classification, c.sql_text, c.created_at
-                FROM rowback.checkpoints c JOIN claimed USING (public_id) ORDER BY c.id
+                SELECT c.public_id, c.agent_label, c.principal, c.classification, c.sql_text, c.created_at, p.preview
+                FROM rowback.checkpoints c JOIN claimed USING (public_id)
+                LEFT JOIN rowback.previews p USING (public_id) ORDER BY c.id
             """, (self.channel_id, self.batch_size)).fetchall()
 
     def _record(self, public_id: str, state: str, team_id: str | None = None, ts: str | None = None) -> None:
@@ -73,10 +74,14 @@ class SlackPublisher:
         return row[0] if row else None
 
     # -- Slack ---------------------------------------------------------------
-    def _blocks(self, public_id, agent_label, principal, classification, sql_text, created_at) -> tuple[str, list]:
+    def _blocks(self, public_id, agent_label, principal, classification, sql_text, created_at, preview=None) -> tuple[str, list]:
         text = f"Rowback approval needed: {public_id}"
         detail = (f"*Approval needed* `{public_id}`\n"
                   f"Agent: `{_inline(agent_label)}` ({_inline(principal)}) · {_inline(classification)} · {created_at:%Y-%m-%d %H:%M:%S %Z}")
+        if preview:
+            # Counts only: row values stay out of Slack, like SQL does unless include_sql is set.
+            tables = ", ".join(f"`{_inline(t)}` ({int(n)})" for t, n in preview["tables"].items())
+            detail += f"\nWould change *{int(preview['rows'])}* row(s): {tables}"
         if self.include_sql:
             preview = sql_text if len(sql_text) <= SQL_PREVIEW_CHARS else sql_text[:SQL_PREVIEW_CHARS] + " …"
             detail += f"\n```{_esc(preview).replace('```', '` ` `')}```"

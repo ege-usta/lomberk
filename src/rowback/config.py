@@ -34,6 +34,9 @@ class ApprovalsConfig(_Strict):
     # Distinct people who must approve a held write before it runs (the two-person rule).
     # Counts identities: SSO emails, Slack users, CLI users. The shared admin key is one person.
     required: int = Field(1, ge=1, le=5)
+    # Dry-run every held write (run it, read the rows it changed, roll it back) so approvers see
+    # what would change. Turn off if a table's triggers do something a rollback can't take back.
+    preview: bool = True
 
 class SsoConfig(_Strict):
     # OIDC approvers (Enterprise). Unset issuer = approvals use the admin key only.
