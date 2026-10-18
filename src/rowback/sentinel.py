@@ -10,7 +10,8 @@ BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u206
 # first, and agents can't create functions), only computes on its arguments, and touches no GUC,
 # file, session, lock, sequence, server setting or other database. Deliberately absent:
 # set_config/current_setting, pg_*, dblink, lo_*, nextval/setval, setseed, the *_to_xml family
-# (query_to_xml runs a SQL string), repeat/lpad/rpad/array_fill (one call can ask for 1 GB), and
+# (query_to_xml runs a SQL string), repeat/lpad/rpad/array_fill/format (one call can ask for 1 GB:
+# format('%1073000000s', 'x') pads like lpad), and
 # JSON functions that enumerate values without naming a key (see the note at the end).
 # A name added here needs the same guarantees and a case in tests/unit/test_firewall_usability.py.
 # ponytail: name allowlist, resolve by OID if agents need user-defined functions.
@@ -29,7 +30,7 @@ ALLOWED_FUNCS = frozenset({
     # text
     'lower', 'upper', 'initcap', 'length', 'char_length', 'character_length', 'octet_length',
     'bit_length', 'trim', 'btrim', 'ltrim', 'rtrim', 'substr', 'substring', 'replace', 'translate',
-    'reverse', 'concat', 'concat_ws', 'format', 'left', 'right', 'position', 'strpos', 'starts_with',
+    'reverse', 'concat', 'concat_ws', 'left', 'right', 'position', 'strpos', 'starts_with',
     'split_part', 'ascii', 'chr', 'md5', 'sha224', 'sha256', 'sha384', 'sha512', 'encode', 'decode',
     'regexp_replace', 'regexp_match', 'regexp_matches', 'regexp_like', 'regexp_count', 'regexp_substr',
     'regexp_instr', 'regexp_split_to_array', 'regexp_split_to_table',

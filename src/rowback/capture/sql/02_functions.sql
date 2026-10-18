@@ -327,6 +327,7 @@ CREATE OR REPLACE FUNCTION rowback.register_table(
 ) RETURNS VOID AS $$
 DECLARE
     v_table_oid OID;
+    v_member OID;
     v_pk TEXT;
     v_all TEXT;
     v_visible TEXT;
@@ -386,6 +387,11 @@ BEGIN
             EXECUTE format('GRANT SELECT (%s) ON %I.%I TO %I', v_visible, p_schema, p_table, p_agent_role);
         END IF;
     END IF;
+    -- Partitions: the agent goes through the partitioned table only, so no grant it held on a
+    -- partition (default privileges, GRANT ... ON ALL TABLES) can bypass the column hiding above.
+    FOR v_member IN SELECT relid FROM pg_partition_tree(v_table_oid) WHERE relid <> v_table_oid LOOP
+        EXECUTE format('REVOKE ALL ON %s FROM %I', v_member::regclass, p_agent_role);
+    END LOOP;
     EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_agent_role);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
@@ -864,17 +870,25 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Security Violation: a preview needs the live execution token of this transaction.';
     END IF;
+    -- Rows of a partition are shown, and their columns checked, against the partitioned table
+    -- the agent writes through: privileges live there, not on the leaf.
     RETURN jsonb_build_object(
         'rows', (SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = v_cp),
         'tables', (SELECT coalesce(jsonb_object_agg(t, n), '{}') FROM (
-                       SELECT table_schema || '.' || table_name AS t, count(*) AS n
+                       SELECT coalesce(pg_partition_root(table_oid)::regclass::text, table_schema || '.' || table_name) AS t,
+                              count(*) AS n
                        FROM rowback.row_changes WHERE checkpoint_id = v_cp GROUP BY 1) x),
+        -- Which rows, not their values: approval re-runs the write and refuses if this differs.
+        'digest', (SELECT md5(coalesce(string_agg(table_oid::text || ':' || op || ':' || pk::text, ','
+                                                  ORDER BY table_oid, op, pk::text), ''))
+                   FROM rowback.row_changes WHERE checkpoint_id = v_cp),
         'sample', (SELECT coalesce(jsonb_agg(jsonb_build_object(
-                       'table', s.table_schema || '.' || s.table_name, 'op', s.op, 'key', s.pk,
+                       'table', coalesce(pg_partition_root(s.table_oid)::regclass::text, s.table_schema || '.' || s.table_name),
+                       'op', s.op, 'key', s.pk,
                        'before', (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(s.old_row) e
-                                  WHERE has_column_privilege(session_user, s.table_oid, e.key, 'SELECT')),
+                                  WHERE has_column_privilege(session_user, coalesce(pg_partition_root(s.table_oid), s.table_oid), e.key, 'SELECT')),
                        'after',  (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(s.new_row) e
-                                  WHERE has_column_privilege(session_user, s.table_oid, e.key, 'SELECT')))
+                                  WHERE has_column_privilege(session_user, coalesce(pg_partition_root(s.table_oid), s.table_oid), e.key, 'SELECT')))
                      ORDER BY s.seq), '[]')
                    FROM (SELECT * FROM rowback.row_changes WHERE checkpoint_id = v_cp
                          ORDER BY seq LIMIT greatest(0, least(p_limit, 100))) s)

@@ -47,6 +47,17 @@ LEAKS = [
     "SELECT settings['stripe_secret'] FROM public.users",
     "SELECT id FROM public.users WHERE settings ? 'password'",
     "SELECT id FROM public.users WHERE settings @> '{\"pwd\": \"x\"}'::jsonb",
+    # A JSON key chosen at run time can be any key (security-audit run-3, findings 1-2):
+    "SELECT k, settings->>k FROM public.users u, jsonb_object_keys(u.settings) k",
+    "SELECT k, jsonb_extract_path_text(u.settings, k) FROM public.users u, jsonb_object_keys(u.settings) k",
+    "SELECT settings->>k.name FROM public.users, public.keys k",
+    "SELECT settings->>('api_'||'key') FROM public.users",
+    "SELECT settings->>coalesce('api_key', '') FROM public.users",
+    "SELECT settings #>> ARRAY['auth', 'api_key'] FROM public.users",
+    "SELECT jsonb_extract_path_text(settings, VARIADIC ARRAY['api_key']) FROM public.users",
+    "SELECT jsonb_extract_path_text(settings, 'api_' || 'key') FROM public.users",
+    "SELECT json_extract_path(settings::json, lower('API_KEY')) FROM public.users",
+    "SELECT jsonb_set(settings, ARRAY['token'], '1') FROM public.users",
 ]
 
 ALLOWED = [
@@ -64,6 +75,13 @@ ALLOWED = [
     "UPDATE public.users SET name = 'x' WHERE id = 1 RETURNING *",
     "DELETE FROM public.users WHERE id = 1",
     "SELECT o.id, c.name FROM public.orders o JOIN public.customers c ON c.id = o.customer_id",
+    "SELECT tags->0, meta->'items'->-1 FROM public.posts",             # constant keys and indexes
+    "SELECT settings #>> ARRAY['ui', 'theme'] FROM public.users",
+    "SELECT settings #>> '{ui,theme}' FROM public.users",
+    "SELECT jsonb_extract_path_text(meta, 'items', '0', 'sku') FROM public.orders",
+    "SELECT item->>'sku' FROM public.orders, jsonb_array_elements(meta->'items') item",
+    "SELECT d::date FROM generate_series(now(), now() + interval '2 days', interval '1 day') d",
+    "SELECT id FROM public.users WHERE settings @> jsonb_build_object('beta', true)",
 ]
 
 

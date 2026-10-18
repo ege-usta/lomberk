@@ -150,6 +150,40 @@ def _secret_literal(node, extra) -> bool:
     return val.get("@") == "String" and any(is_secret(t, extra) for t in re.split(r"[^\w]+", val.get("sval", "")) if t)
 
 
+# Operators that pick a value out of JSON by key or path. Their key must be written out (a
+# literal, or an ARRAY of literals) so it can be checked: a key computed at run time, from
+# jsonb_object_keys(), a table column or 'api_' || 'key', can be any key (security-audit run-3).
+JSON_PICK_OPERATORS = {"->", "->>", "#>", "#>>", "?", "?|", "?&", "#-"}
+# JSON functions whose arguments after the first are a key path, by the same rule.
+JSON_PATH_FUNCS = {"jsonb_extract_path", "jsonb_extract_path_text", "json_extract_path", "json_extract_path_text",
+                   "jsonb_set", "jsonb_set_lax", "jsonb_insert"}
+
+
+def _constant(node) -> bool:
+    """A literal, a cast or negated literal, or an ARRAY[...] of them: a key the checks can read."""
+    while isinstance(node, dict) and node.get("@") == "TypeCast":
+        node = node.get("arg")
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("@")
+    if kind == "A_Const":
+        return True
+    if kind == "A_ArrayExpr":
+        return all(_constant(e) for e in node.get("elements") or ())
+    if kind == "A_Expr" and node.get("lexpr") is None and [n.get("sval") for n in node.get("name", ())] == ["-"]:
+        return _constant(node.get("rexpr"))
+    return False
+
+
+def _secret_constant(node, extra) -> bool:
+    """A literal key naming a secret, including inside ARRAY['auth', 'api_key']."""
+    while isinstance(node, dict) and node.get("@") == "TypeCast":
+        node = node.get("arg")
+    if isinstance(node, dict) and node.get("@") == "A_ArrayExpr":
+        return any(_secret_constant(e, extra) for e in node.get("elements") or ())
+    return _secret_literal(node, extra)
+
+
 def check_sensitive_columns(ast, extra=()) -> list[str]:
     """Reasons the statement could expose a secret-looking column, or [] if it can't.
 
@@ -204,18 +238,29 @@ def check_sensitive_columns(ast, extra=()) -> list[str]:
                 found.append(f"whole-row reference {fields[0]['sval']}")
             walk(fields, star_ok)
             return
-        json_op = kind == "A_Expr" and any(n.get("sval") in JSON_KEY_OPERATORS for n in node.get("name", ()) if isinstance(n, dict))
-        if json_op and (_secret_literal(node.get("lexpr"), extra) or _secret_literal(node.get("rexpr"), extra)):
+        op = [n.get("sval") for n in node.get("name", ()) if isinstance(n, dict)] if kind == "A_Expr" else []
+        json_op = any(o in JSON_KEY_OPERATORS for o in op)
+        if json_op and (_secret_constant(node.get("lexpr"), extra) or _secret_constant(node.get("rexpr"), extra)):
             found.append("a secret-looking JSON key")
-        if kind == "FuncCall" and any(_secret_literal(a, extra) for a in node.get("args", ())):
-            # strpos(settings::text, 'api_key'), jsonb_extract_path_text(settings, 'token'):
-            # a function argument naming a secret key reaches it as surely as `->>` does.
-            found.append("a secret-looking key named in a function argument")
+        if any(o in JSON_PICK_OPERATORS for o in op) and not _constant(node.get("rexpr")):
+            found.append("a JSON key chosen at run time (write the key as a literal)")
+        if kind == "FuncCall":
+            args = node.get("args") or ()
+            if any(_secret_constant(a, extra) for a in args):
+                # strpos(settings::text, 'api_key'), jsonb_extract_path_text(settings, 'token'):
+                # a function argument naming a secret key reaches it as surely as `->>` does.
+                found.append("a secret-looking key named in a function argument")
+            name = (node.get("funcname") or [{}])[-1].get("sval")
+            if name in JSON_PATH_FUNCS and (node.get("func_variadic") or not all(
+                    _constant(a) for a in (args[1:2] if name.startswith("jsonb_set") or name == "jsonb_insert" else args[1:]))):
+                found.append("a JSON key chosen at run time (write the key path as literals)")
         if kind == "A_Indirection":
             for ind in node.get("indirection", ()):
-                if isinstance(ind, dict) and ind.get("@") == "A_Indices" and (
-                        _secret_literal(ind.get("uidx"), extra) or _secret_literal(ind.get("lidx"), extra)):
-                    found.append("a secret-looking JSON key")
+                if isinstance(ind, dict) and ind.get("@") == "A_Indices":
+                    if _secret_literal(ind.get("uidx"), extra) or _secret_literal(ind.get("lidx"), extra):
+                        found.append("a secret-looking JSON key")
+                    if any(i is not None and not _constant(i) for i in (ind.get("uidx"), ind.get("lidx"))):
+                        found.append("a JSON key or index chosen at run time (write it as a literal)")
             walk(node.get("arg"))
             walk(node.get("indirection"), star_ok)
             return

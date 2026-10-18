@@ -6,6 +6,7 @@ from psycopg import sql
 from pydantic import BaseModel
 
 from rowback.audit import audit
+from rowback.sentinel import BIDI_CONTROLS
 
 logger = logging.getLogger("rowback.executor")
 
@@ -62,6 +63,25 @@ class HoldForApproval(Exception):
 
 
 PREVIEW_ROWS = 20
+PREVIEW_CHARS = 200  # per value shown to an approver
+
+
+# Tables an ON DELETE/UPDATE cascade from %(t)s can reach that have triggers of their own and were not
+# registered --allow-triggers: undo would refuse to restore their rows.
+CASCADE_TRIGGER_SQL = """
+    WITH RECURSIVE reach(oid) AS (
+        SELECT %(t)s::oid
+        UNION
+        SELECT k.conrelid FROM pg_constraint k JOIN reach r ON k.confrelid = r.oid
+        WHERE k.contype = 'f' AND (k.confdeltype IN ('c', 'n', 'd') OR k.confupdtype IN ('c', 'n', 'd'))
+    )
+    SELECT n.nspname || '.' || c.relname FROM reach r
+    JOIN pg_class c ON c.oid = r.oid JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE r.oid <> %(t)s
+      AND EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid = r.oid AND NOT g.tgisinternal AND g.tgname <> 'rowback_capture')
+      AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = r.oid), false)
+    ORDER BY 1 LIMIT 1
+"""
 
 
 class RowbackExecutor:
@@ -124,6 +144,12 @@ class RowbackExecutor:
                     if not row:
                         continue
                     trig, rules, inh = row
+                    cur.execute("SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                                "WHERE n.nspname = %s AND c.relname = %s", (schema, table))
+                    cur.execute(CASCADE_TRIGGER_SQL, {"t": cur.fetchone()[0]})
+                    cascade = cur.fetchone()
+                    if cascade:
+                        blocked.append(f"{schema}.{table} cascades into {cascade[0]}, which has its own triggers")
                     if inh:  # first: for a partitioned table it names the exact partition and reason
                         blocked.append(inh)
                     elif trig:
@@ -339,10 +365,23 @@ class RowbackExecutor:
         def secret(name) -> bool:
             return is_secret(name, self.sensitive_columns)
 
+        def shown(v):
+            # Agent-written data reaches a person here: no direction overrides that reorder what
+            # they read, and no value long enough to push the rest of the preview out of view.
+            if isinstance(v, str):
+                v = "".join(f"\\u{ord(ch):04x}" if ch in BIDI_CONTROLS else ch for ch in v)
+                if len(v) > PREVIEW_CHARS:
+                    v = f"{v[:PREVIEW_CHARS]}… ({len(v) - PREVIEW_CHARS} more characters)"
+                return v
+            if isinstance(v, dict):
+                return {shown(k): shown(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [shown(x) for x in v]
+            return v
+
         def clean(row):
-            if row is None:
-                return None
-            return {k: (MASK if secret(k) and v not in (None, "") else _mask_json(v, secret)) for k, v in row.items()}
+            row = row or {}  # NULL when the role may SELECT none of the columns
+            return {shown(k): shown(MASK if secret(k) and v not in (None, "") else _mask_json(v, secret)) for k, v in row.items()}
 
         cur.execute("SELECT rowback.preview_changes(%s, %s)", (exec_token, PREVIEW_ROWS))
         p = cur.fetchone()[0]
@@ -356,10 +395,11 @@ class RowbackExecutor:
             else:
                 entry["row"] = before if entry["op"] == "delete" else after
             sample.append(entry)
-        return {"rows": p["rows"], "tables": p["tables"], "sample": sample, "truncated": p["rows"] > len(sample)}
+        return {"rows": p["rows"], "tables": p["tables"], "sample": sample, "truncated": p["rows"] > len(sample),
+                "digest": p["digest"]}
 
     def _execute_dml(self, cp_id: int, public_id: str, exec_token: str, sql_to_execute: str, enforce_row_limit: bool = False,
-                     actor: str = "system", hold_reason: str | None = None):
+                     actor: str = "system", hold_reason: str | None = None, expect: dict | None = None):
         import psycopg
 
 
@@ -460,10 +500,20 @@ class RowbackExecutor:
                                 "AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = %(t)s), false)",
                                 {"t": c_oid})
                             in_inheritance, has_rules, has_user_triggers = cur.fetchone()
+                            # Undo refuses every table it must restore that has triggers of its own,
+                            # and that includes tables a cascade reaches: find them before writing.
+                            cur.execute(CASCADE_TRIGGER_SQL, {"t": c_oid})
+                            cascade_trigger = cur.fetchone()
                             if in_inheritance:
                                 raise Exception(f"Table {schema}.{table}: {in_inheritance}.")
                             if has_rules:
                                 raise Exception(f"Table {schema}.{table} has rewrite rules, which move writes past capture.")
+                            if cascade_trigger and enforce_row_limit and not has_user_triggers:
+                                raise HoldForApproval(((hold_reason + " ") if hold_reason else "")
+                                                      + f"A write on {schema}.{table} can cascade into {cascade_trigger[0]}, which has "
+                                                      "its own triggers, so it couldn't be undone. If they only change the row itself, "
+                                                      "register that table with --allow-triggers.",
+                                                      policy=bool(hold_reason and hold_reason.startswith("Policy requires")))
                             if has_user_triggers and enforce_row_limit:
                                 # Undo refuses tables with their own triggers unless registered with
                                 # --allow-triggers, so this write could not be undone.
@@ -506,6 +556,15 @@ class RowbackExecutor:
                             fetched_data = self._mask_and_sanitize_rows(columns, rows)
 
                         rows_affected = max(cur.rowcount, 0)
+                        if expect and expect.get("digest"):
+                            # The person approved the rows the preview showed. If the data or the
+                            # clock moved since (`WHERE ... OR now() > ...`), refuse; rollback below.
+                            cur.execute("SELECT rowback.preview_changes(%s, 0)", (exec_token,))
+                            now = cur.fetchone()[0]
+                            if now["digest"] != expect["digest"]:
+                                raise Exception(f"This write now changes {now['rows']} row(s), not the {expect['rows']} previewed "
+                                                "when it was held (the data or the time changed). Nothing was changed; "
+                                                "ask the agent to send it again.")
                         limit = self.max_rows_without_approval
                         if enforce_row_limit and limit is not None:
                             # Count what the capture trigger recorded, not the outer command tag:
@@ -626,10 +685,13 @@ class RowbackExecutor:
 
                     cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                     exec_token = cur.fetchone()[0]
+                    cur.execute("SELECT preview FROM rowback.previews WHERE public_id = %s", (public_id,))
+                    stored = cur.fetchone()
                     # Transaction context manager will commit
 
             audit("approved", actor=actor, public_id=public_id, sql=sql_to_execute)
-            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute, actor=actor)
+            return self._execute_dml(cp_id, public_id, exec_token, sql_to_execute, actor=actor,
+                                     expect=stored[0] if stored else None)
 
         except psycopg.OperationalError as e:
             return ExecutionResult(operation_id=None, status="unknown", message=str(e))

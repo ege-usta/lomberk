@@ -75,7 +75,7 @@ AGENT_WORKLOAD = [
     "SELECT (regexp_match(note, 'order #(\\d+)'))[1] FROM public.tickets",
     "SELECT initcap(name), upper(left(name, 1)) FROM public.users",
     "SELECT md5(lower(trim(email))) FROM public.users",
-    "SELECT format('%s <%s>', name, email) FROM public.users",
+    "SELECT concat(name, ' <', email, '>') FROM public.users",
     "SELECT string_agg(tag, ', ' ORDER BY tag) FROM public.post_tags WHERE post_id = 9",
     "SELECT * FROM public.users WHERE starts_with(email, 'admin')",
     "SELECT concat_ws(' ', first_name, last_name) FROM public.users",
@@ -136,6 +136,8 @@ NEWLY_OPENED_ATTACKS = [
     "SELECT setseed(0.5)",
     "SELECT repeat('x', 1000000000)",
     "SELECT lpad('x', 1000000000, 'y')",
+    "SELECT format('%1073000000s', 'x')",                       # padding width: 1 GB in one call
+    "SELECT format('%-1073000000s', 'x')",
     "SELECT public.jsonb_set(meta, '{a}', '1') FROM public.users",
     "SELECT evil.generate_series(1, 3)",
     "SELECT * FROM generate_series(1, 3), pg_sleep(10)",
@@ -181,7 +183,7 @@ def test_dangerous_names_never_join_the_allowlist():
     # A guard against a well-meant future addition, not just today's list.
     banned = {"set_config", "current_setting", "nextval", "setval", "currval", "setseed", "dblink",
               "query_to_xml", "table_to_xml", "cursor_to_xml", "database_to_xml", "schema_to_xml",
-              "repeat", "lpad", "rpad", "array_fill", "lo_import", "lo_export", "txid_current", "version",
+              "repeat", "lpad", "rpad", "array_fill", "format", "lo_import", "lo_export", "txid_current", "version",
               "jsonb_each", "jsonb_each_text", "json_each", "json_each_text", "jsonb_path_query",
               "jsonb_path_query_array", "jsonb_path_query_first", "jsonb_path_exists", "jsonb_path_match"}
     assert not (banned & ALLOWED_FUNCS)
