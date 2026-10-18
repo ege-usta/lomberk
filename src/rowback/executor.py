@@ -106,20 +106,20 @@ class RowbackExecutor:
                         "EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND t.tgname <> 'rowback_capture') "
                         "  AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = c.oid), false), "
                         "EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class = c.oid AND rulename <> '_RETURN'), "
-                        "EXISTS(SELECT 1 FROM pg_inherits WHERE inhparent = c.oid OR inhrelid = c.oid) "
+                        "rowback.inheritance_problem(c.oid) "
                         "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-                        "WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'",
+                        "WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')",
                         (schema, table))
                     row = cur.fetchone()
                     if not row:
                         continue
                     trig, rules, inh = row
-                    if trig:
+                    if inh:  # first: for a partitioned table it names the exact partition and reason
+                        blocked.append(inh)
+                    elif trig:
                         blocked.append(f"{schema}.{table} has its own triggers (register it with --allow-triggers to make this undoable)")
                     elif rules:
                         blocked.append(f"{schema}.{table} has rewrite rules")
-                    elif inh:
-                        blocked.append(f"{schema}.{table} is part of an inheritance tree")
             if blocked:
                 return "This write cannot be undone once approved: " + "; ".join(blocked)
         except Exception:
@@ -346,6 +346,12 @@ class RowbackExecutor:
                         for schema, table in tables:
                             if schema in ('rowback', 'rowback_trash', 'information_schema', 'pg_catalog'):
                                 raise Exception(f"Direct DML on system schema {schema} is forbidden.")
+                            # Before LOCK, which needs privileges only registered tables have: say why plainly.
+                            cur.execute("SELECT EXISTS (SELECT 1 FROM rowback.registered_tables WHERE schema_name = %s AND table_name = %s)",
+                                        (schema, table))
+                            if not cur.fetchone()[0]:
+                                raise Exception(f"Table {schema}.{table} is not registered for mutation. "
+                                                "For a partition, write through its partitioned table.")
                             cur.execute(sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE;").format(sql.Identifier(schema), sql.Identifier(table)))
 
                             cur.execute("""
@@ -359,37 +365,27 @@ class RowbackExecutor:
                                     t.tgqual,
                                     t.tgfoid,
                                     p.oid AS expected_foid,
-                                    a.attname AS pk_exists,
-                                    (
-                                        SELECT a2.attname
-                                        FROM pg_index i
-                                        JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[0]
-                                        WHERE i.indrelid = c.oid AND i.indisprimary AND i.indnatts = 1
-                                    ) AS actual_pk_column
+                                    array_to_string(rowback.primary_key_columns(c.oid), ',') AS actual_pk_column
                                 FROM pg_class c
                                 JOIN pg_namespace n ON n.oid = c.relnamespace
                                 LEFT JOIN rowback.registered_tables r ON r.schema_name = n.nspname AND r.table_name = c.relname
                                 LEFT JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = 'rowback_capture'
                                 LEFT JOIN pg_proc p ON p.proname = 'capture_row_change' AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'rowback') AND p.pronargs = 0
-                                LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = r.pk_column AND a.attnum > 0 AND NOT a.attisdropped
-                                WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'
+                                WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')
                             """, (schema, table))
                             row2 = cur.fetchone()
 
                             if not row2: raise Exception(f"Table {schema}.{table} does not exist.")
 
-                            (c_oid, r_table_oid, pk_column, tgenabled, tgtype, tgattr, tgqual, tgfoid, expected_foid, pk_exists, actual_pk_column) = row2
+                            (c_oid, r_table_oid, pk_column, tgenabled, tgtype, tgattr, tgqual, tgfoid, expected_foid, actual_pk_column) = row2
 
                             if r_table_oid is None:
                                 raise Exception(f"Table {schema}.{table} is not registered for mutation.")
                             if c_oid != r_table_oid:
                                 raise Exception(f"Registration mismatch for {schema}.{table}: OID has changed.")
 
-                            if pk_exists is None:
-                                raise Exception(f"Primary key column '{pk_column}' does not exist on table {schema}.{table}.")
-
                             if actual_pk_column is None:
-                                raise Exception(f"Table {schema}.{table} must have exactly one single-column primary key.")
+                                raise Exception(f"Table {schema}.{table} has no primary key; undo needs one to find rows again.")
                             if actual_pk_column != pk_column:
                                 raise Exception(f"Registered primary key '{pk_column}' does not match actual primary key '{actual_pk_column}' on table {schema}.{table}.")
 
@@ -409,15 +405,16 @@ class RowbackExecutor:
                                 raise Exception(f"Trigger condition (WHEN) is not allowed on {schema}.{table}.")
                             # Rows reached through inheritance children or rewrite rules never pass
                             # the capture trigger, so they could not be undone: refuse before writing.
+                            # Partitioned tables pass when their whole tree is captured (inheritance_problem).
                             cur.execute(
-                                "SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = %(t)s OR inhrelid = %(t)s), "
+                                "SELECT rowback.inheritance_problem(%(t)s), "
                                 "EXISTS (SELECT 1 FROM pg_rewrite WHERE ev_class = %(t)s AND rulename <> '_RETURN'), "
                                 "EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = %(t)s AND NOT tgisinternal AND tgname <> 'rowback_capture') "
                                 "AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = %(t)s), false)",
                                 {"t": c_oid})
                             in_inheritance, has_rules, has_user_triggers = cur.fetchone()
                             if in_inheritance:
-                                raise Exception(f"Table {schema}.{table} is part of an inheritance tree, whose rows can't all be captured or undone.")
+                                raise Exception(f"Table {schema}.{table}: {in_inheritance}.")
                             if has_rules:
                                 raise Exception(f"Table {schema}.{table} has rewrite rules, which move writes past capture.")
                             if has_user_triggers and enforce_row_limit:

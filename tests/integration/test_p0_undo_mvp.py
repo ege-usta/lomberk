@@ -135,6 +135,7 @@ def test_undo_unsupported_schema(control_dsn, runtime_dsn, dsn, setup_db, monkey
         # Inheritance
         cur.execute("CREATE TABLE public.test_parent (id INT PRIMARY KEY, val TEXT);")
         cur.execute("CREATE TABLE public.test_child (child_val TEXT) INHERITS (public.test_parent);")
+        cur.execute("ALTER TABLE public.test_child ADD PRIMARY KEY (id);")  # children don't inherit it; registration needs one
         cur.execute("SELECT rowback.register_table('public', 'test_child', 'id', 'mcp_agent');")
 
         # Trigger

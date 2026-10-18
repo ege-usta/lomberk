@@ -7,7 +7,9 @@ from testcontainers.community.postgres import PostgresContainer
 
 from rowback.capture.install import install_rowback
 
-AGENT_MAY_EXECUTE = {"claim_checkpoint", "finish_checkpoint", "unprotected_cascade_child"}
+# primary_key_columns: a plain catalog read (not SECURITY DEFINER) the pre-write check needs.
+AGENT_MAY_EXECUTE = {"claim_checkpoint", "finish_checkpoint", "unprotected_cascade_child", "primary_key_columns",
+                     "inheritance_problem"}
 
 
 @pytest.fixture(scope="module")

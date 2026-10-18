@@ -137,7 +137,7 @@ Local, single-user development without the service: `rowback serve` (stdio MCP).
 4. **Undo**: an order that respects foreign keys (parents are restored before children), with conflict and schema-drift checks. It refuses rather than touching rows written later.
 5. **Ledger**: append-only, SHA-256 hash-chained checkpoints.
 
-**Current limits:** single-column primary keys. Writes to tables with rules or inheritance are refused. Writes to tables with their own triggers wait for a person, unless you register the table with `--allow-triggers` (for triggers like `updated_at` that only change the row itself or tables Rowback also protects); undo then switches them off while it restores rows, so rows come back exactly. DDL is blocked, not reversible. Full list in [SECURITY.md](SECURITY.md).
+**Current limits:** every registered table needs a primary key (one column or several; `rowback register` reads it from the table). Partitioned tables are supported: register the partitioned table and every partition, including ones added later, is covered, and a row moved to another partition comes back where it was. Writes to tables with rules or classic inheritance are refused, and so are partitioned tables with their own triggers. Writes to tables with their own triggers wait for a person, unless you register the table with `--allow-triggers` (for triggers like `updated_at` that only change the row itself or tables Rowback also protects); undo then switches them off while it restores rows, so rows come back exactly. DDL is blocked, not reversible. Full list in [SECURITY.md](SECURITY.md).
 
 ## Overhead
 Measured against Postgres 16 on localhost (200 runs, p50 / p95):

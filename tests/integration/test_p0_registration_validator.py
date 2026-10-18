@@ -86,7 +86,7 @@ def test_p0_registration_validator_strict(dsn, control_dsn, runtime_dsn, setup_d
         cur.execute("ALTER TABLE public.test_reg DROP COLUMN id;")
     res = executor.execute(get_stmt("INSERT INTO public.test_reg (val) VALUES ('val');"), agent_label="test")
     assert res.status == "failed"
-    assert "Primary key column 'id' does not exist" in res.message
+    assert "has no primary key" in res.message
 
     # 5. Dropped PK constraint (column exists, but no constraint)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -95,7 +95,7 @@ def test_p0_registration_validator_strict(dsn, control_dsn, runtime_dsn, setup_d
         cur.execute("ALTER TABLE public.test_reg2 DROP CONSTRAINT test_reg2_pkey;")
     res = executor.execute(get_stmt("INSERT INTO public.test_reg2 (id, val) VALUES (2, 'val');"), agent_label="test")
     assert res.status == "failed"
-    assert "must have exactly one single-column primary key" in res.message
+    assert "has no primary key" in res.message
 
     # 6. Wrong function OID (Spoofing)
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:

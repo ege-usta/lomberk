@@ -4,7 +4,7 @@
 Rowback is an MCP gateway for PostgreSQL that lets AI agents write to your database safely. It sits between the agent and the database, blocking destructive commands, holding large or sensitive writes for human approval, and recording every changed row so any applied write can be undone. It is for teams that give agents real write access and want a way back when one makes a bad write.
 
 ## Who should NOT use Rowback?
-Don't reach for Rowback if what you need is a general database backup, or protection against someone who already holds your database owner credentials. It cannot stop an agent that holds cloud infrastructure tokens from deleting the server itself. And if your tables rely on composite (multi-column) primary keys, Rowback's undo will not cover them.
+Don't reach for Rowback if what you need is a general database backup, or protection against someone who already holds your database owner credentials. It cannot stop an agent that holds cloud infrastructure tokens from deleting the server itself. Every table Rowback protects needs a primary key (multi-column keys and partitioned tables are fine).
 
 ## How does the AI agent connect to the database?
 The agent never connects to the database directly and is never given database credentials. It connects to Rowback over the Model Context Protocol (MCP) with a gateway URL and an agent API key. Rowback runs the agent's SQL as its own least-privilege role, against only the tables you registered.
@@ -19,7 +19,7 @@ Rowback allows exactly one `SELECT`, `INSERT`, `UPDATE`, or `DELETE` per request
 A `SECURITY DEFINER` trigger records every row a write changes, including rows reached by a foreign-key `ON DELETE CASCADE`, and binds them to a single-use token for that transaction. To reverse an applied write, Rowback puts those exact rows back in an order that respects foreign keys — parents before children — without touching anyone else's later writes.
 
 ## What are the limits of undo?
-Undo needs single-column primary keys. DDL is blocked outright rather than reversed, and sequences are intentionally not rewound. Undo also refuses — rather than overwrite — if the schema has drifted, if a row changed after the checkpoint, or if reversing would reach rows it did not originally capture.
+Undo needs a primary key on every protected table (one or more columns). DDL is blocked outright rather than reversed, and sequences are intentionally not rewound. Undo also refuses — rather than overwrite — if the schema has drifted, if a row changed after the checkpoint, or if reversing would reach rows it did not originally capture.
 
 ## When does a write wait for human approval?
 A write is held when it touches a table you marked protected (or its foreign-key cascade reaches one), or when it changes more rows than your `max_rows_without_approval` limit. Writes to tables that carry their own triggers also wait for a person, unless that table was registered with `--allow-triggers`.

@@ -116,12 +116,73 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
 
+-- Primary key columns in key order (NULL without a primary key). Key columns only: a
+-- PRIMARY KEY ... INCLUDE (...) index also lists its covering columns in indkey.
+CREATE OR REPLACE FUNCTION rowback.primary_key_columns(p_table OID) RETURNS TEXT[]
+LANGUAGE sql STABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT array_agg(a.attname::text ORDER BY k.ord)
+    FROM pg_index i
+    CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+    WHERE i.indrelid = p_table AND i.indisprimary AND k.ord <= i.indnkeyatts
+$$;
+
+-- Why rows written through this table could escape capture via inheritance or partitioning,
+-- or NULL. Classic inheritance is refused. Declarative partitioning is supported when every
+-- member of the tree is a plain table carrying the (cloned) capture trigger, with no rules and
+-- no triggers of its own: then undo works partition by partition exactly as on a plain table,
+-- and a row moved to another partition is captured as DELETE + INSERT.
+-- Own triggers count on PostgreSQL 14 too, where triggers cloned to partitions are internal.
+CREATE OR REPLACE FUNCTION rowback.inheritance_problem(p_table OID) RETURNS TEXT
+LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    v_root OID;
+    v_bad TEXT;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = p_table OR inhrelid = p_table) THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = p_table AND (relkind = 'p' OR relispartition)) THEN
+        RETURN format('%s is part of an inheritance tree, whose rows can''t all be captured or undone', p_table::regclass);
+    END IF;
+    v_root := pg_partition_root(p_table);
+    SELECT format('partition %s is a foreign or non-table relation, which can''t be captured', c.oid::regclass) INTO v_bad
+      FROM pg_partition_tree(v_root) t JOIN pg_class c ON c.oid = t.relid
+     WHERE c.relkind NOT IN ('r', 'p') LIMIT 1;
+    IF v_bad IS NULL THEN
+        SELECT format('partition %s has no enabled Rowback capture trigger', t.relid::regclass) INTO v_bad
+          FROM pg_partition_tree(v_root) t
+         WHERE NOT EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid = t.relid AND g.tgname = 'rowback_capture'
+                             AND g.tgenabled = 'O' AND g.tgtype = 29 AND g.tgqual IS NULL AND g.tgattr = ''
+                             AND g.tgfoid = 'rowback.capture_row_change'::regproc)
+         LIMIT 1;
+    END IF;
+    IF v_bad IS NULL THEN
+        SELECT format('%s has its own trigger %I; partitioned tables with their own triggers are not supported yet',
+                      g.tgrelid::regclass, g.tgname) INTO v_bad
+          FROM pg_partition_tree(v_root) t JOIN pg_trigger g ON g.tgrelid = t.relid
+         WHERE g.tgname <> 'rowback_capture' AND (NOT g.tgisinternal OR (g.tgparentid <> 0 AND g.tgconstraint = 0))
+         LIMIT 1;
+    END IF;
+    IF v_bad IS NULL THEN
+        SELECT format('partition %s has rewrite rules, which move writes past capture', r.ev_class::regclass) INTO v_bad
+          FROM pg_partition_tree(v_root) t JOIN pg_rewrite r ON r.ev_class = t.relid
+         WHERE r.rulename <> '_RETURN' LIMIT 1;
+    END IF;
+    RETURN v_bad;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION rowback.capture_row_change() RETURNS TRIGGER AS $$
 DECLARE
     v_cp_id_text TEXT;
     v_cp_id BIGINT;
     v_seq BIGINT;
-    v_pk TEXT;
+    v_pk TEXT[];
     v_old JSONB := NULL;
     v_new JSONB := NULL;
     v_caller TEXT;
@@ -173,17 +234,9 @@ BEGIN
     v_seq := current_setting('rowback.seq', true)::BIGINT + 1;
     PERFORM set_config('rowback.seq', v_seq::text, true);
 
-    SELECT a.attname INTO v_pk
-    FROM pg_index i
-    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-    WHERE i.indrelid = TG_RELID AND i.indisprimary;
-    
+    v_pk := rowback.primary_key_columns(TG_RELID);
     IF v_pk IS NULL THEN
         RAISE EXCEPTION 'Rowback Security Violation: Table %.% has no primary key.', TG_TABLE_SCHEMA, TG_TABLE_NAME;
-    END IF;
-    
-    IF (SELECT indnatts FROM pg_index WHERE indrelid = TG_RELID AND indisprimary) > 1 THEN
-        RAISE EXCEPTION 'Rowback Security Violation: Composite primary keys are not supported (%.%).', TG_TABLE_SCHEMA, TG_TABLE_NAME;
     END IF;
 
     SELECT jsonb_object_agg(attname, jsonb_build_object('typoid', atttypid, 'typmod', atttypmod, 'notnull', attnotnull))
@@ -196,7 +249,7 @@ BEGIN
     ELSIF TG_OP = 'UPDATE' THEN
         v_old := row_to_json(OLD);
         v_new := row_to_json(NEW);
-        IF (v_old->>v_pk) IS DISTINCT FROM (v_new->>v_pk) THEN
+        IF EXISTS (SELECT 1 FROM unnest(v_pk) k WHERE (v_old->>k) IS DISTINCT FROM (v_new->>k)) THEN
             RAISE EXCEPTION 'Rowback Security Violation: Primary key updates are forbidden.';
         END IF;
     ELSIF TG_OP = 'INSERT' THEN
@@ -207,7 +260,8 @@ BEGIN
         checkpoint_id, table_schema, table_name, table_oid, op, pk,
         old_row, new_row, schema_snapshot, seq
     ) VALUES (
-        v_cp_id, TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_RELID, substr(TG_OP, 1, 1), jsonb_build_object(v_pk, COALESCE(v_old->>v_pk, v_new->>v_pk)),
+        v_cp_id, TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_RELID, substr(TG_OP, 1, 1),
+        (SELECT jsonb_object_agg(k, COALESCE(v_old->>k, v_new->>k)) FROM unnest(v_pk) k),
         v_old, v_new, v_schema_snapshot, v_seq
     );
 
@@ -273,6 +327,7 @@ CREATE OR REPLACE FUNCTION rowback.register_table(
 ) RETURNS VOID AS $$
 DECLARE
     v_table_oid OID;
+    v_pk TEXT;
     v_all TEXT;
     v_visible TEXT;
 BEGIN
@@ -283,6 +338,24 @@ BEGIN
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Table %.% does not exist.', p_schema, p_table;
+    END IF;
+    IF (SELECT relispartition FROM pg_class WHERE oid = v_table_oid) THEN
+        -- Its capture trigger is cloned from the parent, and writes through it skip the parent's grants.
+        RAISE EXCEPTION '%.% is a partition; register its partitioned table % instead.', p_schema, p_table, pg_partition_root(v_table_oid)::regclass;
+    END IF;
+    IF p_allow_triggers AND (SELECT relkind = 'p' FROM pg_class WHERE oid = v_table_oid) THEN
+        RAISE EXCEPTION 'Partitioned tables with their own triggers are not supported yet (%.%).', p_schema, p_table;
+    END IF;
+    -- Undo finds rows by primary key, so check it now rather than on the agent's first write.
+    -- NULL p_pk_column means "use the table's own key".
+    v_pk := array_to_string(rowback.primary_key_columns(v_table_oid), ',');
+    IF v_pk IS NULL THEN
+        RAISE EXCEPTION 'Table %.% has no primary key; Rowback needs one to find rows again for undo.', p_schema, p_table;
+    END IF;
+    IF p_pk_column IS NULL THEN
+        p_pk_column := v_pk;
+    ELSIF p_pk_column <> v_pk THEN
+        RAISE EXCEPTION 'The primary key of %.% is (%), not (%).', p_schema, p_table, v_pk, p_pk_column;
     END IF;
     IF p_allow_triggers AND NOT pg_has_role(current_user, (SELECT relowner FROM pg_class WHERE oid = v_table_oid), 'USAGE') THEN
         -- Switching a trigger off needs ownership; fail now, not in the middle of an undo.
@@ -373,6 +446,10 @@ BEGIN
     
     EXECUTE format('GRANT SELECT ON rowback.registered_tables TO %I', p_agent_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.primary_key_columns TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.inheritance_problem TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.inheritance_problem TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.primary_key_columns TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_control_role);
     EXECUTE format('GRANT SELECT ON rowback.registered_tables TO %I', p_control_role);
 END;
@@ -508,8 +585,8 @@ DECLARE
     v_set_clauses TEXT;
     v_affected INT := 0;
     v_seq_val BIGINT;
-    v_live_pk TEXT;
-    v_live_pk_count INT;
+    v_live_pk TEXT[];
+    v_where TEXT;  -- "a = '1' AND b = '2'": the captured row's primary key, every column
     v_unprotected TEXT;
     v_captured INT;
     v_retry_tables TEXT[] := '{}';
@@ -555,12 +632,9 @@ BEGIN
 
         -- Check unsupported schemas
 
-        IF EXISTS (
-            SELECT 1 FROM pg_inherits 
-            WHERE inhrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass 
-               OR inhparent = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass
-        ) THEN
-            RAISE EXCEPTION 'Unsupported schema: Table inheritance is not allowed on %', v_change.table_name;
+        v_unprotected := rowback.inheritance_problem(v_change.table_oid);
+        IF v_unprotected IS NOT NULL THEN
+            RAISE EXCEPTION 'Unsupported schema: %', v_unprotected;
         END IF;
 
         -- Foreign keys are supported: LIFO replay restores parents before children.
@@ -661,20 +735,15 @@ BEGIN
         
         -- Validate PK hasn't drifted
         BEGIN
-            SELECT a.attname, i.indnatts INTO v_live_pk, v_live_pk_count
-            FROM pg_index i
-            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-            WHERE i.indrelid = v_change.table_oid AND i.indisprimary;
-            
+            v_live_pk := rowback.primary_key_columns(v_change.table_oid);
             IF v_live_pk IS NULL THEN
                 RAISE EXCEPTION 'Security Violation: Table % has no primary key', v_full_table;
             END IF;
-            IF v_live_pk_count > 1 THEN
-                RAISE EXCEPTION 'Security Violation: Composite primary keys are not supported (%)', v_full_table;
+            -- The key must be exactly the captured one: same columns, no more, no fewer.
+            IF NOT (v_change.pk ?& v_live_pk) OR (SELECT count(*) FROM jsonb_object_keys(v_change.pk)) <> cardinality(v_live_pk) THEN
+                RAISE EXCEPTION 'Security Violation: PK identity drifted for % (expected %, got %)', v_full_table, array_to_string(ARRAY(SELECT jsonb_object_keys(v_change.pk)), ','), array_to_string(v_live_pk, ',');
             END IF;
-            IF NOT (v_change.pk ? v_live_pk) THEN
-                RAISE EXCEPTION 'Security Violation: PK identity drifted for % (expected %, got %)', v_full_table, array_to_string(ARRAY(SELECT jsonb_object_keys(v_change.pk)), ','), v_live_pk;
-            END IF;
+            SELECT string_agg(format('%I = %L', k, v_change.pk->>k), ' AND ') INTO v_where FROM unnest(v_live_pk) k;
             
             IF v_change.schema_snapshot IS NULL THEN
                 RAISE EXCEPTION 'Unsupported: Missing schema snapshot for %', v_full_table;
@@ -695,10 +764,7 @@ BEGIN
         END;
         
         IF v_change.op = 'I' THEN
-            EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', 
-                v_full_table, 
-                v_live_pk, 
-                (v_change.pk->>v_live_pk)) INTO v_curr;
+            EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %s FOR UPDATE NOWAIT', v_full_table, v_where) INTO v_curr;
             
             IF v_curr IS NULL THEN
                 RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
@@ -709,16 +775,10 @@ BEGIN
                 RAISE EXCEPTION 'Conflict: Row % in % has been modified', v_change.pk, v_full_table;
             END IF;
             
-            EXECUTE format('DELETE FROM %s WHERE %I = %L', 
-                v_full_table, 
-                v_live_pk, 
-                (v_change.pk->>v_live_pk));
+            EXECUTE format('DELETE FROM %s WHERE %s', v_full_table, v_where);
                 
         ELSIF v_change.op = 'U' THEN
-            EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %I = %L FOR UPDATE NOWAIT', 
-                v_full_table, 
-                v_live_pk, 
-                (v_change.pk->>v_live_pk)) INTO v_curr;
+            EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %s FOR UPDATE NOWAIT', v_full_table, v_where) INTO v_curr;
                 
             IF v_curr IS NULL THEN
                 RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
@@ -741,11 +801,7 @@ BEGIN
             WHERE NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = v_change.table_oid
                               AND a.attname = key AND (a.attgenerated <> '' OR a.attidentity = 'a'));
             
-            EXECUTE format('UPDATE %s SET %s WHERE %I = %L', 
-                v_full_table, 
-                v_set_clauses, 
-                v_live_pk, 
-                (v_change.pk->>v_live_pk)) USING v_change.old_row;
+            EXECUTE format('UPDATE %s SET %s WHERE %s', v_full_table, v_set_clauses, v_where) USING v_change.old_row;
 
         ELSIF v_change.op = 'D' THEN
             BEGIN

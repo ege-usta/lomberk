@@ -74,7 +74,8 @@ def init(
 def register(
     table: str = typer.Argument(..., help="Schema-qualified table, e.g. public.users"),
     agent_role: str = typer.Option(..., help="The agent role that may write to this table through Rowback."),
-    pk: str = typer.Option("id", help="Single-column primary key."),
+    pk: str = typer.Option(None, help="Primary key column(s), comma-separated in key order (e.g. tenant_id,id). "
+                           "Default: read from the table."),
     allow_triggers: bool = typer.Option(False, help="The table's own triggers only change the row itself (like updated_at) "
                                         "or tables Rowback also protects. Undo switches them off while it restores rows."),
     install_dsn: str = typer.Option(None, envvar="ROWBACK_INSTALL_DSN", help="Owner/superuser DSN."),
