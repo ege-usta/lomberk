@@ -129,3 +129,20 @@ jobs:
       # Fail on medium+ severity at medium+ confidence. Known-safe sites carry a
       # reasoned `# nosec <id>`; a bare noqa is not allowed (see CLAUDE.md).
       - run: uvx bandit -r src seatbelt --severity-level medium --confidence-level medium
+
+  secrets:
+    name: Secrets in git history (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # every commit, not just the tip: a secret removed later is still public
+      # Pinned by digest like trivy. Reviewed false positives (test-only and demo keys) live in
+      # .gitleaksignore, each with its reason.
+      - run: >
+          docker run --rm -v "$PWD":/repo:ro
+          zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git /repo --log-opts="--all" --no-banner --redact --exit-code 1
+          --gitleaks-ignore-path /repo/.gitleaksignore

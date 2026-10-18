@@ -10,6 +10,8 @@ MCP gateway that puts AI agents' SQL behind a firewall, human approval and undo.
 - Security scanners (run in CI, reproducible locally, no install needed):
   - Deps/CVEs: `uv export --no-emit-project --format requirements-txt | uvx pip-audit -r /dev/stdin` — must be clean.
   - SAST: `uvx bandit -r src seatbelt --severity-level medium --confidence-level medium` — must be clean. Known-safe hits carry a reasoned `# <why>  # nosec <id>` (reason first so bandit doesn't parse it as a test id); never a bare suppression.
+  - Secrets in history: `docker run --rm -v "$PWD":/repo:ro zricethezav/gitleaks:v8.30.1 git /repo --log-opts="--all" --gitleaks-ignore-path /repo/.gitleaksignore` — must be clean (CI job `secrets`).
+  - Not in CI, run before a release: `uvx semgrep scan --metrics off --config p/python --config p/security-audit --config p/secrets src seatbelt` (4 known `dynamic-urllib` hits = the same reviewed urlopen sites as bandit); OSV `docker run --rm -v "$PWD":/src:ro ghcr.io/google/osv-scanner scan source --lockfile /src/uv.lock`; API fuzzing with schemathesis against `docker compose up` (export `app.openapi()`, run with the admin and the agent key, `--checks not_a_server_error`).
 
 ## Layout
 - `src/rowback/sentinel.py`: AST hard gate (`_ast_firewall`). `policy.py`: allow/hold/deny policy. `executor.py`: execution, capture, holds.

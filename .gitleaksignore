@@ -1,0 +1,7 @@
+# Reviewed gitleaks false positives (2026-10-18): test-only random keys in tests/integration/test_doctor.py
+# and the public demo keys in demo/helpers.sh, which docker-compose.yml documents as demo-only.
+618f29b6df99d85d26093fd9a33d271309528e38:tests/integration/test_doctor.py:generic-api-key:11
+618f29b6df99d85d26093fd9a33d271309528e38:tests/integration/test_doctor.py:generic-api-key:11
+46bd4e3eecd832f5898b62f5858df92295c25be0:demo/helpers.sh:curl-auth-header:10
+a16c643dd0328b51105207705a1f0965b3f5e488:demo/helpers.sh:curl-auth-header:6
+a16c643dd0328b51105207705a1f0965b3f5e488:demo/helpers.sh:curl-auth-header:10
