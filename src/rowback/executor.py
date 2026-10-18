@@ -339,6 +339,8 @@ class RowbackExecutor:
                             ast = pglast.parse_sql(eval_result.statement.sql)
                             sens_cols = check_sensitive_columns(ast, self.sensitive_columns)
                             if sens_cols:
+                                # A reach for a secret is what an operator reviews later: keep it.
+                                audit("denied", actor=principal, sql=eval_result.statement.sql, reason=f"sensitive columns {sens_cols}")
                                 raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
 
                             cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{self.statement_timeout_ms}ms",))

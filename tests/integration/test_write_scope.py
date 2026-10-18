@@ -103,10 +103,13 @@ def test_registered_secret_columns_are_hidden_by_the_database(db):
 def test_whole_row_json_cannot_smuggle_a_hidden_column(db, sql):
     # to_jsonb() and friends are allowlisted for everyday scalar use; a whole-row reference is
     # still refused before it reaches the database (which would also refuse the hidden column).
+    from rowback.audit import EVENTS
     _, ex = db
+    before = EVENTS["denied"]
     res = run(ex, sql)
     assert res.status == "failed" and "whole-row reference p" in res.message
     assert "SECRETHASH" not in str(res)
+    assert EVENTS["denied"] == before + 1  # an attempt at a secret is on the audit record
 
 
 def test_plain_explain_plans_without_running(db):

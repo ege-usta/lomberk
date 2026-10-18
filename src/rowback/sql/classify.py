@@ -305,6 +305,17 @@ def check_sensitive_columns(ast, extra=()) -> list[str]:
                         walk(target.get("val"), star_ok=True)
             elif key in ("larg", "rarg", "selectStmt"):
                 walk_stmt(value, top=False)
+            elif key == "sortClause" and stmt.get("@") == "SelectStmt":
+                # `COUNT(*) AS orders ... ORDER BY orders`: a bare ORDER BY name means the output
+                # column first (SQL92 rule), so it is that column, not the table's whole row.
+                # GROUP BY prefers input columns, so it gets no such pass.
+                out = {r.get("name") for r in stmt.get("targetList") or () if isinstance(r, dict) and r.get("name")}
+                for item in value or ():
+                    ref = item.get("node") if isinstance(item, dict) else None
+                    fields = (ref or {}).get("fields") or [] if isinstance(ref, dict) and ref.get("@") == "ColumnRef" else []
+                    if len(fields) == 1 and fields[0].get("sval") in out:
+                        continue
+                    walk(item)
             else:
                 walk(value)
 

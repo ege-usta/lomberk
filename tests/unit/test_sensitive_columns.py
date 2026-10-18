@@ -61,6 +61,9 @@ LEAKS = [
     # Pinned by mutation testing: each one only fails if a branch of the walk is dropped.
     "SELECT id FROM public.users WHERE password IN (SELECT 'x')",  # SubLink testexpr
     "SELECT (api_key)[1] FROM public.users",  # A_Indirection arg
+    "SELECT id FROM public.users u ORDER BY u",  # no output column named u: still the whole row
+    "SELECT id AS x FROM public.users u ORDER BY x, u",
+    "SELECT count(*) AS n FROM public.users u GROUP BY u",
     "SELECT settings['api_key':'z'] FROM public.users",  # slice bound
 ]
 
@@ -89,6 +92,8 @@ ALLOWED = [
     # A secret word in a value compared with `=` or LIKE is data, not a JSON key.
     "SELECT id FROM public.users WHERE status = 'password_reset'",
     "SELECT id FROM public.users WHERE note ILIKE '%token%'",
+    # Found by a real agent: ORDER BY names the output column, not the table's row.
+    "SELECT meta->>'channel' AS channel, COUNT(*) AS orders FROM public.orders GROUP BY meta->>'channel' ORDER BY orders DESC",
 ]
 
 
