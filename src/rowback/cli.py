@@ -20,7 +20,7 @@ app = typer.Typer(help="Rowback: every agent write, reversible", no_args_is_help
 def cli_actor() -> str:
     import getpass
     return f"cli:{getpass.getuser()}"
-console = Console()
+console = Console(soft_wrap=True)  # never break a token or a command someone will copy
 
 def get_admin_dsn() -> str:
     config = load_config()
