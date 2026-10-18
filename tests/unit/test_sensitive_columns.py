@@ -58,6 +58,10 @@ LEAKS = [
     "SELECT jsonb_extract_path_text(settings, 'api_' || 'key') FROM public.users",
     "SELECT json_extract_path(settings::json, lower('API_KEY')) FROM public.users",
     "SELECT jsonb_set(settings, ARRAY['token'], '1') FROM public.users",
+    # Pinned by mutation testing: each one only fails if a branch of the walk is dropped.
+    "SELECT id FROM public.users WHERE password IN (SELECT 'x')",  # SubLink testexpr
+    "SELECT (api_key)[1] FROM public.users",  # A_Indirection arg
+    "SELECT settings['api_key':'z'] FROM public.users",  # slice bound
 ]
 
 ALLOWED = [
@@ -82,6 +86,9 @@ ALLOWED = [
     "SELECT item->>'sku' FROM public.orders, jsonb_array_elements(meta->'items') item",
     "SELECT d::date FROM generate_series(now(), now() + interval '2 days', interval '1 day') d",
     "SELECT id FROM public.users WHERE settings @> jsonb_build_object('beta', true)",
+    # A secret word in a value compared with `=` or LIKE is data, not a JSON key.
+    "SELECT id FROM public.users WHERE status = 'password_reset'",
+    "SELECT id FROM public.users WHERE note ILIKE '%token%'",
 ]
 
 
@@ -113,3 +120,10 @@ def test_secret_json_keys_are_masked_in_results():
     assert rows == [{"id": 1, "settings": {"theme": "dark", "api_key": "***MASKED***",
                                           "nested": [{"token": "***MASKED***", "pin": "***MASKED***"}]},
                      "raw": '{"password": "***MASKED***", "ok": 1}', "pin": "***MASKED***"}]
+
+
+@pytest.mark.parametrize("sql", ["SELECT settings->>'pin' FROM public.users", "SELECT settings['pin'] FROM public.users",
+                                 "SELECT jsonb_extract_path_text(settings, 'pin') FROM public.users"])
+def test_configured_names_are_secret_json_keys_too(sql):
+    assert check_sensitive_columns(pglast.parse_sql(sql), {"pin"}), sql
+    assert not refused(sql)

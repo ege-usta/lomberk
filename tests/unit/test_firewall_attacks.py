@@ -126,3 +126,12 @@ def test_sentinel_fence_is_an_unpredictable_per_request_nonce(monkeypatch):
         assert "ROWBACK_SQL" not in m          # the old public marker is gone
         assert fence not in attack             # the agent could not have embedded the real fence
         assert attack in m                     # its injected text is carried only as data
+
+
+def test_an_unexpected_error_inside_the_gate_blocks(monkeypatch):
+    # Fail closed: a bug in the gate must refuse the query, never wave it through.
+    def boom(_sql):
+        raise RuntimeError("bug")
+    monkeypatch.setattr("pglast.parse_sql", boom)
+    safe, reason = AISentinel()._ast_firewall("SELECT 1")
+    assert not safe and "Unexpected error" in reason
