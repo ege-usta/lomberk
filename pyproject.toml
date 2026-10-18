@@ -36,7 +36,7 @@ packages = ["src/rowback"]
 [tool.ruff]
 # Pin the ruleset so lint is deterministic and the project owns its own rules
 # (ruff's ambient default pulls in opinionated families this code never opted into).
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
@@ -57,8 +57,8 @@ ignore = [
     "PERF401", # these are conditional appends in cold paths; a comprehension reads worse
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "httpx>=0.28",
     "hypothesis>=6.127.3",
     "mypy>=1.15.0",

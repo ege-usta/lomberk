@@ -9,9 +9,9 @@ parser crash that lets a dangerous statement through.
 """
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from test_firewall_attacks import MUST_ALLOW, MUST_BLOCK
 
 from rowback.sentinel import AISentinel
-from test_firewall_attacks import MUST_ALLOW, MUST_BLOCK
 
 fw = AISentinel()._ast_firewall
 
@@ -38,7 +38,7 @@ def _fold_case(s: str, upper: bool) -> str:
 def mutated(draw, pool, allow_stacking):
     sql = draw(st.sampled_from(pool))
     # Expand every existing run of whitespace into a (possibly fatter) filler.
-    parts, buf, out = [], "", []
+    buf, out = "", []
     for ch in sql:
         if ch.isspace():
             buf += ch

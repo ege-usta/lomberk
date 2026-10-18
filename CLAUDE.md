@@ -12,8 +12,8 @@ MCP gateway that puts AI agents' SQL behind a firewall, human approval and undo.
   - SAST: `uvx bandit -r src seatbelt --severity-level medium --confidence-level medium` — must be clean. Known-safe hits carry a reasoned `# <why>  # nosec <id>` (reason first so bandit doesn't parse it as a test id); never a bare suppression.
 
 ## Layout
-- `src/rowback/policy.py`: AST hard gate + policy. `executor.py`: execution, capture, holds.
-- `recovery.py`: undo. `audit.py`: audit log. `api.py`: REST + remote MCP. `cli.py`: CLI.
+- `src/rowback/sentinel.py`: AST hard gate (`_ast_firewall`). `policy.py`: allow/hold/deny policy. `executor.py`: execution, capture, holds.
+- Undo lives in SQL: `rowback.execute_undo` in `capture/sql/02_functions.sql`. `recovery.py` is the client-side retry/outcome-unknown helper. `audit.py`: audit log. `api.py`: REST + remote MCP. `cli.py`: CLI.
 - `src/rowback/ee/`: Enterprise (Slack, SSO), under a separate license (`ee/LICENSE`).
   - Core never imports `ee` at module load, only lazily when the feature is enabled.
   - Everything outside `ee/` is Apache-2.0.
