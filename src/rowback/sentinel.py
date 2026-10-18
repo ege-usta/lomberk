@@ -6,6 +6,61 @@ import urllib.request
 
 BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
+# Pure built-ins an agent writes every day. Every name here resolves to pg_catalog (searched
+# first, and agents can't create functions), only computes on its arguments, and touches no GUC,
+# file, session, lock, sequence, server setting or other database. Deliberately absent:
+# set_config/current_setting, pg_*, dblink, lo_*, nextval/setval, setseed, the *_to_xml family
+# (query_to_xml runs a SQL string), repeat/lpad/rpad/array_fill (one call can ask for 1 GB), and
+# JSON functions that enumerate values without naming a key (see the note at the end).
+# A name added here needs the same guarantees and a case in tests/unit/test_firewall_usability.py.
+# ponytail: name allowlist, resolve by OID if agents need user-defined functions.
+ALLOWED_FUNCS = frozenset({
+    # aggregates
+    'count', 'sum', 'avg', 'min', 'max', 'bool_and', 'bool_or', 'every', 'string_agg', 'array_agg',
+    'jsonb_agg', 'json_agg', 'jsonb_object_agg', 'json_object_agg', 'bit_and', 'bit_or', 'any_value',
+    'stddev', 'stddev_samp', 'stddev_pop', 'variance', 'var_samp', 'var_pop', 'corr', 'covar_pop',
+    'covar_samp', 'regr_slope', 'regr_intercept', 'regr_r2', 'regr_count',
+    'mode', 'percentile_cont', 'percentile_disc',
+    # window functions
+    'row_number', 'rank', 'dense_rank', 'percent_rank', 'cume_dist', 'ntile',
+    'lag', 'lead', 'first_value', 'last_value', 'nth_value',
+    # conditionals
+    'coalesce', 'nullif', 'greatest', 'least', 'num_nulls', 'num_nonnulls',
+    # text
+    'lower', 'upper', 'initcap', 'length', 'char_length', 'character_length', 'octet_length',
+    'bit_length', 'trim', 'btrim', 'ltrim', 'rtrim', 'substr', 'substring', 'replace', 'translate',
+    'reverse', 'concat', 'concat_ws', 'format', 'left', 'right', 'position', 'strpos', 'starts_with',
+    'split_part', 'ascii', 'chr', 'md5', 'sha224', 'sha256', 'sha384', 'sha512', 'encode', 'decode',
+    'regexp_replace', 'regexp_match', 'regexp_matches', 'regexp_like', 'regexp_count', 'regexp_substr',
+    'regexp_instr', 'regexp_split_to_array', 'regexp_split_to_table',
+    'string_to_array', 'string_to_table', 'to_number', 'to_char',
+    # full-text search
+    'to_tsvector', 'to_tsquery', 'plainto_tsquery', 'phraseto_tsquery', 'websearch_to_tsquery',
+    'ts_rank', 'ts_rank_cd', 'ts_headline',
+    # math
+    'abs', 'round', 'ceil', 'ceiling', 'floor', 'trunc', 'mod', 'div', 'power', 'pow', 'sqrt', 'cbrt',
+    'exp', 'ln', 'log', 'log10', 'sign', 'pi', 'degrees', 'radians', 'width_bucket', 'random',
+    'gen_random_uuid', 'generate_series',
+    # date and time
+    'now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp', 'date', 'date_trunc',
+    'date_part', 'date_bin', 'extract', 'age', 'to_date', 'to_timestamp', 'make_date', 'make_time',
+    'make_timestamp', 'make_timestamptz', 'make_interval', 'justify_days', 'justify_hours',
+    'justify_interval', 'isfinite', 'timezone',
+    # arrays
+    'array_length', 'cardinality', 'unnest', 'array_position', 'array_positions', 'array_remove',
+    'array_replace', 'array_append', 'array_prepend', 'array_cat', 'array_upper', 'array_lower',
+    'array_ndims', 'array_to_string',
+    # json
+    'to_json', 'to_jsonb', 'row_to_json', 'json_build_object', 'jsonb_build_object', 'json_build_array',
+    'jsonb_build_array', 'json_object', 'jsonb_object', 'jsonb_set', 'jsonb_set_lax', 'jsonb_insert',
+    'jsonb_strip_nulls', 'json_strip_nulls', 'jsonb_pretty', 'jsonb_typeof', 'json_typeof',
+    'jsonb_array_length', 'json_array_length', 'jsonb_array_elements', 'jsonb_array_elements_text',
+    'json_array_elements', 'json_array_elements_text', 'jsonb_object_keys', 'json_object_keys',
+    'jsonb_extract_path', 'jsonb_extract_path_text', 'json_extract_path', 'json_extract_path_text',
+    # Not jsonb_each*/json_each* or jsonb_path_*: they hand out every value of a JSON column
+    # (`$.*`, one row per key) without naming a key, which would defeat secret-key masking.
+})
+
 
 class AISentinel:
     def __init__(self):
@@ -17,18 +72,7 @@ class AISentinel:
         violations = []
         dml_nodes = []
 
-        ALLOWED_STMTS = {'RawStmt', 'SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt'}
-        # Pure built-ins only. Anything that touches GUCs, files, sessions, sleep,
-        # sequences or other databases (set_config, pg_*, dblink, lo_*, nextval...) stays banned.
-        # ponytail: name allowlist, resolve by OID if agents need user-defined functions.
-        ALLOWED_FUNCS = {
-            'count', 'sum', 'avg', 'min', 'max', 'bool_and', 'bool_or', 'string_agg', 'array_agg',
-            'coalesce', 'nullif', 'greatest', 'least', 'lower', 'upper', 'length', 'char_length',
-            'trim', 'btrim', 'ltrim', 'rtrim', 'substr', 'substring', 'replace', 'concat', 'concat_ws',
-            'left', 'right', 'position', 'strpos', 'abs', 'round', 'ceil', 'ceiling', 'floor', 'trunc',
-            'now', 'date_trunc', 'date_part', 'extract', 'age', 'to_char', 'to_date', 'to_timestamp',
-            'make_date', 'jsonb_build_object', 'json_build_object', 'jsonb_agg', 'json_agg',
-        }
+        ALLOWED_STMTS = {'RawStmt', 'SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'ExplainStmt'}
 
         def traverse(node):
             if isinstance(node, dict):
@@ -38,7 +82,12 @@ class AISentinel:
                     if node_type not in ALLOWED_STMTS:
                         violations.append(f"Command {node_type} is structurally banned")
 
-                if node_type == 'SelectStmt':
+                if node_type == 'ExplainStmt':
+                    # Plain EXPLAIN only plans. ANALYZE runs the statement, so it is refused in any
+                    # spelling (EXPLAIN ANALYZE, EXPLAIN (ANALYZE), EXPLAIN (ANALYZE false)).
+                    if any(isinstance(o, dict) and o.get('defname') == 'analyze' for o in node.get('options') or ()):
+                        violations.append("EXPLAIN ANALYZE executes the statement and is structurally banned")
+                elif node_type == 'SelectStmt':
                     if node.get('intoClause') is not None:
                         violations.append("SELECT INTO is structurally banned")
                 elif node_type == 'UpdateStmt':

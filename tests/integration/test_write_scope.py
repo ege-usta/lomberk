@@ -96,3 +96,32 @@ def test_registered_secret_columns_are_hidden_by_the_database(db):
     assert res.status == "failed" and "permission denied" in res.message and "name the columns" in res.message
     assert run(ex, "SELECT id, name FROM public.people WHERE id = 1").data == [{"id": 1, "name": "a"}]
     assert run(ex, "UPDATE public.people SET age = 31 WHERE id = 1").status == "applied"
+
+
+@pytest.mark.parametrize("sql", ["SELECT to_jsonb(p) FROM public.people p", "SELECT row_to_json(p) FROM public.people p",
+                                 "SELECT jsonb_agg(p) FROM public.people p"])
+def test_whole_row_json_cannot_smuggle_a_hidden_column(db, sql):
+    # to_jsonb() and friends are allowlisted for everyday scalar use; a whole-row reference is
+    # still refused before it reaches the database (which would also refuse the hidden column).
+    _, ex = db
+    res = run(ex, sql)
+    assert res.status == "failed" and "whole-row reference p" in res.message
+    assert "SECRETHASH" not in str(res)
+
+
+def test_plain_explain_plans_without_running(db):
+    _, ex = db
+    res = run(ex, "EXPLAIN SELECT id, name FROM public.people WHERE id = 1")
+    assert res.status == "applied" and res.data and "QUERY PLAN" in res.data[0]
+    assert run(ex, "EXPLAIN ANALYZE SELECT id FROM public.people").status == "denied"
+
+
+def test_everyday_functions_run_end_to_end(db):
+    url, ex = db
+    res = run(ex, "SELECT d::date AS day FROM generate_series(DATE '2026-01-01', DATE '2026-01-03', interval '1 day') d")
+    assert [r["day"].isoformat() for r in res.data] == ["2026-01-01", "2026-01-02", "2026-01-03"]
+    assert run(ex, "SELECT split_part('a@b.co', '@', 2) AS d").data == [{"d": "b.co"}]
+    res = run(ex, "UPDATE public.people SET name = initcap(name) WHERE id = 1")
+    assert res.status == "applied"
+    with psycopg.connect(url) as c:
+        assert c.execute("SELECT name FROM public.people WHERE id = 1").fetchone()[0] == "A"

@@ -171,7 +171,9 @@ def check_sensitive_columns(ast, extra=()) -> list[str]:
             if kind == "CommonTableExpr":
                 names.add(node.get("ctename", ""))
             alias = node.get("alias")
-            if isinstance(alias, dict):
+            # `FROM generate_series(...) d`, `unnest(tags) tag`: every function the hard gate
+            # allows in FROM returns a scalar, so its alias names one value, not a table's row.
+            if isinstance(alias, dict) and kind != "RangeFunction":
                 names.add(alias.get("aliasname", ""))
             for v in node.values():
                 collect(v)
@@ -205,6 +207,10 @@ def check_sensitive_columns(ast, extra=()) -> list[str]:
         json_op = kind == "A_Expr" and any(n.get("sval") in JSON_KEY_OPERATORS for n in node.get("name", ()) if isinstance(n, dict))
         if json_op and (_secret_literal(node.get("lexpr"), extra) or _secret_literal(node.get("rexpr"), extra)):
             found.append("a secret-looking JSON key")
+        if kind == "FuncCall" and any(_secret_literal(a, extra) for a in node.get("args", ())):
+            # strpos(settings::text, 'api_key'), jsonb_extract_path_text(settings, 'token'):
+            # a function argument naming a secret key reaches it as surely as `->>` does.
+            found.append("a secret-looking key named in a function argument")
         if kind == "A_Indirection":
             for ind in node.get("indirection", ()):
                 if isinstance(ind, dict) and ind.get("@") == "A_Indices" and (
@@ -260,5 +266,7 @@ def check_sensitive_columns(ast, extra=()) -> list[str]:
     for raw in ast:
         tree = raw(skip_none=True)
         collect(tree)
-        walk_stmt(tree.get("stmt"), top=True)
+        stmt = tree.get("stmt") or {}
+        # Plain EXPLAIN returns the plan, never rows, so its query keeps the top-level `*` rules.
+        walk_stmt(stmt.get("query") if stmt.get("@") == "ExplainStmt" else stmt, top=True)
     return found
