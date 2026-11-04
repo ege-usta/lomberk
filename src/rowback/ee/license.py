@@ -12,13 +12,15 @@ from typing import NamedTuple, Protocol
 
 logger = logging.getLogger("rowback.license")
 
-POLAR_ORGANIZATION_ID = "493a1901-78e3-4579-9c47-01bb8125a314"
+POLAR_ORGANIZATION_ID = "bcd46b75-283b-4f7c-8573-eff346558d71"
 POLAR_VALIDATE_URL = "https://api.polar.sh/v1/customer-portal/license-keys/validate"
 POLAR_ACTIVATE_URL = "https://api.polar.sh/v1/customer-portal/license-keys/activate"
-BUY_URL = "https://buy.polar.sh/polar_cl_ar1Nqmcc0aEByc0Z6pMf3mke7yp1rm22gUQy73Uaomv"
+BUY_URL = "https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU"
 HTTP_TIMEOUT_SECONDS = 5
-# Polar benefit ids that make a key Enterprise (no undo window limit, no database limit).
-# Empty until the Enterprise product exists in Polar; every other granted key is Pro.
+# The Polar organization sells other products too, so a granted key counts only when it carries
+# one of these benefits. Pro: the "Rowback Pro license key" benefit on both Pro products.
+PRO_BENEFIT_IDS: frozenset[str] = frozenset({"16736449-428d-4f23-858f-47a76dd26524"})
+# Enterprise: no undo window limit, no database limit. Empty until that product exists in Polar.
 ENTERPRISE_BENEFIT_IDS: frozenset[str] = frozenset()
 
 
@@ -61,9 +63,10 @@ def validate_key(key: str, activation_id: str | None = None) -> Validation:
         return Validation("invalid")
     if code != 200:
         return Validation("unreachable")
-    if body.get("status") != "granted":
-        return Validation("invalid")
-    return Validation("granted", enterprise=body.get("benefit_id") in ENTERPRISE_BENEFIT_IDS,
+    benefit = body.get("benefit_id")
+    if body.get("status") != "granted" or benefit not in PRO_BENEFIT_IDS | ENTERPRISE_BENEFIT_IDS:
+        return Validation("invalid")  # also a key for another product of the same Polar organization
+    return Validation("granted", enterprise=benefit in ENTERPRISE_BENEFIT_IDS,
                       needs_activation=bool(body.get("limit_activations")) and not activation_id)
 
 

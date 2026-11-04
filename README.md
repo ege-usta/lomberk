@@ -184,7 +184,7 @@ Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against 
 | Billing | | card, self-serve | annual invoice |
 | Help | GitHub issues | GitHub issues | priority answers; help with your security questionnaire |
 
-**[Buy Pro](https://buy.polar.sh/polar_cl_ar1Nqmcc0aEByc0Z6pMf3mke7yp1rm22gUQy73Uaomv)**: the key arrives by email right away. For Enterprise, open a [discussion](https://github.com/ege-usta/rowback/discussions) and we'll take it from there privately. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
+**[Buy Pro](https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU)**: the key arrives by email right away. For Enterprise, open a [discussion](https://github.com/ege-usta/rowback/discussions) and we'll take it from there privately. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
 
 Rowback is self-hosted and your data never reaches us. There is no phone support or on-call; the docs and `rowback doctor` are built so you can set it up alone.
 

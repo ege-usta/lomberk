@@ -7,6 +7,9 @@ import pytest
 import rowback.ee.license as lic
 
 validate_key = lic.validate_key  # the real one; conftest stubs the module attribute for other tests
+PRO = next(iter(lic.PRO_BENEFIT_IDS))
+GRANTED = f'{{"status": "granted", "benefit_id": "{PRO}"}}'
+LIMITED_BODY = f'{{"status": "granted", "benefit_id": "{PRO}", "limit_activations": 3}}'
 
 
 @pytest.fixture
@@ -27,7 +30,7 @@ def polar(monkeypatch):
             pass
 
     class Fake:
-        reply, activate, requests, activations = (200, '{"status": "granted"}'), (201, '{"id": "act-9"}'), [], {"act-1"}
+        reply, activate, requests, activations = (200, GRANTED), (201, '{"id": "act-9"}'), [], {"act-1"}
 
     fake = Fake()
     srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
@@ -51,7 +54,8 @@ class Store:
 
 
 @pytest.mark.parametrize("reply, expected", [
-    ((200, '{"status": "granted"}'), "granted"),
+    ((200, GRANTED), "granted"),
+    ((200, '{"status": "granted"}'), "invalid"),  # no benefit: not a Rowback key
     ((200, '{"status": "revoked"}'), "invalid"),
     ((404, '{"detail": "not found"}'), "invalid"),   # unknown, revoked or expired key
     ((422, '{"detail": []}'), "invalid"),
@@ -70,9 +74,18 @@ def test_validate_key_when_polar_is_down(monkeypatch):
     assert validate_key("KEY-1").status == "unreachable"
 
 
+def test_a_key_for_another_product_of_the_organization_is_invalid(polar):
+    polar.reply = (200, '{"status": "granted", "benefit_id": "ben-other-product"}')
+    assert validate_key("KEY-1") == lic.Validation("invalid")
+    with pytest.raises(lic.LicenseError, match="invalid, expired or cancelled"):
+        lic.check_license("KEY-1", ["SSO"])
+
+
 def test_enterprise_is_the_benefit_not_the_customer_claim(polar, monkeypatch):
+    polar.reply = (200, GRANTED)
+    assert validate_key("KEY-1") == lic.Validation("granted")
     polar.reply = (200, '{"status": "granted", "benefit_id": "ben-ent"}')
-    assert validate_key("KEY-1") == lic.Validation("granted")  # no Enterprise ids configured: Pro
+    assert validate_key("KEY-1").status == "invalid"  # no Enterprise ids configured
     monkeypatch.setattr(lic, "ENTERPRISE_BENEFIT_IDS", frozenset({"ben-ent"}))
     assert validate_key("KEY-1").enterprise
     assert lic.check_license("KEY-1", []) == "enterprise"
@@ -102,7 +115,7 @@ def test_missing_key(monkeypatch):
         lic.check_license("", ["SSO", "Slack approvals"])
 
 
-LIMITED = (200, '{"status": "granted", "limit_activations": 3}')
+LIMITED = (200, LIMITED_BODY)
 
 
 def test_first_start_on_a_database_activates_it_once(polar):
