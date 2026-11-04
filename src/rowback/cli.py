@@ -8,7 +8,7 @@ from rich.table import Table
 
 from rowback.capture.install import install_rowback
 from rowback.config import load_config
-from rowback.executor import RowbackExecutor
+from rowback.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sql.classify import classify_sql
 
@@ -21,6 +21,19 @@ def cli_actor() -> str:
     import getpass
     return f"cli:{getpass.getuser()}"
 console = Console(soft_wrap=True)  # never break a token or a command someone will copy
+
+def cli_plan(control_dsn: str) -> str:
+    """The plan ROWBACK_LICENSE_KEY grants: "free", "pro" or "enterprise"."""
+    try:
+        from rowback.ee.license import LicenseError, check_license
+    except ImportError:  # core without the ee package
+        return "free"
+    try:
+        return check_license(os.environ.get("ROWBACK_LICENSE_KEY"), [], LicenseActivationStore(control_dsn))
+    except (LicenseError, ValueError) as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        return "free"
+
 
 def get_admin_dsn() -> str:
     config = load_config()
@@ -177,8 +190,12 @@ def undo(token: str):
     """Undo an applied SQL statement."""
     control, runtime = get_dsns()
 
-    executor = RowbackExecutor(control, runtime)
+    executor = RowbackExecutor(control, runtime, undo_window_hours=UNDO_WINDOW_HOURS["free"])
     res = executor.execute_undo(token, agent_label=cli_actor())
+    if res.status == "expired" and os.environ.get("ROWBACK_LICENSE_KEY"):
+        # Polar is asked only when the free window isn't enough, so everyday undo works offline.
+        executor.undo_window_hours = UNDO_WINDOW_HOURS[cli_plan(control)]
+        res = executor.execute_undo(token, agent_label=cli_actor())
 
     if res.status == "undone":
         console.print(f"[green]Successfully undid checkpoint {token}. Rows affected: {res.rows_affected}[/green]")

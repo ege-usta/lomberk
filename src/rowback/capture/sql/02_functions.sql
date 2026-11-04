@@ -460,6 +460,7 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.primary_key_columns TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_control_role);
     EXECUTE format('GRANT SELECT ON rowback.registered_tables TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT, UPDATE (activation_id) ON rowback.license_activation TO %I', p_control_role);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 

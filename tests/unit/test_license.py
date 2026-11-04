@@ -11,11 +11,14 @@ validate_key = lic.validate_key  # the real one; conftest stubs the module attri
 
 @pytest.fixture
 def polar(monkeypatch):
-    """A fake Polar validate endpoint. Set .reply = (status_code, body)."""
+    """A fake Polar. Set .reply = (status_code, body) for validate, .activate = (status_code, body)."""
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
-            fake.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-            code, body = fake.reply
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            fake.requests.append((self.path, req))
+            code, body = fake.activate if self.path == "/activate" else fake.reply
+            if self.path == "/validate" and req.get("activation_id") and req["activation_id"] not in fake.activations:
+                code, body = 404, '{"detail": "not found"}'
             self.send_response(code)
             self.end_headers()
             self.wfile.write(body.encode())
@@ -24,18 +27,32 @@ def polar(monkeypatch):
             pass
 
     class Fake:
-        reply, requests = (200, '{"status": "granted"}'), []
+        reply, activate, requests, activations = (200, '{"status": "granted"}'), (201, '{"id": "act-9"}'), [], {"act-1"}
 
     fake = Fake()
     srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     monkeypatch.setattr(lic, "POLAR_VALIDATE_URL", f"http://127.0.0.1:{srv.server_port}/validate")
+    monkeypatch.setattr(lic, "POLAR_ACTIVATE_URL", f"http://127.0.0.1:{srv.server_port}/activate")
+    monkeypatch.setattr(lic, "validate_key", validate_key)  # check_license talks to the fake, not the stub
     yield fake
     srv.shutdown()
 
 
+class Store:
+    def __init__(self, activation_id=None):
+        self.label, self.activation_id = "rowback-test-db", activation_id
+
+    def load(self):
+        return self.label, self.activation_id
+
+    def save(self, activation_id):
+        self.activation_id = activation_id
+
+
 @pytest.mark.parametrize("reply, expected", [
     ((200, '{"status": "granted"}'), "granted"),
+    ((200, '{"status": "revoked"}'), "invalid"),
     ((404, '{"detail": "not found"}'), "invalid"),   # unknown, revoked or expired key
     ((422, '{"detail": []}'), "invalid"),
     ((500, "oops"), "unreachable"),
@@ -44,34 +61,92 @@ def polar(monkeypatch):
 ])
 def test_validate_key_maps_polar_replies(polar, reply, expected):
     polar.reply = reply
-    assert validate_key("KEY-1") == expected
-    assert polar.requests[-1] == {"key": "KEY-1", "organization_id": lic.POLAR_ORGANIZATION_ID}
+    assert validate_key("KEY-1").status == expected
+    assert polar.requests[-1] == ("/validate", {"key": "KEY-1", "organization_id": lic.POLAR_ORGANIZATION_ID})
 
 
 def test_validate_key_when_polar_is_down(monkeypatch):
     monkeypatch.setattr(lic, "POLAR_VALIDATE_URL", "http://127.0.0.1:9/validate")  # nothing listens
-    assert validate_key("KEY-1") == "unreachable"
+    assert validate_key("KEY-1").status == "unreachable"
+
+
+def test_enterprise_is_the_benefit_not_the_customer_claim(polar, monkeypatch):
+    polar.reply = (200, '{"status": "granted", "benefit_id": "ben-ent"}')
+    assert validate_key("KEY-1") == lic.Validation("granted")  # no Enterprise ids configured: Pro
+    monkeypatch.setattr(lic, "ENTERPRISE_BENEFIT_IDS", frozenset({"ben-ent"}))
+    assert validate_key("KEY-1").enterprise
+    assert lic.check_license("KEY-1", []) == "enterprise"
 
 
 @pytest.mark.parametrize("result, features, expected", [
-    ("granted", ["sso"], True),
-    ("unreachable", ["sso"], True),   # our vendor's outage must not take the gateway down
-    ("invalid", [], False),
-    ("granted", [], True),
+    ("granted", ["sso"], "pro"),
+    ("unreachable", ["sso"], "pro"),   # our vendor's outage must not take the gateway down
+    ("invalid", [], "free"),
+    ("granted", [], "pro"),
 ])
 def test_check_license(monkeypatch, result, features, expected):
-    monkeypatch.setattr(lic, "validate_key", lambda key: result)
-    assert lic.check_license("KEY-1", features) is expected
+    monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation(result))
+    assert lic.check_license("KEY-1", features) == expected
 
 
 def test_invalid_key_with_pro_features_refuses_startup(monkeypatch):
-    monkeypatch.setattr(lic, "validate_key", lambda key: "invalid")
+    monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("invalid"))
     with pytest.raises(lic.LicenseError, match="invalid, expired or cancelled"):
         lic.check_license("KEY-1", ["two-person approval"])
 
 
 def test_missing_key(monkeypatch):
-    monkeypatch.setattr(lic, "validate_key", lambda key: pytest.fail("must not call Polar without a key"))
-    assert lic.check_license(None, []) is False
+    monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: pytest.fail("must not call Polar without a key"))
+    assert lic.check_license(None, []) == "free"
     with pytest.raises(lic.LicenseError, match="SSO, Slack approvals need a Rowback Pro license"):
         lic.check_license("", ["SSO", "Slack approvals"])
+
+
+LIMITED = (200, '{"status": "granted", "limit_activations": 3}')
+
+
+def test_first_start_on_a_database_activates_it_once(polar):
+    polar.reply, store = LIMITED, Store()
+    assert lic.check_license("KEY-1", [], store) == "pro"
+    assert store.activation_id == "act-9"
+    assert polar.requests[-1] == ("/activate", {"key": "KEY-1", "organization_id": lic.POLAR_ORGANIZATION_ID,
+                                                "label": "rowback-test-db"})
+    polar.activations.add("act-9")
+    polar.requests.clear()
+    assert lic.check_license("KEY-1", [], store) == "pro"  # a restart reuses the activation
+    assert [path for path, _ in polar.requests] == ["/validate"]
+    assert polar.requests[0][1]["activation_id"] == "act-9"
+
+
+def test_a_fourth_database_is_refused(polar):
+    polar.reply, polar.activate = LIMITED, (403, '{"detail": "License key activation limit reached"}')
+    with pytest.raises(lic.LicenseError, match="already in use on as many databases"):
+        lic.check_license("KEY-1", ["SSO"], Store())
+    store = Store()
+    assert lic.check_license("KEY-1", [], store) == "free"  # no paid feature configured: runs as free
+    assert store.activation_id is None
+
+
+def test_an_activation_removed_in_the_portal_is_replaced(polar):
+    polar.reply, store = LIMITED, Store("act-gone")
+    assert lic.check_license("KEY-1", [], store) == "pro"
+    assert store.activation_id == "act-9"
+
+
+def test_a_kept_activation_is_not_counted_again(polar):
+    polar.reply, store = LIMITED, Store("act-1")
+    assert lic.check_license("KEY-1", [], store) == "pro"
+    assert "/activate" not in [path for path, _ in polar.requests]
+
+
+def test_unlimited_keys_never_activate(polar):
+    store = Store()
+    assert lic.check_license("KEY-1", [], store) == "pro"
+    assert store.activation_id is None and [p for p, _ in polar.requests] == ["/validate"]
+
+
+def test_activation_outage_keeps_the_plan(polar, monkeypatch):
+    polar.reply, store = LIMITED, Store()
+    monkeypatch.setattr(lic, "POLAR_ACTIVATE_URL", "http://127.0.0.1:9/activate")
+    assert lic.check_license("KEY-1", ["SSO"], store) == "pro"
+    assert store.activation_id is None  # tried again at the next start

@@ -167,9 +167,9 @@ def _pro_checks(config, add) -> None:
     if not key:
         add(FAIL, f"{_need(features)} a Pro license key", f"Set ROWBACK_LICENSE_KEY. Buy one at {BUY_URL}")
         return
-    result = validate_key(key)
+    result = validate_key(key).status
     if result == "granted":
-        add(OK, "Pro license is valid")
+        add(OK, "Rowback license is valid")
     elif result == "unreachable":
         add(WARN, "couldn't reach api.polar.sh to check the license", "The gateway still starts. Check outbound HTTPS if you expected it to work.")
     else:

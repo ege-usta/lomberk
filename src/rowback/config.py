@@ -17,7 +17,6 @@ class LimitsConfig(_Strict):
     max_rows_without_approval: int = 100
     max_snapshot_rows: int = 1000000
     statement_timeout_ms: int = 15000
-    trash_retention_days: int = 7
 
 class AgentConfig(_Strict):
     approval_timeout_minutes: int = 30

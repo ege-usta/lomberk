@@ -103,7 +103,9 @@ curl -H "X-API-Key: $ADMIN_KEY" "localhost:8000/v1/audit/export?format=csv&since
 Each checkpoint comes with its SQL, agent, status, rows, who approved it and its ledger hash. The panel has the same export as buttons.
 
 ### Pro license
-Slack approvals, SSO, the two-person rule, the web panel and audit export need `ROWBACK_LICENSE_KEY`. Buy a key on the [pricing page](#pricing): it arrives by email right away and renews with your subscription. The gateway checks the key with Polar (`api.polar.sh`) once at startup. That call sends only the key. If Polar can't be reached, Pro stays on. If the key is invalid or cancelled, the gateway refuses to start with Pro features configured and tells you why.
+Slack approvals, SSO, the two-person rule, the web panel and audit export need `ROWBACK_LICENSE_KEY`. The key also sets how far back undo reaches: 24 hours without one, 30 days with Pro, no limit with Enterprise. Age counts from when the write ran (for a held write, its last approval). An older checkpoint answers `expired` (HTTP 403) and stays as it is.
+
+Buy a key on the [pricing page](#pricing): it arrives by email right away and renews with your subscription. The gateway checks the key with Polar (`api.polar.sh`) once at startup. That call sends the key and, for a Pro key, a random label for this database (`rowback.license_activation`), so one key covers up to 3 databases. Free one up in Polar's customer portal. `rowback undo` asks Polar only when a checkpoint is older than 24 hours. If Polar can't be reached, Pro stays on. If the key is invalid, cancelled or already used on 3 databases, the gateway refuses to start with Pro features configured and tells you why.
 
 ## Configuration (`rowback.yaml`)
 ```yaml
@@ -174,14 +176,15 @@ Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against 
 ## Pricing
 | | Free | Pro | Enterprise |
 |---|---|---|---|
-| Price | $0 | **$199/month** or $1,990/year | from **$3,000/year** |
-| Hard gate, holds, capture, undo, ledger, remote MCP, API/CLI approvals | ✓ | ✓ | ✓ |
-| Slack approvals, approver SSO, web panel, two-person rule, audit export | | ✓ | ✓ |
-| Production databases | unlimited | up to 3 | unlimited |
+| Price | $0 | **$199/month** or $1,990/year | [talk to us](https://github.com/ege-usta/rowback/discussions) |
+| Hard gate, holds, capture, ledger, remote MCP, API/CLI approvals | ✓ | ✓ | ✓ |
+| Undo reaches back | 24 hours | 30 days | no limit |
+| Web panel, Slack approvals, approver SSO, two-person rule, audit export | | ✓ | ✓ |
+| Databases per license key | | up to 3 | unlimited |
 | Billing | | card, self-serve | annual invoice |
-| Help | GitHub issues | GitHub issues | email, answered within 2 business days; help with your security questionnaire |
+| Help | GitHub issues | GitHub issues | priority answers; help with your security questionnaire |
 
-**[Buy Pro](https://buy.polar.sh/polar_cl_ar1Nqmcc0aEByc0Z6pMf3mke7yp1rm22gUQy73Uaomv)**: the key arrives by email right away. For Enterprise, write to https://github.com/ege-usta/rowback/discussions. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
+**[Buy Pro](https://buy.polar.sh/polar_cl_ar1Nqmcc0aEByc0Z6pMf3mke7yp1rm22gUQy73Uaomv)**: the key arrives by email right away. For Enterprise, open a [discussion](https://github.com/ege-usta/rowback/discussions) and we'll take it from there privately. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
 
 Rowback is self-hosted and your data never reaches us. There is no phone support or on-call; the docs and `rowback doctor` are built so you can set it up alone.
 

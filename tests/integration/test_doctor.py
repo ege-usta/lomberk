@@ -76,7 +76,7 @@ def test_pro_feature_without_or_with_bad_key(db, monkeypatch, tmp_path):
     env = {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS}
     r = doctor(monkeypatch, tmp_path, env, "approvals:\n  required: 2\n")
     assert r.exit_code == 1 and "two-person approval needs a Pro license key" in r.output
-    monkeypatch.setattr(lic, "validate_key", lambda key: "invalid")
+    monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("invalid"))
     r = doctor(monkeypatch, tmp_path, {**env, "ROWBACK_LICENSE_KEY": "bad"}, "approvals:\n  required: 2\n")
     assert r.exit_code == 1 and "invalid, expired or cancelled" in r.output
 

@@ -123,7 +123,7 @@ def admin_login(c):
 
 def test_panel_needs_a_license(gateway, monkeypatch):
     start, _ = gateway
-    monkeypatch.setattr(lic, "validate_key", lambda key: "invalid")
+    monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("invalid"))
     with start("") as c:
         assert c.get("/panel/").status_code == 403
         assert "Pro feature" in c.get("/panel/api/session").text

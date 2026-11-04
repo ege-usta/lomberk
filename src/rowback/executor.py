@@ -11,6 +11,25 @@ from rowback.sentinel import BIDI_CONTROLS
 logger = logging.getLogger("rowback.executor")
 
 
+class LicenseActivationStore:
+    """This database's activation of the license key (rowback.license_activation), for ee/license.py."""
+
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    def load(self) -> tuple[str, str | None]:
+        try:
+            with psycopg.connect(self.dsn) as conn:
+                return conn.execute("SELECT label, activation_id FROM rowback.license_activation").fetchone()
+        except psycopg.errors.UndefinedTable as e:
+            raise ValueError("Startup Refusal: the Rowback schema is older than this gateway. "
+                             "Run `rowback install` again to upgrade it.") from e
+
+    def save(self, activation_id: str) -> None:
+        with psycopg.connect(self.dsn) as conn:
+            conn.execute("UPDATE rowback.license_activation SET activation_id = %s", (activation_id,))
+
+
 class ExecutionResult(BaseModel):
     checkpoint_id: int | None = None
     public_id: str | None = None
@@ -60,6 +79,16 @@ class HoldForApproval(Exception):
         super().__init__(message)
         self.preview = preview
         self.policy = policy
+
+
+# How far back each plan can undo, in hours. None = no limit.
+UNDO_WINDOW_HOURS = {"free": 24, "pro": 30 * 24, "enterprise": None}
+
+
+def undo_window_message(hours: int) -> str:
+    span = f"{hours // 24} days" if hours % 24 == 0 and hours > 24 else f"{hours} hours"
+    return (f"This checkpoint is older than the {span} undo window of this Rowback plan. "
+            "Rowback Pro undoes up to 30 days back, Enterprise without a limit: see https://github.com/ege-usta/rowback#pricing")
 
 
 PREVIEW_ROWS = 20
@@ -192,6 +221,17 @@ class RowbackExecutor:
             with psycopg.connect(self.dsn, autocommit=False) as conn:
                 try:
                     with conn.transaction(), conn.cursor() as cur:
+                        if self.undo_window_hours is not None:
+                            # Age counts from when the write ran: the last approval, else when it was made.
+                            cur.execute(
+                                "SELECT now() - coalesce((SELECT max(a.approved_at) FROM rowback.approvals a "
+                                "WHERE a.public_id = c.public_id), c.created_at) > make_interval(hours => %s) "
+                                "FROM rowback.checkpoints c WHERE c.public_id = %s",
+                                (self.undo_window_hours, public_id))
+                            row = cur.fetchone()
+                            if row and row[0]:
+                                return ExecutionResult(status="expired", message=undo_window_message(self.undo_window_hours),
+                                                       public_id=public_id, rows_affected=0)
                         cur.execute("SELECT rowback.execute_undo(%s, %s)", (public_id, agent_label))
                         result = cur.fetchone()[0]
                         return ExecutionResult(
@@ -254,7 +294,7 @@ class RowbackExecutor:
             fetched_data.append(row_dict)
         return fetched_data
 
-    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1, sensitive_columns: list[str] | None = None, preview_writes: bool = False):
+    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1, sensitive_columns: list[str] | None = None, preview_writes: bool = False, undo_window_hours: int | None = None):
         if not dsn or not runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required")
         self.dsn = dsn
@@ -267,6 +307,7 @@ class RowbackExecutor:
         self.required_approvals = int(required_approvals)  # distinct people per held write
         self.sensitive_columns = tuple(sensitive_columns or ())  # config names treated like `password`
         self.preview_writes = preview_writes  # dry-run held writes for an approval preview (config.approvals.preview)
+        self.undo_window_hours = undo_window_hours  # None = no limit (library/test use); servers pass the plan's window
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str, principal: str = "system", operation_id: str | None = None) -> str:
         import psycopg

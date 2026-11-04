@@ -135,3 +135,12 @@ CREATE TABLE IF NOT EXISTS rowback.previews (
     preview     JSONB NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- This database's activation of a Pro license key. Pro keys cover a fixed number of databases;
+-- each one counts once with Polar under its own random label, kept here across restarts.
+CREATE TABLE IF NOT EXISTS rowback.license_activation (
+    only_row      BOOLEAN PRIMARY KEY DEFAULT true CHECK (only_row),
+    label         TEXT NOT NULL DEFAULT 'rowback-' || gen_random_uuid(),
+    activation_id TEXT
+);
+INSERT INTO rowback.license_activation DEFAULT VALUES ON CONFLICT DO NOTHING;
