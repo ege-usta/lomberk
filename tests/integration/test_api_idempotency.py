@@ -146,7 +146,7 @@ def test_http_submit_idempotent_concurrent(client, dsn, monkeypatch):
 
 
 def test_different_payload_same_id_conflict(client):
-    # Test 2: Aynı principal/ID farklı SQL/params/target -> conflict
+    # Test 2: same principal and ID with different SQL/params/target -> conflict
     res1 = client.post("/v1/execute", json={
         "sql": "INSERT INTO public.api_users (email) VALUES ('u1@example.com')",
         "operation_id": "req-222"
@@ -163,7 +163,7 @@ def test_different_payload_same_id_conflict(client):
     assert "Conflict:" in res2.json()["detail"]
 
 def test_response_loss_retry(client, dsn):
-    # Test 4: İlk operation commit'i sonrası response kaybı
+    # Test 4: the response is lost after the first operation commits
     res1 = client.post("/v1/execute", json={
         "sql": "INSERT INTO public.api_users (email) VALUES ('u3@example.com')",
         "operation_id": "req-333"

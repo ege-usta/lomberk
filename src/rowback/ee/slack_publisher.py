@@ -3,7 +3,7 @@
 Outbox pattern: pending checkpoints are claimed in the database (one row per
 checkpoint, so several gateway replicas never double-post), then posted with
 chat.postMessage. A send whose outcome is unknown is marked `unknown` and never
-re-sent (docs/Phase_3B_Test_Workspace_Pilot.md); an operator reconciles it.
+re-sent; an operator reconciles it.
 Only the bot's own messages are ever updated (chat:write scope).
 """
 import asyncio

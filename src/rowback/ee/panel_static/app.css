@@ -1,4 +1,4 @@
-/* Rowback panel. Tokens follow DESIGN.md: square, ink ground, verdict colors mean only
+/* Rowback panel. Same tokens as the site: square, ink ground, verdict colors mean only
    denied/held/allowed. System fonts only: the CSP allows nothing off-origin. */
 :root {
   --ink: #111214; --ink-2: #1b1d20; --paper: #f2f2ef; --muted: #a4a6ab;

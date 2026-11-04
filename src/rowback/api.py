@@ -235,9 +235,8 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 import logging
                 logging.getLogger("rowback.api").error(f"Failed to start Slack transport: {e}")
-                # We don't crash the server if connect fails, but we don't swallow validation errors
-                # Wait! The user says "Eksik dependency => bağlantı öncesi ret. Startup hatasının API'yi açık bırakması seçilecekse Slack readiness... log yazmak başarılı başlangıç değildir."
-                # The ValueError checks happen BEFORE the try/except! So validation fails fast.
+                # A failed connect is logged, not fatal. Config errors (missing tokens) are raised
+                # above, before this try, so a misconfigured Slack still refuses startup.
         else:
             _slack_transport_instance = None
 

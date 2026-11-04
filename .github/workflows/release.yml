@@ -1,5 +1,5 @@
 # Push a tag like v0.2.0 (matching pyproject's version) to publish:
-#   - the package to PyPI (trusted publishing: no token stored here; see BACKLOG.md for the one-time setup)
+#   - the package to PyPI (trusted publishing: no token stored here; set it up once on pypi.org)
 #   - the gateway image to ghcr.io/ege-usta/rowback:<version> and :latest
 #   - a GitHub release with generated notes
 name: Release
