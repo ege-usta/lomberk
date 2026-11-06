@@ -146,8 +146,9 @@ Local, single-user development without the service: `rowback serve` (stdio MCP).
 1. **AST hard gate**: PostgreSQL's own parser (`pglast`) allows one `SELECT/INSERT/UPDATE/DELETE` (or a plain `EXPLAIN`), schema-qualified writes with `WHERE`, and ~190 pure built-in functions: window functions, JSON, full-text search, `gen_random_uuid()` and the rest of what agents write every day.
 2. **Policy**: protected tables, FK-cascade reach, and a row limit enforced by executing inside a transaction and rolling back.
 3. **Capture**: a `SECURITY DEFINER` row trigger records every change (cascades included), bound to a single-use capability token.
-4. **Undo**: an order that respects foreign keys (parents are restored before children), with conflict and schema-drift checks. It refuses rather than touching rows written later.
-5. **Ledger**: append-only, SHA-256 hash-chained checkpoints.
+4. **Undo**: an order that respects foreign keys (parents are restored before children), with conflict and schema-drift checks. Old rows are kept in Postgres' own text form, so every type (json `null` and key order included) comes back exactly. It refuses rather than touching rows written later.
+5. **Bounded reads**: reads run read-only under `statement_timeout`, stream through a server-side cursor and return at most 100 rows (4,000 characters per value, 100,000 in total), telling the agent when more exist.
+6. **Ledger**: append-only, SHA-256 hash-chained checkpoints.
 
 ### Monitoring
 `/healthz` (process up) and `/readyz` (both database roles reachable) need no key. Set `ROWBACK_METRICS_KEY` to turn on `/metrics` for Prometheus: decisions by event (`denied`, `held`, `applied`, `undone`, ...), held writes waiting, and the age of the oldest one, so you can alert when approvals pile up. It carries counts only, never SQL, rows or names.
