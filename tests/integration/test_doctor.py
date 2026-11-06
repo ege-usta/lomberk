@@ -32,7 +32,8 @@ def db():
 def doctor(monkeypatch, tmp_path, env, yaml=""):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "rowback.yaml").write_text(yaml)
-    for k in ("ROWBACK_ADMIN_DSN", "ROWBACK_AGENT_DSN", "ROWBACK_API_KEY", "ROWBACK_ADMIN_KEY", "ROWBACK_LICENSE_KEY"):
+    for k in ("ROWBACK_ADMIN_DSN", "ROWBACK_AGENT_DSN", "ROWBACK_API_KEY", "ROWBACK_ADMIN_KEY", "ROWBACK_LICENSE_KEY",
+              "ROWBACK_CONFIG"):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -66,9 +67,23 @@ def test_config_typo_and_unregistered_protected_table(db, monkeypatch, tmp_path)
     control, agent = db
     env = {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS}
     r = doctor(monkeypatch, tmp_path, env, "protected_table: [public.users]\n")
-    assert r.exit_code == 1 and "invalid" in r.output
+    assert r.exit_code == 1 and "invalid: protected_table" in r.output
     r = doctor(monkeypatch, tmp_path, env, "protected_tables: [public.users]\n")
     assert r.exit_code == 0 and "protected but not registered: public.users" in r.output
+
+
+def test_config_named_by_rowback_config(db, monkeypatch, tmp_path):
+    control, agent = db
+    elsewhere = tmp_path / "etc"
+    elsewhere.mkdir()
+    (elsewhere / "prod.yaml").write_text("protected_tables: [public.orders]\n")
+    env = {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS,
+           "ROWBACK_CONFIG": str(elsewhere / "prod.yaml")}
+    r = doctor(monkeypatch, tmp_path, env)
+    assert r.exit_code == 0 and "prod.yaml is valid" in r.output and "public.orders" in r.output, r.output
+    env["ROWBACK_CONFIG"] = str(elsewhere / "missing.yaml")
+    r = doctor(monkeypatch, tmp_path, env)
+    assert r.exit_code == 1 and "does not exist" in r.output and "refuse to start" in r.output
 
 
 def test_pro_feature_without_or_with_bad_key(db, monkeypatch, tmp_path):

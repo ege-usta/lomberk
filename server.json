@@ -7,6 +7,7 @@
     "url": "https://github.com/ege-usta/rowback",
     "source": "github"
   },
+  "websiteUrl": "https://ege-usta.github.io/rowback/",
   "version": "0.2.0",
   "packages": [
     {
@@ -15,7 +16,33 @@
       "version": "0.2.0",
       "transport": {
         "type": "stdio"
-      }
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "ROWBACK_AGENT_DSN",
+          "description": "Connection string for the low-privilege role the agent's SQL runs as.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "ROWBACK_ADMIN_DSN",
+          "description": "Connection string for the control role that owns the rowback schema (checkpoints, undo, ledger).",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "ROWBACK_CONFIG",
+          "description": "Absolute path to rowback.yaml (protected tables, limits). Without it, ./rowback.yaml or defaults.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
     }
   ]
 }

@@ -5,30 +5,44 @@ import psycopg
 import yaml
 from pydantic import ValidationError
 
-from rowback.config import load_config, pro_features, weak_key_reason
+from rowback.config import (
+    CONFIG_ENV,
+    RowbackConfig,
+    config_error_message,
+    config_path,
+    load_config,
+    pro_features,
+    weak_key_reason,
+)
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 CONNECT_TIMEOUT_SECONDS = 5
 
 
-def run_checks(path: str = "rowback.yaml") -> list[tuple[str, str, str]]:
+def run_checks(path: str | None = None) -> list[tuple[str, str, str]]:
     """(level, what was found, how to fix it) for each check, in order."""
     out: list[tuple[str, str, str]] = []
 
     def add(level: str, what: str, fix: str = "") -> None:
         out.append((level, what, fix))
 
-    try:
-        config = load_config(path)
-    except (ValidationError, yaml.YAMLError) as e:
-        add(FAIL, f"{path} is invalid: {str(e).splitlines()[0]}",
-            "Fix the key named above. Unknown keys are refused on purpose, so a typo can't turn protection off.")
+    path = path or config_path()
+    if not os.path.exists(path) and path == os.environ.get(CONFIG_ENV):
+        add(FAIL, f"{CONFIG_ENV} points at {path}, which does not exist, so the gateway will refuse to start",
+            f"Fix the path in {CONFIG_ENV} or unset it.")
         return out
     if os.path.exists(path):
+        try:
+            config = load_config(path)
+        except (ValidationError, yaml.YAMLError) as e:
+            add(FAIL, f"{path} is invalid: {config_error_message(e)}",
+                "Fix the key named above. Unknown keys are refused on purpose, so a typo can't turn protection off.")
+            return out
         add(OK, f"{path} is valid")
     else:
+        config = RowbackConfig()
         add(WARN, f"no {path} in this directory, so defaults apply (no protected tables)",
-            "Run the gateway from the directory that holds rowback.yaml.")
+            f"Run the gateway from the directory that holds rowback.yaml, or set {CONFIG_ENV} to its path.")
 
     control, agent = _env_checks(config, add)
     if control and agent:

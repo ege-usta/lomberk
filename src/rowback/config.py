@@ -1,7 +1,8 @@
 import os
+import sys
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 class _Strict(BaseModel):
@@ -96,12 +97,48 @@ def weak_key_reason(key: str) -> str | None:
     return None
 
 
-def load_config(path: str = "rowback.yaml") -> RowbackConfig:
+CONFIG_ENV = "ROWBACK_CONFIG"
+DEFAULT_CONFIG_PATH = "rowback.yaml"
+_warned_missing: set[str] = set()
+
+
+def config_path() -> str:
+    """Where the config is read from: $ROWBACK_CONFIG when set, else ./rowback.yaml."""
+    return os.environ.get(CONFIG_ENV) or DEFAULT_CONFIG_PATH
+
+
+def load_config(path: str | None = None) -> RowbackConfig:
+    """Reads `path`, else $ROWBACK_CONFIG, else ./rowback.yaml.
+
+    A file named by ROWBACK_CONFIG must exist: if it doesn't, startup is refused rather than
+    running without the protected tables it was meant to load. A missing ./rowback.yaml only
+    warns (on stderr, once), because a first run with defaults is a normal way to try Rowback.
+    """
+    env_path = os.environ.get(CONFIG_ENV)
+    path = path or env_path or DEFAULT_CONFIG_PATH
     if not os.path.exists(path):
+        if path == env_path:
+            raise ValueError(f"{CONFIG_ENV} points at {path}, which does not exist. "
+                             "Fix the path or unset it; Rowback won't guess which tables to protect.")
+        full = os.path.abspath(path)
+        if full not in _warned_missing:
+            _warned_missing.add(full)
+            print(f"rowback: no config at {full}, so defaults apply (no protected tables). "
+                  f"Set {CONFIG_ENV} to your rowback.yaml.", file=sys.stderr)
         return RowbackConfig()
     with open(path) as f:
         data = yaml.safe_load(f) or {}
     return RowbackConfig(**data)
+
+
+def config_error_message(e: Exception) -> str:
+    """One line that names the bad key, for a validation or YAML error."""
+    if isinstance(e, ValidationError):
+        err = e.errors()[0]
+        where = ".".join(str(p) for p in err["loc"]) or "top level"
+        more = f" (and {e.error_count() - 1} more)" if e.error_count() > 1 else ""
+        return f"{where}: {err['msg']}{more}"
+    return str(e).splitlines()[0]
 
 
 def pro_features(config: RowbackConfig) -> list[str]:

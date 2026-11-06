@@ -3,11 +3,13 @@ import sys
 
 import dotenv
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
 from rowback.capture.install import install_rowback
-from rowback.config import load_config
+from rowback.config import RowbackConfig, config_error_message, config_path
+from rowback.config import load_config as _load_config
 from rowback.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sql.classify import classify_sql
@@ -15,6 +17,15 @@ from rowback.sql.classify import classify_sql
 dotenv.load_dotenv()
 
 app = typer.Typer(help="Rowback: every agent write, reversible", no_args_is_help=True)
+
+
+def load_config() -> RowbackConfig:
+    """The config, or a one-line error and exit 1 when it is missing or invalid (no traceback)."""
+    try:
+        return _load_config()
+    except (ValueError, yaml.YAMLError) as e:  # ValueError includes pydantic's ValidationError for unknown keys
+        console.print(f"[red]Config error: {config_error_message(e)}[/red]")
+        raise typer.Exit(1) from None
 
 
 def cli_actor() -> str:
@@ -229,12 +240,12 @@ def verify_ledger():
 
 
 @app.command()
-def doctor(config: str = typer.Option("rowback.yaml", help="Config file to check.")):
+def doctor(config: str = typer.Option(None, help="Config file to check (default: $ROWBACK_CONFIG, else ./rowback.yaml).")):
     """Check this deployment (config, keys, database roles, install, license) and say how to fix problems."""
     from rich.markup import escape
 
     from rowback.doctor import FAIL, OK, run_checks
-    results = run_checks(config)
+    results = run_checks(config or config_path())
     marks = {OK: "[green]✓[/green]", FAIL: "[red]✗[/red]"}
     for level, what, fix in results:
         console.print(f"{marks.get(level, '[yellow]![/yellow]')} {escape(what)}", highlight=False)
@@ -244,12 +255,12 @@ def doctor(config: str = typer.Option("rowback.yaml", help="Config file to check
     if failures:
         console.print(f"[red]{failures} problem(s) to fix before starting the gateway.[/red]")
         raise typer.Exit(1)
-    console.print("[green]Ready. Start the gateway with: rowback api[/green]")
+    console.print("[green]Ready. Start the gateway with: rowback serve (MCP over stdio) or rowback api (HTTP)[/green]")
 
 
 @app.command()
 def api(port: int = 8000, host: str = typer.Option("127.0.0.1", help="Bind address. Put a TLS reverse proxy in front before exposing beyond localhost.")):
-    """(Enterprise) Start the REST gateway (Slack via Socket Mode when enabled)."""
+    """Start the HTTP gateway: REST at /v1 and remote MCP at /mcp, for agents that can't run `rowback serve`."""
     import uvicorn
     console.print(f"[green]Starting Rowback API on {host}:{port}...[/green]")
     console.print(f"[dim]- Agent HTTP endpoint: POST http://{host}:{port}/v1/execute[/dim]")

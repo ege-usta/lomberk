@@ -6,6 +6,21 @@
 <title>Rowback: every agent write, reversible</title>
 <meta name="description" content="An MCP gateway for PostgreSQL. Agents never hold the database password, destructive SQL is blocked, risky writes wait for a person, and every write can be undone.">
 <meta name="theme-color" content="#cf2e22">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="canonical" href="https://ege-usta.github.io/rowback/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Rowback">
+<meta property="og:title" content="Rowback: every agent write, reversible">
+<meta property="og:description" content="An MCP gateway for PostgreSQL. Agents never hold the database password, destructive SQL is blocked, risky writes wait for a person, and every write can be undone.">
+<meta property="og:url" content="https://ege-usta.github.io/rowback/">
+<meta property="og:image" content="https://ege-usta.github.io/rowback/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Rowback: DROP TABLE denied; a protected DELETE held, approved, then undone.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Rowback: every agent write, reversible">
+<meta name="twitter:description" content="An MCP gateway for PostgreSQL. Agents never hold the database password, destructive SQL is blocked, risky writes wait for a person, and every write can be undone.">
+<meta name="twitter:image" content="https://ege-usta.github.io/rowback/og.png">
 <style>
 /* Fonts are served from this site, not Google: no visitor IP goes to a third party (GDPR). OFL licensed. */
 @font-face {
@@ -302,7 +317,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
     <ul class="limit-list">
       <li><strong>Infrastructure tokens</strong>Rowback guards the SQL path. An agent holding a cloud or hosting API token can still delete a volume. Keep those tokens away from agents.</li>
       <li><strong>Database superusers</strong>They can disable triggers and rewrite the ledger. Ship the ledger's head hash to your SIEM.</li>
-      <li><strong>Some tables, for now</strong>Composite primary keys, rules and inheritance are refused rather than guessed at. Writes to tables with their own triggers can't be undone, so a person approves them first.</li>
+      <li><strong>Some tables, for now</strong>Tables with rules or classic inheritance are refused rather than guessed at, and so are partitioned tables with their own triggers. Writes to other tables with their own triggers wait for a person, unless you register the table with <code>--allow-triggers</code>.</li>
       <li><strong>Schema changes</strong>DDL is blocked, not reversible. It goes through your normal migrations.</li>
     </ul>
   </div>

@@ -53,5 +53,5 @@ The agent never receives a database credential or the admin key. **Deploy the ga
 - [ ] The TLS proxy sends `X-Forwarded-Proto: https`, so panel cookies are always marked Secure.
 - [ ] TLS in front of the gateway; `/v1/checkpoints/*`, `/v1/audit/*` and `/panel` reachable only from approver networks, rate-limited at the proxy.
 - [ ] Every table the agent may write is registered (`rowback register`), including FK children.
-- [ ] `protected_tables` and `limits.max_rows_without_approval` reviewed. Config typos fail startup by design.
+- [ ] `protected_tables` and `limits.max_rows_without_approval` reviewed. Config typos fail startup by design. Set `ROWBACK_CONFIG` to the file's absolute path: if it is missing, startup is refused, whereas a missing `./rowback.yaml` only warns and protects nothing.
 - [ ] `verify-ledger` head hash exported on a schedule; audit log shipped to your SIEM.

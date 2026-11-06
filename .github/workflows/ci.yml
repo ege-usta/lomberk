@@ -42,7 +42,7 @@ jobs:
 
       - name: Run Pytest
         env:
-          # AI/LLM calls are bypassed inside tests using monkeypatch, ensuring isolation.
+          # OPENAI_API_KEY is never set here, so the optional LLM sentinel stays off; tests that cover it mock the call.
           # We use testcontainers to spin up fresh ephemeral databases for integration tests.
           PYTHONPATH: src
           ROWBACK_TEST_PG_IMAGE: postgres:${{ matrix.pg }}-alpine
