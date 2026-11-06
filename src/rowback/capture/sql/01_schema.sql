@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS rowback.registered_tables (
 -- own triggers only change the row itself (updated_at) or registered tables, so undo may
 -- switch them off while it restores rows.
 ALTER TABLE rowback.registered_tables ADD COLUMN IF NOT EXISTS allow_triggers BOOLEAN NOT NULL DEFAULT false;
+-- The old row in Postgres' own text form (OLD::text): exact for every type, unlike JSON,
+-- which turns a json 'null' into SQL NULL and re-orders/dedupes json keys. Undo prefers it.
+ALTER TABLE rowback.row_changes ADD COLUMN IF NOT EXISTS old_text TEXT;
 
 CREATE SEQUENCE IF NOT EXISTS rowback.seq_row_changes START 1;
 

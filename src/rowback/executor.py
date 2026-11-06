@@ -1,4 +1,5 @@
 
+import json
 import logging
 
 import psycopg
@@ -93,6 +94,23 @@ def undo_window_message(hours: int) -> str:
 
 PREVIEW_ROWS = 20
 PREVIEW_CHARS = 200  # per value shown to an approver
+# What a query hands back to an agent. The gateway reads at most one row past RESULT_ROWS (a
+# server-side cursor), and cuts any value and the whole result to sizes an agent's context can hold.
+RESULT_ROWS = 100
+RESULT_VALUE_CHARS = 4_000
+RESULT_TOTAL_CHARS = 100_000
+
+
+def _cut(v, limit: int = RESULT_VALUE_CHARS):
+    """A value no longer than `limit` characters; JSON that is too long becomes its cut text."""
+    if isinstance(v, (dict, list)):
+        text = json.dumps(v, default=str)
+        if len(text) <= limit:
+            return v
+        v = text
+    if isinstance(v, str) and len(v) > limit:
+        return f"{v[:limit]}… ({len(v) - limit} more characters; use substr() or a narrower query to read the rest)"
+    return v
 
 
 # Tables an ON DELETE/UPDATE cascade from %(t)s can reach that have triggers of their own and were not
@@ -288,7 +306,7 @@ class RowbackExecutor:
                 if secret(col) and row_dict[col]:
                     row_dict[col] = MASK
                     continue
-                row_dict[col] = _mask_json(row_dict[col], secret)
+                row_dict[col] = _cut(_mask_json(row_dict[col], secret))
                 if isinstance(row_dict[col], str):
                     row_dict[col] = sanitize_payload(row_dict[col])
             fetched_data.append(row_dict)
@@ -370,6 +388,7 @@ class RowbackExecutor:
             import psycopg
             error_msg = None
             fetched_data = None
+            message = "Success"
             try:
                 with psycopg.connect(self.runtime_dsn, autocommit=False) as conn:
                     with conn.transaction():
@@ -386,17 +405,31 @@ class RowbackExecutor:
 
                             cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{self.statement_timeout_ms}ms",))
                             cur.execute("SET TRANSACTION READ ONLY")
-                            cur.execute(eval_result.statement.sql)
-                            if cur.description:
-                                columns = [desc[0] for desc in cur.description]
-                                rows = cur.fetchmany(100)
-                                fetched_data = self._mask_and_sanitize_rows(columns, rows)
+                            # A SELECT runs through a server-side cursor, so a query over millions of
+                            # rows sends the gateway only the page it returns. EXPLAIN and SHOW can't.
+                            is_select = type(ast[0].stmt).__name__ == "SelectStmt"
+                            with conn.cursor(name="rowback_read") if is_select else conn.cursor() as rc:
+                                rc.execute(eval_result.statement.sql)
+                                if rc.description:
+                                    columns = [desc[0] for desc in rc.description]
+                                    rows = rc.fetchmany(RESULT_ROWS + 1)
+                                    more = len(rows) > RESULT_ROWS
+                                    fetched_data, used = [], 0
+                                    for row in self._mask_and_sanitize_rows(columns, rows[:RESULT_ROWS]):
+                                        used += len(json.dumps(row, default=str))
+                                        if fetched_data and used > RESULT_TOTAL_CHARS:
+                                            more = True
+                                            break
+                                        fetched_data.append(row)
+                                    if more:
+                                        message = (f"Success: showing the first {len(fetched_data)} rows; more exist. "
+                                                   "Narrow the query (WHERE, LIMIT, fewer columns) to see the rest.")
             except Exception as e:
                 error_msg = _agent_message(e)
 
             if error_msg:
                 return ExecutionResult(operation_id=operation_id, status="failed", message=error_msg)
-            return ExecutionResult(status="applied", message="Success", data=fetched_data)
+            return ExecutionResult(status="applied", message=message, data=fetched_data)
 
         return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, principal, operation_id)
 
