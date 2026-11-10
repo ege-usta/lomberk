@@ -2,6 +2,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from importlib.metadata import PackageNotFoundError, version
 
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
@@ -44,8 +45,16 @@ def run_agent_sql(executor: RowbackExecutor, policy_engine: PolicyEngine, sql: s
         return f"Error executing SQL: {e}"
 
 
+def package_version() -> str:
+    """The installed Rowback version, reported to MCP clients and the REST API."""
+    try:
+        return version("rowback")
+    except PackageNotFoundError:  # running from a source tree that was never installed
+        return "0+unknown"
+
+
 def build_mcp(get_deps: Callable[[], tuple[RowbackExecutor, PolicyEngine]], principal: str = "mcp_agent") -> MCPServer:
-    app = MCPServer("rowback")
+    app = MCPServer("rowback", title="Rowback", website_url="https://ege-usta.github.io/rowback/", version=package_version())
 
     @app.tool()
     def execute_sql(

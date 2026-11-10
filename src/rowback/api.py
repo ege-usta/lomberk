@@ -17,7 +17,7 @@ from rowback.config import load_config, pro_features, quorum_without_identity_so
 from rowback.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sentinel import AISentinel
-from rowback.server import build_mcp
+from rowback.server import build_mcp, package_version
 from rowback.sql.classify import classify_sql
 
 logger = logging.getLogger(__name__)
@@ -270,7 +270,7 @@ async def lifespan(app: FastAPI):
         _policy_engine_instance = None
 
 # No /docs or /openapi.json: they map every endpoint for anyone who can reach the port.
-app = FastAPI(title="Rowback API", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Rowback API", version=package_version(), lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
