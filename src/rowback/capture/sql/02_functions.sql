@@ -187,6 +187,7 @@ DECLARE
     v_new JSONB := NULL;
     v_caller TEXT;
     v_schema_snapshot JSONB;
+    v_old_text TEXT;
 BEGIN
     v_caller := session_user;
     v_cp_id_text := current_setting('rowback.checkpoint_id', true);
@@ -246,8 +247,10 @@ BEGIN
 
     IF TG_OP = 'DELETE' THEN
         v_old := row_to_json(OLD);
+        v_old_text := OLD::text;
     ELSIF TG_OP = 'UPDATE' THEN
         v_old := row_to_json(OLD);
+        v_old_text := OLD::text;
         v_new := row_to_json(NEW);
         IF EXISTS (SELECT 1 FROM unnest(v_pk) k WHERE (v_old->>k) IS DISTINCT FROM (v_new->>k)) THEN
             RAISE EXCEPTION 'Rowback Security Violation: Primary key updates are forbidden.';
@@ -258,11 +261,11 @@ BEGIN
 
     INSERT INTO rowback.row_changes (
         checkpoint_id, table_schema, table_name, table_oid, op, pk,
-        old_row, new_row, schema_snapshot, seq
+        old_row, new_row, schema_snapshot, seq, old_text
     ) VALUES (
         v_cp_id, TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_RELID, substr(TG_OP, 1, 1),
         (SELECT jsonb_object_agg(k, COALESCE(v_old->>k, v_new->>k)) FROM unnest(v_pk) k),
-        v_old, v_new, v_schema_snapshot, v_seq
+        v_old, v_new, v_schema_snapshot, v_seq, v_old_text
     );
 
     IF TG_OP = 'DELETE' THEN
@@ -460,6 +463,7 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.primary_key_columns TO %I', p_control_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_control_role);
     EXECUTE format('GRANT SELECT ON rowback.registered_tables TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT, UPDATE (activation_id) ON rowback.license_activation TO %I', p_control_role);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 
@@ -533,6 +537,29 @@ $$;
 -- ponytail: O(n^2) passes for pathological self-referencing chains; fine for per-statement checkpoints.
 -- Re-insert a captured row exactly: skip generated columns (Postgres recomputes
 -- them) and keep the original ids, including GENERATED ALWAYS AS IDENTITY.
+-- The captured old row as record text, ready for ($1::tbl). Prefers the exact OLD::text
+-- capture, but only when it still reads back as the same row (column order unchanged);
+-- otherwise, and for rows captured before old_text existed, rebuilds it from the JSON.
+CREATE OR REPLACE FUNCTION rowback.old_row_text(p_table TEXT, p_old_text TEXT, p_old_row JSONB) RETURNS TEXT AS $$
+DECLARE
+    v_same BOOLEAN := false;
+    v_text TEXT;
+BEGIN
+    IF p_old_text IS NOT NULL THEN
+        BEGIN
+            EXECUTE format('SELECT to_jsonb($1::%s) = $2', p_table) INTO v_same USING p_old_text, p_old_row;
+        EXCEPTION WHEN others THEN
+            v_same := false;
+        END;
+        IF v_same THEN
+            RETURN p_old_text;
+        END IF;
+    END IF;
+    EXECUTE format('SELECT jsonb_populate_record(null::%s, $1)::text', p_table) INTO v_text USING p_old_row;
+    RETURN v_text;
+END;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
+
 CREATE OR REPLACE FUNCTION rowback.restore_insert_sql(p_table TEXT) RETURNS TEXT AS $$
 DECLARE
     v_cols TEXT;
@@ -540,18 +567,20 @@ BEGIN
     SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO v_cols
     FROM pg_attribute
     WHERE attrelid = p_table::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = '';
-    RETURN format('INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE SELECT %s FROM jsonb_populate_record(null::%s, $1::jsonb)',
+    -- $1 is the row in record text form; ($1::tbl).* spells out its columns by name.
+    RETURN format('INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE SELECT %s FROM (SELECT ($1::%s).*) s',
                   p_table, v_cols, v_cols, p_table);
 END;
 $$ LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.replay_deferred_inserts(p_tables TEXT[], p_rows JSONB[])
+DROP FUNCTION IF EXISTS rowback.replay_deferred_inserts(TEXT[], JSONB[]);
+CREATE OR REPLACE FUNCTION rowback.replay_deferred_inserts(p_tables TEXT[], p_rows TEXT[])
 RETURNS INT
 SET search_path = rowback, pg_temp
 AS $$
 DECLARE
     v_left_tables TEXT[];
-    v_left_rows JSONB[];
+    v_left_rows TEXT[];
     v_done INT := 0;
     i INT;
 BEGIN
@@ -598,7 +627,8 @@ DECLARE
     v_unprotected TEXT;
     v_captured INT;
     v_retry_tables TEXT[] := '{}';
-    v_retry_rows JSONB[] := '{}';
+    v_retry_rows TEXT[] := '{}';
+    v_old_text TEXT;
     v_drained BOOLEAN := false;
     v_trig RECORD;
     v_paused TEXT[] := '{}';  -- ALTER TABLE ... ENABLE statements that put switched-off triggers back
@@ -716,7 +746,7 @@ BEGIN
     -- re-insert deleted rows parents-first (FK depth), then revert updates, then
     -- delete inserted rows; LIFO within each phase (covers self-referencing FKs).
     FOR v_change IN
-        SELECT rc.table_schema, rc.table_name, rc.table_oid, rc.op, rc.pk, rc.old_row, rc.new_row, rc.schema_snapshot
+        SELECT rc.table_schema, rc.table_name, rc.table_oid, rc.op, rc.pk, rc.old_row, rc.new_row, rc.schema_snapshot, rc.old_text
         FROM rowback.row_changes rc
         LEFT JOIN LATERAL (
             WITH RECURSIVE up(oid, d) AS (
@@ -772,7 +802,7 @@ BEGIN
         END;
         
         IF v_change.op = 'I' THEN
-            EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %s FOR UPDATE NOWAIT', v_full_table, v_where) INTO v_curr;
+            EXECUTE format('SELECT row_to_json(t.*) FROM %s t WHERE %s FOR UPDATE NOWAIT', v_full_table, v_where) INTO v_curr;
             
             IF v_curr IS NULL THEN
                 RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
@@ -786,7 +816,7 @@ BEGIN
             EXECUTE format('DELETE FROM %s WHERE %s', v_full_table, v_where);
                 
         ELSIF v_change.op = 'U' THEN
-            EXECUTE format('SELECT row_to_json(t) FROM %s t WHERE %s FOR UPDATE NOWAIT', v_full_table, v_where) INTO v_curr;
+            EXECUTE format('SELECT row_to_json(t.*) FROM %s t WHERE %s FOR UPDATE NOWAIT', v_full_table, v_where) INTO v_curr;
                 
             IF v_curr IS NULL THEN
                 RAISE EXCEPTION 'Conflict: Row % missing in %', v_change.pk, v_full_table;
@@ -795,28 +825,23 @@ BEGIN
                 RAISE EXCEPTION 'Conflict: Row % in % has been modified', v_change.pk, v_full_table;
             END IF;
             
-            SELECT string_agg(quote_ident(key) || ' = (SELECT (' || quote_literal(value#>>'{}') || ')::text)', ', ') 
-            -- Using text cast is simple but might fail types. 
-            -- Safest: USING parameter, but jsonb_populate_record is better.
-            -- User request: "SELECT %I FROM jsonb_populate_record(null::%s, $1::jsonb)"
-            INTO v_set_clauses
-            FROM jsonb_each(v_change.old_row);
-            
-            SELECT string_agg(quote_ident(key) || ' = (SELECT ' || quote_ident(key) || ' FROM jsonb_populate_record(null::' || v_full_table || ', $1::jsonb))', ', ') 
+            SELECT string_agg(format('%I = ($1::%s).%I', key, v_full_table, key), ', ')
             INTO v_set_clauses
             FROM jsonb_object_keys(v_change.old_row) AS key
             -- generated columns recompute themselves; ALWAYS-identity columns can't be set
             WHERE NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = v_change.table_oid
                               AND a.attname = key AND (a.attgenerated <> '' OR a.attidentity = 'a'));
-            
-            EXECUTE format('UPDATE %s SET %s WHERE %s', v_full_table, v_set_clauses, v_where) USING v_change.old_row;
+
+            v_old_text := rowback.old_row_text(v_full_table, v_change.old_text, v_change.old_row);
+            EXECUTE format('UPDATE %s SET %s WHERE %s', v_full_table, v_set_clauses, v_where) USING v_old_text;
 
         ELSIF v_change.op = 'D' THEN
+            v_old_text := rowback.old_row_text(v_full_table, v_change.old_text, v_change.old_row);
             BEGIN
-                EXECUTE rowback.restore_insert_sql(v_full_table) USING v_change.old_row;
+                EXECUTE rowback.restore_insert_sql(v_full_table) USING v_old_text;
             EXCEPTION WHEN foreign_key_violation THEN
                 v_retry_tables := v_retry_tables || v_full_table;
-                v_retry_rows := v_retry_rows || v_change.old_row;
+                v_retry_rows := v_retry_rows || v_old_text;
                 CONTINUE;
             END;
         ELSE

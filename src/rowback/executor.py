@@ -1,4 +1,5 @@
 
+import json
 import logging
 
 import psycopg
@@ -9,6 +10,25 @@ from rowback.audit import audit
 from rowback.sentinel import BIDI_CONTROLS
 
 logger = logging.getLogger("rowback.executor")
+
+
+class LicenseActivationStore:
+    """This database's activation of the license key (rowback.license_activation), for ee/license.py."""
+
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    def load(self) -> tuple[str, str | None]:
+        try:
+            with psycopg.connect(self.dsn) as conn:
+                return conn.execute("SELECT label, activation_id FROM rowback.license_activation").fetchone()
+        except psycopg.errors.UndefinedTable as e:
+            raise ValueError("Startup Refusal: the Rowback schema is older than this gateway. "
+                             "Run `rowback install` again to upgrade it.") from e
+
+    def save(self, activation_id: str) -> None:
+        with psycopg.connect(self.dsn) as conn:
+            conn.execute("UPDATE rowback.license_activation SET activation_id = %s", (activation_id,))
 
 
 class ExecutionResult(BaseModel):
@@ -62,8 +82,35 @@ class HoldForApproval(Exception):
         self.policy = policy
 
 
+# How far back each plan can undo, in hours. None = no limit.
+UNDO_WINDOW_HOURS = {"free": 24, "pro": 30 * 24, "enterprise": None}
+
+
+def undo_window_message(hours: int) -> str:
+    span = f"{hours // 24} days" if hours % 24 == 0 and hours > 24 else f"{hours} hours"
+    return (f"This checkpoint is older than the {span} undo window of this Rowback plan. "
+            "Rowback Pro undoes up to 30 days back, Enterprise without a limit: see https://github.com/ege-usta/rowback#pricing")
+
+
 PREVIEW_ROWS = 20
 PREVIEW_CHARS = 200  # per value shown to an approver
+# What a query hands back to an agent. The gateway reads at most one row past RESULT_ROWS (a
+# server-side cursor), and cuts any value and the whole result to sizes an agent's context can hold.
+RESULT_ROWS = 100
+RESULT_VALUE_CHARS = 4_000
+RESULT_TOTAL_CHARS = 100_000
+
+
+def _cut(v, limit: int = RESULT_VALUE_CHARS):
+    """A value no longer than `limit` characters; JSON that is too long becomes its cut text."""
+    if isinstance(v, (dict, list)):
+        text = json.dumps(v, default=str)
+        if len(text) <= limit:
+            return v
+        v = text
+    if isinstance(v, str) and len(v) > limit:
+        return f"{v[:limit]}… ({len(v) - limit} more characters; use substr() or a narrower query to read the rest)"
+    return v
 
 
 # Tables an ON DELETE/UPDATE cascade from %(t)s can reach that have triggers of their own and were not
@@ -192,6 +239,17 @@ class RowbackExecutor:
             with psycopg.connect(self.dsn, autocommit=False) as conn:
                 try:
                     with conn.transaction(), conn.cursor() as cur:
+                        if self.undo_window_hours is not None:
+                            # Age counts from when the write ran: the last approval, else when it was made.
+                            cur.execute(
+                                "SELECT now() - coalesce((SELECT max(a.approved_at) FROM rowback.approvals a "
+                                "WHERE a.public_id = c.public_id), c.created_at) > make_interval(hours => %s) "
+                                "FROM rowback.checkpoints c WHERE c.public_id = %s",
+                                (self.undo_window_hours, public_id))
+                            row = cur.fetchone()
+                            if row and row[0]:
+                                return ExecutionResult(status="expired", message=undo_window_message(self.undo_window_hours),
+                                                       public_id=public_id, rows_affected=0)
                         cur.execute("SELECT rowback.execute_undo(%s, %s)", (public_id, agent_label))
                         result = cur.fetchone()[0]
                         return ExecutionResult(
@@ -248,13 +306,13 @@ class RowbackExecutor:
                 if secret(col) and row_dict[col]:
                     row_dict[col] = MASK
                     continue
-                row_dict[col] = _mask_json(row_dict[col], secret)
+                row_dict[col] = _cut(_mask_json(row_dict[col], secret))
                 if isinstance(row_dict[col], str):
                     row_dict[col] = sanitize_payload(row_dict[col])
             fetched_data.append(row_dict)
         return fetched_data
 
-    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1, sensitive_columns: list[str] | None = None, preview_writes: bool = False):
+    def __init__(self, dsn: str, runtime_dsn: str, max_rows_without_approval: int | None = None, approval_timeout_minutes: int | None = None, protected_tables: list[str] | None = None, statement_timeout_ms: int = 5000, required_approvals: int = 1, sensitive_columns: list[str] | None = None, preview_writes: bool = False, undo_window_hours: int | None = None):
         if not dsn or not runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required")
         self.dsn = dsn
@@ -267,6 +325,7 @@ class RowbackExecutor:
         self.required_approvals = int(required_approvals)  # distinct people per held write
         self.sensitive_columns = tuple(sensitive_columns or ())  # config names treated like `password`
         self.preview_writes = preview_writes  # dry-run held writes for an approval preview (config.approvals.preview)
+        self.undo_window_hours = undo_window_hours  # None = no limit (library/test use); servers pass the plan's window
 
     def create_pending_checkpoint(self, sql: str, stmt_class: str, decision: str, agent_label: str, principal: str = "system", operation_id: str | None = None) -> str:
         import psycopg
@@ -329,6 +388,7 @@ class RowbackExecutor:
             import psycopg
             error_msg = None
             fetched_data = None
+            message = "Success"
             try:
                 with psycopg.connect(self.runtime_dsn, autocommit=False) as conn:
                     with conn.transaction():
@@ -345,17 +405,31 @@ class RowbackExecutor:
 
                             cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{self.statement_timeout_ms}ms",))
                             cur.execute("SET TRANSACTION READ ONLY")
-                            cur.execute(eval_result.statement.sql)
-                            if cur.description:
-                                columns = [desc[0] for desc in cur.description]
-                                rows = cur.fetchmany(100)
-                                fetched_data = self._mask_and_sanitize_rows(columns, rows)
+                            # A SELECT runs through a server-side cursor, so a query over millions of
+                            # rows sends the gateway only the page it returns. EXPLAIN and SHOW can't.
+                            is_select = type(ast[0].stmt).__name__ == "SelectStmt"
+                            with conn.cursor(name="rowback_read") if is_select else conn.cursor() as rc:
+                                rc.execute(eval_result.statement.sql)
+                                if rc.description:
+                                    columns = [desc[0] for desc in rc.description]
+                                    rows = rc.fetchmany(RESULT_ROWS + 1)
+                                    more = len(rows) > RESULT_ROWS
+                                    fetched_data, used = [], 0
+                                    for row in self._mask_and_sanitize_rows(columns, rows[:RESULT_ROWS]):
+                                        used += len(json.dumps(row, default=str))
+                                        if fetched_data and used > RESULT_TOTAL_CHARS:
+                                            more = True
+                                            break
+                                        fetched_data.append(row)
+                                    if more:
+                                        message = (f"Success: showing the first {len(fetched_data)} rows; more exist. "
+                                                   "Narrow the query (WHERE, LIMIT, fewer columns) to see the rest.")
             except Exception as e:
                 error_msg = _agent_message(e)
 
             if error_msg:
                 return ExecutionResult(operation_id=operation_id, status="failed", message=error_msg)
-            return ExecutionResult(status="applied", message="Success", data=fetched_data)
+            return ExecutionResult(status="applied", message=message, data=fetched_data)
 
         return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, principal, operation_id)
 

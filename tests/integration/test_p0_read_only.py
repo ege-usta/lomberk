@@ -95,3 +95,40 @@ def test_p0_read_only_db_level_enforcement(dsn, control_dsn, runtime_dsn, setup_
 
     assert res.status == "failed"
     assert "cannot execute INSERT in a read-only transaction" in res.message or "read-only" in res.message
+
+
+def _read(executor, sql):
+    from rowback.config import load_config
+    from rowback.policy import PolicyEngine
+    from rowback.sql.classify import classify_sql
+    return executor.execute(PolicyEngine(config=load_config()).evaluate(classify_sql(sql)[0]), agent_label="test")
+
+
+def test_large_read_fetches_only_what_it_returns(control_dsn, runtime_dsn, setup_db):
+    """A read never pulls more rows into the gateway than it hands back: row 200 would divide
+    by zero, so the query only succeeds if the gateway stopped reading after the first page."""
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
+    res = _read(executor, "SELECT 1 / (g - 200) AS v FROM generate_series(1, 300) g")
+    assert res.status == "applied", res.message
+    assert len(res.data) == 100
+    assert "first 100 rows" in res.message
+    res = _read(executor, "SELECT g FROM generate_series(1, 5) g")
+    assert res.message == "Success" and len(res.data) == 5
+    assert _read(executor, "EXPLAIN SELECT 1").status == "applied"
+
+
+def test_huge_values_are_cut_to_fit_an_agent_context(control_dsn, runtime_dsn, setup_db):
+    from rowback.executor import RESULT_TOTAL_CHARS, RESULT_VALUE_CHARS
+    executor = RowbackExecutor(control_dsn, runtime_dsn)
+    res = _read(executor, "SELECT string_agg('x', '') AS big FROM generate_series(1, 50000)")
+    assert res.status == "applied", res.message
+    big = res.data[0]["big"]
+    assert big.startswith("x" * RESULT_VALUE_CHARS) and "more characters" in big
+    assert len(big) < RESULT_VALUE_CHARS + 120
+    res = _read(executor, "SELECT jsonb_agg(g) AS j FROM generate_series(1, 20000) g")
+    assert isinstance(res.data[0]["j"], str) and "more characters" in res.data[0]["j"]
+    # Many mid-sized rows stop at the total budget, and the message says so.
+    res = _read(executor, "SELECT string_agg('y', '') AS t FROM generate_series(1, 3000) g, generate_series(1, 100) r GROUP BY r")
+    assert res.status == "applied", res.message
+    assert sum(len(r["t"]) for r in res.data) <= RESULT_TOTAL_CHARS
+    assert len(res.data) < 100 and f"first {len(res.data)} rows" in res.message

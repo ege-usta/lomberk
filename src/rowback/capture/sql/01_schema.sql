@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS rowback.registered_tables (
 -- own triggers only change the row itself (updated_at) or registered tables, so undo may
 -- switch them off while it restores rows.
 ALTER TABLE rowback.registered_tables ADD COLUMN IF NOT EXISTS allow_triggers BOOLEAN NOT NULL DEFAULT false;
+-- The old row in Postgres' own text form (OLD::text): exact for every type, unlike JSON,
+-- which turns a json 'null' into SQL NULL and re-orders/dedupes json keys. Undo prefers it.
+ALTER TABLE rowback.row_changes ADD COLUMN IF NOT EXISTS old_text TEXT;
 
 CREATE SEQUENCE IF NOT EXISTS rowback.seq_row_changes START 1;
 
@@ -135,3 +138,12 @@ CREATE TABLE IF NOT EXISTS rowback.previews (
     preview     JSONB NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- This database's activation of a Pro license key. Pro keys cover a fixed number of databases;
+-- each one counts once with Polar under its own random label, kept here across restarts.
+CREATE TABLE IF NOT EXISTS rowback.license_activation (
+    only_row      BOOLEAN PRIMARY KEY DEFAULT true CHECK (only_row),
+    label         TEXT NOT NULL DEFAULT 'rowback-' || gen_random_uuid(),
+    activation_id TEXT
+);
+INSERT INTO rowback.license_activation DEFAULT VALUES ON CONFLICT DO NOTHING;

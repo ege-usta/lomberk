@@ -148,6 +148,6 @@ def test_gateway_refuses_to_start_without_a_valid_license(dsn, monkeypatch, tmp_
         monkeypatch.setenv(k, v)
     (tmp_path / "rowback.yaml").write_text("approvals:\n  required: 2\n")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(lic, "validate_key", lambda key: "invalid")
+    monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("invalid"))
     with pytest.raises(lic.LicenseError, match="two-person approval"), TestClient(app):
         pass

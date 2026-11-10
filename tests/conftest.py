@@ -19,5 +19,5 @@ def _pro_license():
         return
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("ROWBACK_LICENSE_KEY", "test-license")
-        mp.setattr(lic, "validate_key", lambda key: "granted")
+        mp.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("granted"))
         yield

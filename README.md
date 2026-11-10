@@ -4,13 +4,13 @@
 **Every agent write, reversible.**
 Rowback is an MCP gateway for PostgreSQL. AI agents send SQL through it instead of holding database credentials. It blocks destructive commands, holds large or sensitive writes for a human, records every changed row, and can undo any applied write, including foreign-key cascades.
 
-**Just want a seatbelt for Claude Code?** [Rowback Seatbelt](seatbelt/) is a free plugin that makes your agent ask before `DROP`, `TRUNCATE`, `DELETE` without `WHERE`, `prisma migrate reset`, `dropdb` and friends. Install it in two commands.
+**Just want a seatbelt for Claude Code?** [Rowback Seatbelt](https://github.com/ege-usta/rowback/tree/main/seatbelt) is a free plugin that makes your agent ask before `DROP`, `TRUNCATE`, `DELETE` without `WHERE`, `prisma migrate reset`, `dropdb` and friends. Install it in two commands.
 
 ## 9-second database deletion demo
 
 In April 2026 an autonomous coding agent deleted a production database in 9 seconds (through an over-privileged infrastructure token). Rowback closes the other door: an agent's own database access. Here is what a rogue agent can and can't do when its SQL goes through Rowback.
 
-![Rowback demo: destructive SQL denied, a protected DELETE held, approved, then undone](site/demo.gif)
+![Rowback demo: destructive SQL denied, a protected DELETE held, approved, then undone](https://raw.githubusercontent.com/ege-usta/rowback/main/site/demo.gif)
 
 ### 1. Start the stack
 ```bash
@@ -32,7 +32,8 @@ Any MCP client that speaks Streamable HTTP works the same way.
 | `DROP TABLE public.users` | **Denied**: DDL is structurally banned |
 | `DELETE FROM public.users` | **Denied**: write without `WHERE` |
 | `DELETE FROM public.users WHERE id > 0` | **Held**: `public.users` is protected → `APPROVAL REQUIRED. Token: cp_…` |
-| `UPDATE public.orders SET total = 0 WHERE 1=1` on a large table | **Held**: touched more rows than `max_rows_without_approval`, so it was rolled back |
+| `UPDATE public.payments SET amount = 0 WHERE id > 0` | **Applied**, with a checkpoint: 2 rows on an unprotected table. One undo call puts the old amounts back |
+| The same write on more rows than `max_rows_without_approval` (10 in the demo) | **Held**: it ran, was counted and rolled back, and now waits for a person |
 
 ### 4. A human decides (admin key, never given to the agent)
 ```bash
@@ -45,15 +46,15 @@ Pending requests expire after `agent.approval_timeout_minutes`. Review the exact
 
 **See the rows, not just the SQL.** When a write is held, Rowback runs it once, records what it changed and rolls it back, so the approver sees the effect before deciding, cascades included:
 ```
-$ rowback show cp_…
-would change: 3 row(s) in public.users (1), public.payments (2) (dry run when held)
-  delete public.users {"id": "1"}: {"email": "a@x.io", "plan": "free", "api_token": "***MASKED***"}
-  delete public.payments {"id": "10"}: {"user_id": 1, "amount": 5}
+$ rowback show cp_…        # the agent sent: DELETE FROM public.users WHERE id = 1
+would change: 2 row(s) in public.users (1), public.payments (1) (dry run when held)
+  delete public.users {"id": "1"}: {"id": 1, "name": "Alice CEO", "plan": "enterprise", "email": "alice@pocketos.com", …}
+  delete public.payments {"id": "1"}: {"id": 1, "amount": 1000.0, "status": "success", "user_id": 1}
 ```
 The same preview is in the web panel and the API; Slack gets the counts only. Secret columns are masked, and columns hidden from the agent role never appear. A held write that would fail (a duplicate key, a missing parent) is refused at once instead of waiting for a person. The preview is a snapshot of the moment it was held. If a table's own triggers do something a rollback can't take back, set `approvals.preview: false`.
 
 ### Or approve in Slack (Pro)
-Create the app from [`slack/app-manifest.json`](slack/app-manifest.json) (bot scope `chat:write` only, Socket Mode, so no public URL is needed), invite the bot to your approvals channel, then:
+Create the app from [`slack/app-manifest.json`](https://github.com/ege-usta/rowback/blob/main/slack/app-manifest.json) (bot scope `chat:write` only, Socket Mode, so no public URL is needed), invite the bot to your approvals channel, then:
 ```yaml
 slack:
   channel_id: C0123APPROVALS
@@ -103,7 +104,9 @@ curl -H "X-API-Key: $ADMIN_KEY" "localhost:8000/v1/audit/export?format=csv&since
 Each checkpoint comes with its SQL, agent, status, rows, who approved it and its ledger hash. The panel has the same export as buttons.
 
 ### Pro license
-Slack approvals, SSO, the two-person rule, the web panel and audit export need `ROWBACK_LICENSE_KEY`. Buy a key on the [pricing page](#pricing): it arrives by email right away and renews with your subscription. The gateway checks the key with Polar (`api.polar.sh`) once at startup. That call sends only the key. If Polar can't be reached, Pro stays on. If the key is invalid or cancelled, the gateway refuses to start with Pro features configured and tells you why.
+Slack approvals, SSO, the two-person rule, the web panel and audit export need `ROWBACK_LICENSE_KEY`. The key also sets how far back undo reaches: 24 hours without one, 30 days with Pro, no limit with Enterprise. Age counts from when the write ran (for a held write, its last approval). An older checkpoint answers `expired` (HTTP 403) and stays as it is.
+
+Buy a key on the [pricing page](#pricing): it arrives by email right away and renews with your subscription. The gateway checks the key with Polar (`api.polar.sh`) once at startup. That call sends the key and, for a Pro key, a random label for this database (`rowback.license_activation`), so one key covers up to 3 databases. Free one up in Polar's customer portal. `rowback undo` asks Polar only when a checkpoint is older than 24 hours. If Polar can't be reached, Pro stays on. If the key is invalid, cancelled or already used on 3 databases, the gateway refuses to start with Pro features configured and tells you why.
 
 ## Configuration (`rowback.yaml`)
 ```yaml
@@ -118,9 +121,9 @@ sensitive_columns:                # like `password`: never shown to the agent, h
 agent:
   approval_timeout_minutes: 30
 ```
-Unknown keys fail startup, so a typo can never silently turn protection off.
+Unknown keys fail startup, so a typo can never silently turn protection off. The gateway reads `./rowback.yaml`; when it starts somewhere else (MCP clients usually launch `rowback serve` from another directory), set `ROWBACK_CONFIG` to the file's absolute path. If that file is missing, startup is refused; a missing `./rowback.yaml` only prints a warning and runs with defaults (no protected tables).
 
-Environment: `ROWBACK_ADMIN_DSN` (control role), `ROWBACK_AGENT_DSN` (agent role), `ROWBACK_API_KEY` (agent), `ROWBACK_ADMIN_KEY` (approvers), `ROWBACK_AUDIT_LOG` (JSONL path), `ROWBACK_LICENSE_KEY` (Pro), `ROWBACK_METRICS_KEY` (turns on `/metrics`). Keys must be 32+ random characters (`openssl rand -hex 32`); the gateway refuses weak or demo keys unless `ROWBACK_ALLOW_WEAK_KEYS=true` (laptop demos only).
+Environment: `ROWBACK_CONFIG` (path to `rowback.yaml`), `ROWBACK_ADMIN_DSN` (control role), `ROWBACK_AGENT_DSN` (agent role), `ROWBACK_API_KEY` (agent), `ROWBACK_ADMIN_KEY` (approvers), `ROWBACK_AUDIT_LOG` (JSONL path), `ROWBACK_LICENSE_KEY` (Pro), `ROWBACK_METRICS_KEY` (turns on `/metrics`). Keys must be 32+ random characters (`openssl rand -hex 32`); the gateway refuses weak or demo keys unless `ROWBACK_ALLOW_WEAK_KEYS=true` (laptop demos only).
 
 ## Installing on your own database
 ```bash
@@ -131,20 +134,21 @@ rowback init --control-role rowback_control --agent-role rowback_agent
 rowback register public.orders --agent-role rowback_agent  # repeat per table (and FK children)
 rowback verify-ledger                                       # tamper-evidence check
 ```
-What an agent can't do, with the exact refusal for 20 real attacks: [docs/attack-gallery.md](docs/attack-gallery.md).
+What an agent can't do, with the exact refusal for 20 real attacks: [docs/attack-gallery.md](https://github.com/ege-usta/rowback/blob/main/docs/attack-gallery.md).
 
-Step-by-step for **Supabase, Neon and Amazon RDS** (roles, connection strings, RLS, `updated_at` triggers): [docs/hosted-postgres.md](docs/hosted-postgres.md).
+Step-by-step for **Supabase, Neon and Amazon RDS** (roles, connection strings, RLS, `updated_at` triggers): [docs/hosted-postgres.md](https://github.com/ege-usta/rowback/blob/main/docs/hosted-postgres.md).
 
-Common questions before adopting Rowback: [docs/faq.md](docs/faq.md).
+Common questions before adopting Rowback: [docs/faq.md](https://github.com/ege-usta/rowback/blob/main/docs/faq.md).
 
-Local, single-user development without the service: `rowback serve` (stdio MCP). Do not use this mode with agents that have shell access. See [SECURITY.md](SECURITY.md).
+Local, single-user development without the service: `rowback serve` (stdio MCP). Do not use this mode with agents that have shell access. See [SECURITY.md](https://github.com/ege-usta/rowback/blob/main/SECURITY.md).
 
 ## How it works
 1. **AST hard gate**: PostgreSQL's own parser (`pglast`) allows one `SELECT/INSERT/UPDATE/DELETE` (or a plain `EXPLAIN`), schema-qualified writes with `WHERE`, and ~190 pure built-in functions: window functions, JSON, full-text search, `gen_random_uuid()` and the rest of what agents write every day.
 2. **Policy**: protected tables, FK-cascade reach, and a row limit enforced by executing inside a transaction and rolling back.
 3. **Capture**: a `SECURITY DEFINER` row trigger records every change (cascades included), bound to a single-use capability token.
-4. **Undo**: an order that respects foreign keys (parents are restored before children), with conflict and schema-drift checks. It refuses rather than touching rows written later.
-5. **Ledger**: append-only, SHA-256 hash-chained checkpoints.
+4. **Undo**: an order that respects foreign keys (parents are restored before children), with conflict and schema-drift checks. Old rows are kept in Postgres' own text form, so every type (json `null` and key order included) comes back exactly. It refuses rather than touching rows written later.
+5. **Bounded reads**: reads run read-only under `statement_timeout`, stream through a server-side cursor and return at most 100 rows (4,000 characters per value, 100,000 in total), telling the agent when more exist.
+6. **Ledger**: append-only, SHA-256 hash-chained checkpoints.
 
 ### Monitoring
 `/healthz` (process up) and `/readyz` (both database roles reachable) need no key. Set `ROWBACK_METRICS_KEY` to turn on `/metrics` for Prometheus: decisions by event (`denied`, `held`, `applied`, `undone`, ...), held writes waiting, and the age of the oldest one, so you can alert when approvals pile up. It carries counts only, never SQL, rows or names.
@@ -155,7 +159,7 @@ scrape_configs:
     static_configs: [{ targets: ["rowback:8000"] }]
 ```
 
-**Current limits:** every registered table needs a primary key (one column or several; `rowback register` reads it from the table). Partitioned tables are supported: register the partitioned table and every partition, including ones added later, is covered, and a row moved to another partition comes back where it was. Writes to tables with rules or classic inheritance are refused, and so are partitioned tables with their own triggers. Writes to tables with their own triggers wait for a person, unless you register the table with `--allow-triggers` (for triggers like `updated_at` that only change the row itself or tables Rowback also protects); undo then switches them off while it restores rows, so rows come back exactly. JSON keys must be written as literals (`->>'theme'`); masking inside JSON is best effort, so list JSON columns that may hold secrets in `sensitive_columns`. DDL is blocked, not reversible. Full list in [SECURITY.md](SECURITY.md).
+**Current limits:** every registered table needs a primary key (one column or several; `rowback register` reads it from the table). Partitioned tables are supported: register the partitioned table and every partition, including ones added later, is covered, and a row moved to another partition comes back where it was. Writes to tables with rules or classic inheritance are refused, and so are partitioned tables with their own triggers. Writes to tables with their own triggers wait for a person, unless you register the table with `--allow-triggers` (for triggers like `updated_at` that only change the row itself or tables Rowback also protects); undo then switches them off while it restores rows, so rows come back exactly. JSON keys must be written as literals (`->>'theme'`); masking inside JSON is best effort, so list JSON columns that may hold secrets in `sensitive_columns`. DDL is blocked, not reversible. Full list in [SECURITY.md](https://github.com/ege-usta/rowback/blob/main/SECURITY.md).
 
 ## Overhead
 Measured against Postgres 16 on localhost (200 runs, p50 / p95):
@@ -174,14 +178,15 @@ Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against 
 ## Pricing
 | | Free | Pro | Enterprise |
 |---|---|---|---|
-| Price | $0 | **$199/month** or $1,990/year | from **$3,000/year** |
-| Hard gate, holds, capture, undo, ledger, remote MCP, API/CLI approvals | ✓ | ✓ | ✓ |
-| Slack approvals, approver SSO, web panel, two-person rule, audit export | | ✓ | ✓ |
-| Production databases | unlimited | up to 3 | unlimited |
+| Price | $0 | **$199/month** or $1,990/year | [talk to us](https://github.com/ege-usta/rowback/discussions) |
+| Hard gate, holds, capture, ledger, remote MCP, API/CLI approvals | ✓ | ✓ | ✓ |
+| Undo reaches back | 24 hours | 30 days | no limit |
+| Web panel, Slack approvals, approver SSO, two-person rule, audit export | | ✓ | ✓ |
+| Databases per license key | | up to 3 | unlimited |
 | Billing | | card, self-serve | annual invoice |
-| Help | GitHub issues | GitHub issues | email, answered within 2 business days; help with your security questionnaire |
+| Help | GitHub issues | GitHub issues | priority answers; help with your security questionnaire |
 
-**[Buy Pro](https://buy.polar.sh/polar_cl_ar1Nqmcc0aEByc0Z6pMf3mke7yp1rm22gUQy73Uaomv)**: the key arrives by email right away. For Enterprise, write to https://github.com/ege-usta/rowback/discussions. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
+**[Buy Pro](https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU)**: the key arrives by email right away. For Enterprise, open a [discussion](https://github.com/ege-usta/rowback/discussions) with how many databases and approvers you have, and we'll reply with a quote. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
 
 Rowback is self-hosted and your data never reaches us. There is no phone support or on-call; the docs and `rowback doctor` are built so you can set it up alone.
 
@@ -194,4 +199,4 @@ PYTHONPATH=src uv run pytest tests/    # needs Docker (testcontainers)
 ## License
 Open core. Everything outside `src/rowback/ee/` is Apache-2.0: the hard gate, policy, capture, undo, ledger, remote MCP, and API/CLI approvals. You can run the whole safety path for free.
 
-`src/rowback/ee/` (Slack approvals, approver SSO, the web panel, audit export and the license check) is source-available under the [Elastic License 2.0](src/rowback/ee/LICENSE) (ELv2), the same license Elasticsearch uses. You can read, run and modify it. The features need a Pro or Enterprise key, and ELv2 forbids removing or bypassing the key check or offering the software as a hosted service. The two-person rule is core code, but turning it on needs a key.
+`src/rowback/ee/` (Slack approvals, approver SSO, the web panel, audit export and the license check) is source-available under the [Elastic License 2.0](https://github.com/ege-usta/rowback/blob/main/src/rowback/ee/LICENSE) (ELv2), the same license Elasticsearch uses. You can read, run and modify it. The features need a Pro or Enterprise key, and ELv2 forbids removing or bypassing the key check or offering the software as a hosted service. The two-person rule is core code, but turning it on needs a key.

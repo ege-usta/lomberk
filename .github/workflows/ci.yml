@@ -42,7 +42,7 @@ jobs:
 
       - name: Run Pytest
         env:
-          # AI/LLM calls are bypassed inside tests using monkeypatch, ensuring isolation.
+          # OPENAI_API_KEY is never set here, so the optional LLM sentinel stays off; tests that cover it mock the call.
           # We use testcontainers to spin up fresh ephemeral databases for integration tests.
           PYTHONPATH: src
           ROWBACK_TEST_PG_IMAGE: postgres:${{ matrix.pg }}-alpine
@@ -114,6 +114,22 @@ jobs:
       - run: |
           uv export --frozen --no-dev --no-hashes --no-emit-project > requirements.txt
           uvx pip-audit -r requirements.txt --disable-pip --no-deps
+
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --frozen --all-groups
+      - run: uv run --no-sync ruff check src tests seatbelt
 
   sast:
     name: Static analysis (bandit)

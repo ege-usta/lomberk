@@ -14,10 +14,10 @@ from starlette.routing import Route
 
 from rowback.audit import audit
 from rowback.config import load_config, pro_features, quorum_without_identity_source, weak_key_reason
-from rowback.executor import RowbackExecutor
+from rowback.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, RowbackExecutor
 from rowback.policy import PolicyEngine
 from rowback.sentinel import AISentinel
-from rowback.server import build_mcp
+from rowback.server import build_mcp, package_version
 from rowback.sql.classify import classify_sql
 
 logger = logging.getLogger(__name__)
@@ -40,10 +40,11 @@ _METRICS_KEY = None  # ROWBACK_METRICS_KEY; unset = /metrics is off
 _SSO = None  # ee OidcVerifier when sso.issuer is set
 _ALLOW_ADMIN_KEY = True
 _PRO = False  # a valid Rowback Pro license is present
+_PLAN = "free"  # "free", "pro" or "enterprise": sets how far back undo reaches
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _SESSION_SECRET, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY, _PRO, _METRICS_KEY
+    global _executor_instance, _policy_engine_instance, _API_KEY, _ADMIN_KEY, _SESSION_SECRET, _slack_transport_instance, _SSO, _ALLOW_ADMIN_KEY, _PRO, _PLAN, _METRICS_KEY
 
     # Local registry ownership for safe and strict shutdown drainage
     local_db_workers = set()
@@ -84,10 +85,13 @@ async def lifespan(app: FastAPI):
     slack_enabled = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
     needs_pro = pro_features(config)
     license_key = os.environ.get("ROWBACK_LICENSE_KEY")
-    _PRO = False
+    _PLAN = "free"
     if needs_pro or license_key:
         from rowback.ee.license import check_license
-        _PRO = await asyncio.to_thread(check_license, license_key, needs_pro)
+        control_dsn = os.environ.get(config.database.admin_dsn_env)
+        store = LicenseActivationStore(control_dsn) if license_key and control_dsn else None
+        _PLAN = await asyncio.to_thread(check_license, license_key, needs_pro, store)
+    _PRO = _PLAN != "free"
     _SSO, _ALLOW_ADMIN_KEY = None, True
     if config.sso.issuer:
         from rowback.ee.sso import OidcVerifier
@@ -122,7 +126,7 @@ async def lifespan(app: FastAPI):
         if runtime_super:
             raise ValueError("Startup Refusal: Agent role must not be a superuser.")
 
-        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns, preview_writes=config.approvals.preview)
+        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns, preview_writes=config.approvals.preview, undo_window_hours=UNDO_WINDOW_HOURS[_PLAN])
         _policy_engine_instance = PolicyEngine(config)
 
         # Production Slack Transport Wiring
@@ -231,9 +235,8 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 import logging
                 logging.getLogger("rowback.api").error(f"Failed to start Slack transport: {e}")
-                # We don't crash the server if connect fails, but we don't swallow validation errors
-                # Wait! The user says "Eksik dependency => bağlantı öncesi ret. Startup hatasının API'yi açık bırakması seçilecekse Slack readiness... log yazmak başarılı başlangıç değildir."
-                # The ValueError checks happen BEFORE the try/except! So validation fails fast.
+                # A failed connect is logged, not fatal. Config errors (missing tokens) are raised
+                # above, before this try, so a misconfigured Slack still refuses startup.
         else:
             _slack_transport_instance = None
 
@@ -267,7 +270,7 @@ async def lifespan(app: FastAPI):
         _policy_engine_instance = None
 
 # No /docs or /openapi.json: they map every endpoint for anyone who can reach the port.
-app = FastAPI(title="Rowback Enterprise API", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Rowback API", version=package_version(), lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -468,7 +471,7 @@ def reject_checkpoint(
         raise HTTPException(status_code=404, detail="Token not found or not pending")
     return {"status": "denied"}
 
-_UNDO_HTTP_STATUS = {"already_undone": 409, "conflict": 409, "busy": 423, "denied": 404, "failed": 400}
+_UNDO_HTTP_STATUS = {"expired": 403, "already_undone": 409, "conflict": 409, "busy": 423, "denied": 404, "failed": 400}
 
 
 @app.get("/v1/checkpoints/{public_id}")

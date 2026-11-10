@@ -1,6 +1,6 @@
 # Architecture Decision Record (ADR): Phase 3A - Slack Human-in-the-Loop Adapter
 
-**Status:** Proposed (Awaiting Approval)
+**Status:** Accepted, implemented in `src/rowback/ee/slack*.py` (Enterprise).
 **Context:** Rowback requires a secure, out-of-band approval mechanism for database mutations that trigger `REQUIRE_APPROVAL`. The mechanism must bridge asynchronous human decisions in a Slack workspace with the strictly serializable, idempotent PostgreSQL execution engine.
 
 This ADR defines the architectural constraints and operational flow for a single-workspace Slack adapter, ensuring absolute isolation, zero-PII leakage, and protection against network tampering or race conditions.
