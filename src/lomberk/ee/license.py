@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from typing import NamedTuple, Protocol
 
-logger = logging.getLogger("rowback.license")
+logger = logging.getLogger("lomberk.license")
 
 POLAR_ORGANIZATION_ID = "bcd46b75-283b-4f7c-8573-eff346558d71"
 POLAR_VALIDATE_URL = "https://api.polar.sh/v1/customer-portal/license-keys/validate"
@@ -18,7 +18,7 @@ POLAR_ACTIVATE_URL = "https://api.polar.sh/v1/customer-portal/license-keys/activ
 BUY_URL = "https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU"
 HTTP_TIMEOUT_SECONDS = 5
 # The Polar organization sells other products too, so a granted key counts only when it carries
-# one of these benefits. Pro: the "Rowback Pro license key" benefit on both Pro products.
+# one of these benefits. Pro: the "Lomberk Pro license key" benefit on both Pro products.
 PRO_BENEFIT_IDS: frozenset[str] = frozenset({"16736449-428d-4f23-858f-47a76dd26524"})
 # Enterprise: no undo window limit, no database limit. Empty until that product exists in Polar.
 ENTERPRISE_BENEFIT_IDS: frozenset[str] = frozenset()
@@ -41,7 +41,7 @@ class Validation(NamedTuple):
 def _post(url: str, payload: dict) -> tuple[int, dict]:
     """POSTs JSON to Polar: (HTTP status, body). Raises OSError/ValueError when Polar can't be reached."""
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST",
-                                 headers={"Content-Type": "application/json", "User-Agent": "rowback"})
+                                 headers={"Content-Type": "application/json", "User-Agent": "lomberk"})
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as r:  # hardcoded https Polar URL constants  # nosec B310
             return r.status, json.load(r)
@@ -86,7 +86,7 @@ def activate_key(key: str, label: str) -> str:
 
 
 class ActivationStore(Protocol):
-    """Where this database keeps its activation of the key (rowback.license_activation)."""
+    """Where this database keeps its activation of the key (lomberk.license_activation)."""
     def load(self) -> tuple[str, str | None]: ...  # (install label, activation id or None)
     def save(self, activation_id: str) -> None: ...
 
@@ -101,29 +101,29 @@ def check_license(key: str | None, features: list[str], store: ActivationStore |
     """
     if not key:
         if features:
-            raise LicenseError(f"Startup Refusal: {_need(features)} a Rowback Pro license. "
-                               f"Set ROWBACK_LICENSE_KEY (get one at {BUY_URL}) or remove them from the config.")
+            raise LicenseError(f"Startup Refusal: {_need(features)} a Lomberk Pro license. "
+                               f"Set LOMBERK_LICENSE_KEY (get one at {BUY_URL}) or remove them from the config.")
         return "free"
     label, activation_id = store.load() if store else ("", None)
     result = validate_key(key, activation_id)
     if result.status == "unreachable":
-        logger.warning("Could not reach Polar to check the Rowback license; paid features stay on.")
+        logger.warning("Could not reach Polar to check the Lomberk license; paid features stay on.")
         return "pro"
     if result.status != "granted":
-        return _refuse(features, "the Rowback license key is invalid, expired or cancelled",
-                       "ROWBACK_LICENSE_KEY is invalid, expired or cancelled")
+        return _refuse(features, "the Lomberk license key is invalid, expired or cancelled",
+                       "LOMBERK_LICENSE_KEY is invalid, expired or cancelled")
     tier = "enterprise" if result.enterprise else "pro"
     if result.needs_activation and store:
         activation = activate_key(key, label)
         if activation == "limit":
-            return _refuse(features, "this Rowback license is already in use on as many databases as it covers",
-                           "ROWBACK_LICENSE_KEY is already in use on as many databases as it covers",
+            return _refuse(features, "this Lomberk license is already in use on as many databases as it covers",
+                           "LOMBERK_LICENSE_KEY is already in use on as many databases as it covers",
                            "Free one up in the Polar customer portal, or move to Enterprise.")
         if activation == "invalid":
-            return _refuse(features, "the Rowback license key is invalid, expired or cancelled",
-                           "ROWBACK_LICENSE_KEY is invalid, expired or cancelled")
+            return _refuse(features, "the Lomberk license key is invalid, expired or cancelled",
+                           "LOMBERK_LICENSE_KEY is invalid, expired or cancelled")
         if activation == "unreachable":
-            logger.warning("Could not reach Polar to activate the Rowback license; paid features stay on.")
+            logger.warning("Could not reach Polar to activate the Lomberk license; paid features stay on.")
             return tier
         store.save(activation)
     return tier

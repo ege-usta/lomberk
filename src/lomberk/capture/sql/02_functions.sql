@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION rowback.begin_checkpoint(
+CREATE OR REPLACE FUNCTION lomberk.begin_checkpoint(
     p_sql_text TEXT,
     p_classification TEXT,
     p_agent_label TEXT,
@@ -13,7 +13,7 @@ DECLARE
 BEGIN
     v_public_id := 'cp_' || replace(gen_random_uuid()::text, '-', '');
     
-    INSERT INTO rowback.checkpoints (
+    INSERT INTO lomberk.checkpoints (
         public_id, sql_text, classification, agent_label, principal, status, decision, operation_id
     ) VALUES (
         v_public_id, p_sql_text, p_classification, p_agent_label, p_principal, 'pending', 'REQUIRE_APPROVAL', p_operation_id
@@ -22,9 +22,9 @@ BEGIN
     o_cp_id := v_id;
     o_public_id := v_public_id;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.approve_checkpoint(
+CREATE OR REPLACE FUNCTION lomberk.approve_checkpoint(
     p_public_id TEXT,
     p_decision TEXT
 ) RETURNS UUID AS $$
@@ -33,7 +33,7 @@ DECLARE
 BEGIN
     v_token := gen_random_uuid();
     
-    UPDATE rowback.checkpoints 
+    UPDATE lomberk.checkpoints 
     SET status = 'approved', decision = p_decision, capability_token = v_token
     WHERE public_id = p_public_id AND status = 'pending';
     
@@ -43,13 +43,13 @@ BEGIN
     
     RETURN v_token;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.reject_checkpoint(
+CREATE OR REPLACE FUNCTION lomberk.reject_checkpoint(
     p_public_id TEXT
 ) RETURNS VOID AS $$
 BEGIN
-    UPDATE rowback.checkpoints 
+    UPDATE lomberk.checkpoints 
     SET status = 'rejected'
     WHERE public_id = p_public_id AND status = 'pending';
     
@@ -57,13 +57,13 @@ BEGIN
         RAISE EXCEPTION 'Checkpoint % not found or not in pending state.', p_public_id;
     END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.fail_checkpoint(
+CREATE OR REPLACE FUNCTION lomberk.fail_checkpoint(
     p_public_id TEXT
 ) RETURNS VOID AS $$
 BEGIN
-    UPDATE rowback.checkpoints 
+    UPDATE lomberk.checkpoints 
     SET status = 'failed'
     WHERE public_id = p_public_id AND status IN ('pending', 'approved', 'executing');
     
@@ -71,9 +71,9 @@ BEGIN
         RAISE EXCEPTION 'Checkpoint % not found or invalid state transition.', p_public_id;
     END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.claim_checkpoint(
+CREATE OR REPLACE FUNCTION lomberk.claim_checkpoint(
     p_capability_token UUID
 ) RETURNS VOID AS $$
 DECLARE
@@ -81,7 +81,7 @@ DECLARE
 BEGIN
     v_txid := txid_current();
     
-    UPDATE rowback.checkpoints 
+    UPDATE lomberk.checkpoints 
     SET status = 'executing', exec_txid = v_txid
     WHERE capability_token = p_capability_token AND status = 'approved';
     
@@ -89,9 +89,9 @@ BEGIN
         RAISE EXCEPTION 'Checkpoint not found or not in approved state for the given capability token.';
     END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.finish_checkpoint(
+CREATE OR REPLACE FUNCTION lomberk.finish_checkpoint(
     p_capability_token UUID,
     p_rows_affected INTEGER
 ) RETURNS VOID AS $$
@@ -100,13 +100,13 @@ DECLARE
     v_guc TEXT;
 BEGIN
     v_txid := txid_current();
-    v_guc := current_setting('rowback.capability_token', true);
+    v_guc := current_setting('lomberk.capability_token', true);
     
     IF p_capability_token::TEXT != v_guc THEN
         RAISE EXCEPTION 'Security Violation: Cannot finish checkpoint without matching execution token in GUC.';
     END IF;
 
-    UPDATE rowback.checkpoints 
+    UPDATE lomberk.checkpoints 
     SET status = 'applied', rows_affected = p_rows_affected
     WHERE capability_token = p_capability_token AND status = 'executing' AND exec_txid = v_txid;
     
@@ -114,11 +114,11 @@ BEGIN
         RAISE EXCEPTION 'Checkpoint not found or invalid execution context (txid mismatch).';
     END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
 -- Primary key columns in key order (NULL without a primary key). Key columns only: a
 -- PRIMARY KEY ... INCLUDE (...) index also lists its covering columns in indkey.
-CREATE OR REPLACE FUNCTION rowback.primary_key_columns(p_table OID) RETURNS TEXT[]
+CREATE OR REPLACE FUNCTION lomberk.primary_key_columns(p_table OID) RETURNS TEXT[]
 LANGUAGE sql STABLE
 SET search_path = pg_catalog, pg_temp
 AS $$
@@ -135,7 +135,7 @@ $$;
 -- no triggers of its own: then undo works partition by partition exactly as on a plain table,
 -- and a row moved to another partition is captured as DELETE + INSERT.
 -- Own triggers count on PostgreSQL 14 too, where triggers cloned to partitions are internal.
-CREATE OR REPLACE FUNCTION rowback.inheritance_problem(p_table OID) RETURNS TEXT
+CREATE OR REPLACE FUNCTION lomberk.inheritance_problem(p_table OID) RETURNS TEXT
 LANGUAGE plpgsql STABLE
 SET search_path = pg_catalog, pg_temp
 AS $$
@@ -154,18 +154,18 @@ BEGIN
       FROM pg_partition_tree(v_root) t JOIN pg_class c ON c.oid = t.relid
      WHERE c.relkind NOT IN ('r', 'p') LIMIT 1;
     IF v_bad IS NULL THEN
-        SELECT format('partition %s has no enabled Rowback capture trigger', t.relid::regclass) INTO v_bad
+        SELECT format('partition %s has no enabled Lomberk capture trigger', t.relid::regclass) INTO v_bad
           FROM pg_partition_tree(v_root) t
-         WHERE NOT EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid = t.relid AND g.tgname = 'rowback_capture'
+         WHERE NOT EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid = t.relid AND g.tgname = 'lomberk_capture'
                              AND g.tgenabled = 'O' AND g.tgtype = 29 AND g.tgqual IS NULL AND g.tgattr = ''
-                             AND g.tgfoid = 'rowback.capture_row_change'::regproc)
+                             AND g.tgfoid = 'lomberk.capture_row_change'::regproc)
          LIMIT 1;
     END IF;
     IF v_bad IS NULL THEN
         SELECT format('%s has its own trigger %I; partitioned tables with their own triggers are not supported yet',
                       g.tgrelid::regclass, g.tgname) INTO v_bad
           FROM pg_partition_tree(v_root) t JOIN pg_trigger g ON g.tgrelid = t.relid
-         WHERE g.tgname <> 'rowback_capture' AND (NOT g.tgisinternal OR (g.tgparentid <> 0 AND g.tgconstraint = 0))
+         WHERE g.tgname <> 'lomberk_capture' AND (NOT g.tgisinternal OR (g.tgparentid <> 0 AND g.tgconstraint = 0))
          LIMIT 1;
     END IF;
     IF v_bad IS NULL THEN
@@ -177,7 +177,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION rowback.capture_row_change() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION lomberk.capture_row_change() RETURNS TRIGGER AS $$
 DECLARE
     v_cp_id_text TEXT;
     v_cp_id BIGINT;
@@ -190,11 +190,11 @@ DECLARE
     v_old_text TEXT;
 BEGIN
     v_caller := session_user;
-    v_cp_id_text := current_setting('rowback.checkpoint_id', true);
+    v_cp_id_text := current_setting('lomberk.checkpoint_id', true);
     
     IF v_cp_id_text IS NULL OR v_cp_id_text = '' THEN
         IF v_caller = '__AGENT_ROLE__' THEN
-            RAISE EXCEPTION 'Rowback Security Violation: DML execution attempted outside of a trusted checkpoint context.';
+            RAISE EXCEPTION 'Lomberk Security Violation: DML execution attempted outside of a trusted checkpoint context.';
         ELSE
             RETURN NULL;
         END IF;
@@ -210,34 +210,34 @@ BEGIN
         v_guc_token TEXT;
     BEGIN
         SELECT capability_token, status, exec_txid INTO v_db_token, v_db_status, v_db_txid
-        FROM rowback.checkpoints 
+        FROM lomberk.checkpoints 
         WHERE id = v_cp_id;
         
         IF NOT FOUND THEN
-            RAISE EXCEPTION 'Rowback Security Violation: Invalid checkpoint context.';
+            RAISE EXCEPTION 'Lomberk Security Violation: Invalid checkpoint context.';
         END IF;
         
-        v_guc_token := current_setting('rowback.capability_token', true);
+        v_guc_token := current_setting('lomberk.capability_token', true);
         
         IF v_db_token IS NULL OR v_guc_token IS NULL OR v_db_token::TEXT != v_guc_token THEN
-            RAISE EXCEPTION 'Rowback Security Violation: Invalid or missing capability token.';
+            RAISE EXCEPTION 'Lomberk Security Violation: Invalid or missing capability token.';
         END IF;
         
         IF v_db_status != 'executing' THEN
-            RAISE EXCEPTION 'Rowback Security Violation: Checkpoint is not in executing state.';
+            RAISE EXCEPTION 'Lomberk Security Violation: Checkpoint is not in executing state.';
         END IF;
         
         IF v_db_txid IS DISTINCT FROM txid_current() THEN
-            RAISE EXCEPTION 'Rowback Security Violation: Transaction context mismatch (token stolen or replayed).';
+            RAISE EXCEPTION 'Lomberk Security Violation: Transaction context mismatch (token stolen or replayed).';
         END IF;
     END;
     
-    v_seq := current_setting('rowback.seq', true)::BIGINT + 1;
-    PERFORM set_config('rowback.seq', v_seq::text, true);
+    v_seq := current_setting('lomberk.seq', true)::BIGINT + 1;
+    PERFORM set_config('lomberk.seq', v_seq::text, true);
 
-    v_pk := rowback.primary_key_columns(TG_RELID);
+    v_pk := lomberk.primary_key_columns(TG_RELID);
     IF v_pk IS NULL THEN
-        RAISE EXCEPTION 'Rowback Security Violation: Table %.% has no primary key.', TG_TABLE_SCHEMA, TG_TABLE_NAME;
+        RAISE EXCEPTION 'Lomberk Security Violation: Table %.% has no primary key.', TG_TABLE_SCHEMA, TG_TABLE_NAME;
     END IF;
 
     SELECT jsonb_object_agg(attname, jsonb_build_object('typoid', atttypid, 'typmod', atttypmod, 'notnull', attnotnull))
@@ -253,13 +253,13 @@ BEGIN
         v_old_text := OLD::text;
         v_new := row_to_json(NEW);
         IF EXISTS (SELECT 1 FROM unnest(v_pk) k WHERE (v_old->>k) IS DISTINCT FROM (v_new->>k)) THEN
-            RAISE EXCEPTION 'Rowback Security Violation: Primary key updates are forbidden.';
+            RAISE EXCEPTION 'Lomberk Security Violation: Primary key updates are forbidden.';
         END IF;
     ELSIF TG_OP = 'INSERT' THEN
         v_new := row_to_json(NEW);
     END IF;
 
-    INSERT INTO rowback.row_changes (
+    INSERT INTO lomberk.row_changes (
         checkpoint_id, table_schema, table_name, table_oid, op, pk,
         old_row, new_row, schema_snapshot, seq, old_text
     ) VALUES (
@@ -274,7 +274,7 @@ BEGIN
         RETURN NEW;
     END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
 
 -- Records one approval of a pending checkpoint and returns the two-person quorum: the
@@ -282,45 +282,45 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
 -- slack:). The shared admin key and CLI users prove no identity, and one person may
 -- hold both an SSO and a Slack identity, so neither can make up a quorum.
 -- The row lock serializes concurrent approvers.
-CREATE OR REPLACE FUNCTION rowback.record_approval(p_public_id TEXT, p_actor TEXT) RETURNS INTEGER AS $$
+CREATE OR REPLACE FUNCTION lomberk.record_approval(p_public_id TEXT, p_actor TEXT) RETURNS INTEGER AS $$
 DECLARE
     v_status TEXT;
     v_count INTEGER;
 BEGIN
-    SELECT status INTO v_status FROM rowback.checkpoints WHERE public_id = p_public_id FOR UPDATE;
+    SELECT status INTO v_status FROM lomberk.checkpoints WHERE public_id = p_public_id FOR UPDATE;
     IF NOT FOUND OR v_status <> 'pending' THEN
         RAISE EXCEPTION 'Checkpoint % not found or not in pending state.', p_public_id;
     END IF;
-    INSERT INTO rowback.approvals (public_id, actor) VALUES (p_public_id, p_actor) ON CONFLICT DO NOTHING;
+    INSERT INTO lomberk.approvals (public_id, actor) VALUES (p_public_id, p_actor) ON CONFLICT DO NOTHING;
     SELECT coalesce(max(n), 0) INTO v_count FROM (
-        SELECT count(*) AS n FROM rowback.approvals
+        SELECT count(*) AS n FROM lomberk.approvals
         WHERE public_id = p_public_id AND split_part(actor, ':', 1) IN ('oidc', 'slack')
         GROUP BY split_part(actor, ':', 1)) per_system;
     RETURN v_count;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.guard_approvals_immutability() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION lomberk.guard_approvals_immutability() RETURNS TRIGGER AS $$
 BEGIN
-    RAISE EXCEPTION 'Rowback approvals are append-only.';
+    RAISE EXCEPTION 'Lomberk approvals are append-only.';
 END;
-$$ LANGUAGE plpgsql SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SET search_path = lomberk, pg_temp;
 
-DROP TRIGGER IF EXISTS rowback_approvals_immutable ON rowback.approvals;
-CREATE TRIGGER rowback_approvals_immutable BEFORE UPDATE OR DELETE ON rowback.approvals
-    FOR EACH ROW EXECUTE FUNCTION rowback.guard_approvals_immutability();
+DROP TRIGGER IF EXISTS lomberk_approvals_immutable ON lomberk.approvals;
+CREATE TRIGGER lomberk_approvals_immutable BEFORE UPDATE OR DELETE ON lomberk.approvals
+    FOR EACH ROW EXECUTE FUNCTION lomberk.guard_approvals_immutability();
 
-CREATE OR REPLACE FUNCTION rowback.get_pending_checkpoint(
+CREATE OR REPLACE FUNCTION lomberk.get_pending_checkpoint(
     p_public_id TEXT
 ) RETURNS TABLE (id BIGINT, sql_text TEXT, status TEXT) AS $$
 BEGIN
     RETURN QUERY SELECT c.id, c.sql_text, c.status
-    FROM rowback.checkpoints c
+    FROM lomberk.checkpoints c
     WHERE c.public_id = p_public_id FOR UPDATE;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.register_table(
+CREATE OR REPLACE FUNCTION lomberk.register_table(
     p_schema TEXT,
     p_table TEXT,
     p_pk_column TEXT,
@@ -352,9 +352,9 @@ BEGIN
     END IF;
     -- Undo finds rows by primary key, so check it now rather than on the agent's first write.
     -- NULL p_pk_column means "use the table's own key".
-    v_pk := array_to_string(rowback.primary_key_columns(v_table_oid), ',');
+    v_pk := array_to_string(lomberk.primary_key_columns(v_table_oid), ',');
     IF v_pk IS NULL THEN
-        RAISE EXCEPTION 'Table %.% has no primary key; Rowback needs one to find rows again for undo.', p_schema, p_table;
+        RAISE EXCEPTION 'Table %.% has no primary key; Lomberk needs one to find rows again for undo.', p_schema, p_table;
     END IF;
     IF p_pk_column IS NULL THEN
         p_pk_column := v_pk;
@@ -363,16 +363,16 @@ BEGIN
     END IF;
     IF p_allow_triggers AND NOT pg_has_role(current_user, (SELECT relowner FROM pg_class WHERE oid = v_table_oid), 'USAGE') THEN
         -- Switching a trigger off needs ownership; fail now, not in the middle of an undo.
-        RAISE EXCEPTION 'Undo can switch off triggers on %.% only if the role that installed Rowback owns the table.', p_schema, p_table;
+        RAISE EXCEPTION 'Undo can switch off triggers on %.% only if the role that installed Lomberk owns the table.', p_schema, p_table;
     END IF;
 
-    INSERT INTO rowback.registered_tables (schema_name, table_name, table_oid, pk_column, allow_triggers)
+    INSERT INTO lomberk.registered_tables (schema_name, table_name, table_oid, pk_column, allow_triggers)
     VALUES (p_schema, p_table, v_table_oid, p_pk_column, p_allow_triggers)
     ON CONFLICT (schema_name, table_name) DO UPDATE 
     SET table_oid = EXCLUDED.table_oid, pk_column = EXCLUDED.pk_column, allow_triggers = EXCLUDED.allow_triggers;
 
-    EXECUTE format('DROP TRIGGER IF EXISTS rowback_capture ON %I.%I', p_schema, p_table);
-    EXECUTE format('CREATE TRIGGER rowback_capture AFTER INSERT OR UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION rowback.capture_row_change()', p_schema, p_table);
+    EXECUTE format('DROP TRIGGER IF EXISTS lomberk_capture ON %I.%I', p_schema, p_table);
+    EXECUTE format('CREATE TRIGGER lomberk_capture AFTER INSERT OR UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION lomberk.capture_row_change()', p_schema, p_table);
 
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON %I.%I TO %I', p_schema, p_table, p_agent_role);
     IF coalesce(cardinality(p_secret_columns), 0) = 0 THEN
@@ -397,77 +397,77 @@ BEGIN
     END LOOP;
     EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_agent_role);
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.grant_access(p_control_role TEXT, p_agent_role TEXT) RETURNS VOID AS $$
+CREATE OR REPLACE FUNCTION lomberk.grant_access(p_control_role TEXT, p_agent_role TEXT) RETURNS VOID AS $$
 BEGIN
     -- Revoke all from public for security definer functions
-    EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA rowback FROM PUBLIC';
+    EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA lomberk FROM PUBLIC';
 
     -- Common schema usage
-    EXECUTE format('GRANT USAGE ON SCHEMA rowback TO %I', p_control_role);
-    EXECUTE format('GRANT USAGE ON SCHEMA rowback TO %I', p_agent_role);
+    EXECUTE format('GRANT USAGE ON SCHEMA lomberk TO %I', p_control_role);
+    EXECUTE format('GRANT USAGE ON SCHEMA lomberk TO %I', p_agent_role);
     
     -- Control Plane (only control role)
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.begin_checkpoint TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.approve_checkpoint TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.reject_checkpoint TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.fail_checkpoint TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.requeue_checkpoint TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.claim_checkpoint TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.finish_checkpoint TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.get_pending_checkpoint TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.record_approval TO %I', p_control_role);
-    EXECUTE format('GRANT SELECT ON rowback.approvals TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.begin_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.approve_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.reject_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.fail_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.requeue_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.claim_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.finish_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.get_pending_checkpoint TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.record_approval TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT ON lomberk.approvals TO %I', p_control_role);
     -- register_table is SECURITY DEFINER and runs as the installer, so it must stay
     -- callable only by the install connection. The control role never calls it; granting
     -- it here would let a leaked control DSN grant itself DML/SELECT on any table.
 
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.execute_undo TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.execute_undo TO %I', p_control_role);
     
 
-    EXECUTE format('GRANT SELECT ON rowback.checkpoints TO %I', p_control_role);
-    EXECUTE format('GRANT SELECT ON rowback.row_changes TO %I', p_control_role);
-    EXECUTE format('GRANT INSERT ON rowback.undo_operations TO %I', p_control_role);
-    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA rowback TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT ON lomberk.checkpoints TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT ON lomberk.row_changes TO %I', p_control_role);
+    EXECUTE format('GRANT INSERT ON lomberk.undo_operations TO %I', p_control_role);
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA lomberk TO %I', p_control_role);
     
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.list_pending_checkpoints TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.list_pending_checkpoints TO %I', p_control_role);
     
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.check_checkpoint_status TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.verify_ledger TO %I', p_control_role);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON rowback.slack_messages TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.check_checkpoint_status TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.verify_ledger TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON lomberk.slack_messages TO %I', p_control_role);
     
     
     -- Runtime (only agent role)
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.claim_checkpoint TO %I', p_agent_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.finish_checkpoint TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.claim_checkpoint TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.finish_checkpoint TO %I', p_agent_role);
     
     -- Ensure separation of duties
     
     
     
-    EXECUTE format('REVOKE EXECUTE ON FUNCTION rowback.begin_checkpoint FROM %I', p_agent_role);
-    EXECUTE format('REVOKE EXECUTE ON FUNCTION rowback.approve_checkpoint FROM %I', p_agent_role);
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION lomberk.begin_checkpoint FROM %I', p_agent_role);
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION lomberk.approve_checkpoint FROM %I', p_agent_role);
     
     -- Legacy cleanup
-    EXECUTE format('REVOKE ALL ON rowback.checkpoints FROM %I', p_agent_role);
+    EXECUTE format('REVOKE ALL ON lomberk.checkpoints FROM %I', p_agent_role);
     
     
-    EXECUTE format('GRANT SELECT ON rowback.registered_tables TO %I', p_agent_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_agent_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.primary_key_columns TO %I', p_agent_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.inheritance_problem TO %I', p_agent_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.preview_changes TO %I', p_agent_role);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON rowback.previews TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.inheritance_problem TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.primary_key_columns TO %I', p_control_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION rowback.unprotected_cascade_child TO %I', p_control_role);
-    EXECUTE format('GRANT SELECT ON rowback.registered_tables TO %I', p_control_role);
-    EXECUTE format('GRANT SELECT, UPDATE (activation_id) ON rowback.license_activation TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT ON lomberk.registered_tables TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.unprotected_cascade_child TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.primary_key_columns TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.inheritance_problem TO %I', p_agent_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.preview_changes TO %I', p_agent_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON lomberk.previews TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.inheritance_problem TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.primary_key_columns TO %I', p_control_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION lomberk.unprotected_cascade_child TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT ON lomberk.registered_tables TO %I', p_control_role);
+    EXECUTE format('GRANT SELECT, UPDATE (activation_id) ON lomberk.license_activation TO %I', p_control_role);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.check_checkpoint_status(
+CREATE OR REPLACE FUNCTION lomberk.check_checkpoint_status(
     p_public_id TEXT
 ) RETURNS TEXT
 SET search_path = pg_catalog, pg_temp
@@ -476,7 +476,7 @@ DECLARE
     v_status TEXT;
 BEGIN
     SELECT status INTO v_status 
-    FROM rowback.checkpoints 
+    FROM lomberk.checkpoints 
     WHERE public_id = p_public_id 
     FOR SHARE NOWAIT;
     
@@ -490,7 +490,7 @@ EXCEPTION WHEN lock_not_available THEN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
-CREATE OR REPLACE FUNCTION rowback.list_pending_checkpoints()
+CREATE OR REPLACE FUNCTION lomberk.list_pending_checkpoints()
 RETURNS TABLE (
     id BIGINT,
     public_id TEXT,
@@ -503,7 +503,7 @@ AS $$
 BEGIN
     RETURN QUERY
     SELECT c.id, c.public_id, c.sql_text, c.agent_label, c.created_at
-    FROM rowback.checkpoints c
+    FROM lomberk.checkpoints c
     WHERE c.status = 'pending';
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -512,8 +512,8 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- Returns the first table reachable from p_table_oid through ON DELETE CASCADE /
 -- SET NULL / SET DEFAULT foreign keys that has no enabled capture trigger, or NULL.
--- A write whose cascade reaches such a table would change rows Rowback cannot undo.
-CREATE OR REPLACE FUNCTION rowback.unprotected_cascade_child(p_table_oid OID)
+-- A write whose cascade reaches such a table would change rows Lomberk cannot undo.
+CREATE OR REPLACE FUNCTION lomberk.unprotected_cascade_child(p_table_oid OID)
 RETURNS TEXT
 LANGUAGE sql STABLE
 SET search_path = pg_catalog, pg_temp
@@ -527,7 +527,7 @@ AS $$
     SELECT r.oid::regclass::text FROM reach r
     WHERE r.oid <> p_table_oid AND NOT EXISTS (
         SELECT 1 FROM pg_trigger t
-        WHERE t.tgrelid = r.oid AND t.tgname = 'rowback_capture' AND t.tgenabled IN ('O', 'A')
+        WHERE t.tgrelid = r.oid AND t.tgname = 'lomberk_capture' AND t.tgenabled IN ('O', 'A')
     )
     ORDER BY 1 LIMIT 1
 $$;
@@ -540,7 +540,7 @@ $$;
 -- The captured old row as record text, ready for ($1::tbl). Prefers the exact OLD::text
 -- capture, but only when it still reads back as the same row (column order unchanged);
 -- otherwise, and for rows captured before old_text existed, rebuilds it from the JSON.
-CREATE OR REPLACE FUNCTION rowback.old_row_text(p_table TEXT, p_old_text TEXT, p_old_row JSONB) RETURNS TEXT AS $$
+CREATE OR REPLACE FUNCTION lomberk.old_row_text(p_table TEXT, p_old_text TEXT, p_old_row JSONB) RETURNS TEXT AS $$
 DECLARE
     v_same BOOLEAN := false;
     v_text TEXT;
@@ -560,7 +560,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.restore_insert_sql(p_table TEXT) RETURNS TEXT AS $$
+CREATE OR REPLACE FUNCTION lomberk.restore_insert_sql(p_table TEXT) RETURNS TEXT AS $$
 DECLARE
     v_cols TEXT;
 BEGIN
@@ -573,10 +573,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp;
 
-DROP FUNCTION IF EXISTS rowback.replay_deferred_inserts(TEXT[], JSONB[]);
-CREATE OR REPLACE FUNCTION rowback.replay_deferred_inserts(p_tables TEXT[], p_rows TEXT[])
+DROP FUNCTION IF EXISTS lomberk.replay_deferred_inserts(TEXT[], JSONB[]);
+CREATE OR REPLACE FUNCTION lomberk.replay_deferred_inserts(p_tables TEXT[], p_rows TEXT[])
 RETURNS INT
-SET search_path = rowback, pg_temp
+SET search_path = lomberk, pg_temp
 AS $$
 DECLARE
     v_left_tables TEXT[];
@@ -589,7 +589,7 @@ BEGIN
         v_left_rows := '{}';
         FOR i IN 1..array_length(p_tables, 1) LOOP
             BEGIN
-                EXECUTE rowback.restore_insert_sql(p_tables[i]) USING p_rows[i];
+                EXECUTE lomberk.restore_insert_sql(p_tables[i]) USING p_rows[i];
                 v_done := v_done + 1;
             EXCEPTION WHEN foreign_key_violation THEN
                 v_left_tables := v_left_tables || p_tables[i];
@@ -606,7 +606,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION rowback.execute_undo(
+CREATE OR REPLACE FUNCTION lomberk.execute_undo(
     p_public_id TEXT,
     p_agent_label TEXT
 ) RETURNS JSONB AS $$
@@ -635,7 +635,7 @@ DECLARE
 BEGIN
     -- 1. Fetch and lock original checkpoint
     SELECT id, status INTO v_cp_id, v_status
-    FROM rowback.checkpoints
+    FROM lomberk.checkpoints
     WHERE public_id = p_public_id
     FOR UPDATE NOWAIT;
     
@@ -654,7 +654,7 @@ BEGIN
     -- Also validate schema (unsupported constructs)
     FOR v_change IN 
         SELECT DISTINCT table_schema, table_name, table_oid 
-        FROM rowback.row_changes 
+        FROM lomberk.row_changes 
         WHERE checkpoint_id = v_cp_id 
         ORDER BY table_oid
     LOOP
@@ -670,34 +670,34 @@ BEGIN
 
         -- Check unsupported schemas
 
-        v_unprotected := rowback.inheritance_problem(v_change.table_oid);
+        v_unprotected := lomberk.inheritance_problem(v_change.table_oid);
         IF v_unprotected IS NOT NULL THEN
             RAISE EXCEPTION 'Unsupported schema: %', v_unprotected;
         END IF;
 
         -- Foreign keys are supported: LIFO replay restores parents before children.
         -- Cascades must stay inside captured tables so nothing changes invisibly.
-        v_unprotected := rowback.unprotected_cascade_child(v_change.table_oid);
+        v_unprotected := lomberk.unprotected_cascade_child(v_change.table_oid);
         IF v_unprotected IS NOT NULL THEN
-            RAISE EXCEPTION 'Unsupported schema: % cascades into % which is not registered with Rowback', v_change.table_name, v_unprotected;
+            RAISE EXCEPTION 'Unsupported schema: % cascades into % which is not registered with Lomberk', v_change.table_name, v_unprotected;
         END IF;
         
-        -- Check triggers: only rowback_capture, unless the owner opted the table in. Then its
+        -- Check triggers: only lomberk_capture, unless the owner opted the table in. Then its
         -- own triggers are switched off for this transaction, so restored rows come back exactly
         -- (no fresh updated_at) and nothing fires twice. LOCK above already holds the lock
         -- DISABLE TRIGGER needs; an error rolls the switch back with everything else.
         IF EXISTS (
             SELECT 1 FROM pg_trigger 
             WHERE tgrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass
-            AND tgname != 'rowback_capture' AND tgisinternal = false
+            AND tgname != 'lomberk_capture' AND tgisinternal = false
         ) THEN
-            IF NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = v_change.table_oid), false) THEN
+            IF NOT coalesce((SELECT allow_triggers FROM lomberk.registered_tables WHERE table_oid = v_change.table_oid), false) THEN
                 RAISE EXCEPTION 'Unsupported schema: Triggers not allowed on % (register it with --allow-triggers if they only touch the row itself or registered tables)', v_change.table_name;
             END IF;
             FOR v_trig IN
                 SELECT tgname, tgenabled FROM pg_trigger
                 WHERE tgrelid = v_change.table_oid AND NOT tgisinternal
-                  AND tgname <> 'rowback_capture' AND tgenabled IN ('O', 'A')
+                  AND tgname <> 'lomberk_capture' AND tgenabled IN ('O', 'A')
             LOOP
                 EXECUTE format('ALTER TABLE %I.%I DISABLE TRIGGER %I', v_change.table_schema, v_change.table_name, v_trig.tgname);
                 v_paused := v_paused || format('ALTER TABLE %I.%I ENABLE %s TRIGGER %I', v_change.table_schema, v_change.table_name,
@@ -708,9 +708,9 @@ BEGIN
         IF NOT EXISTS (
             SELECT 1 FROM pg_trigger 
             WHERE tgrelid = (quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name))::regclass
-            AND tgname = 'rowback_capture' AND tgenabled = 'O'
+            AND tgname = 'lomberk_capture' AND tgenabled = 'O'
             AND tgtype = 29 AND tgattr = '' 
-            AND tgfoid = 'rowback.capture_row_change'::regproc
+            AND tgfoid = 'lomberk.capture_row_change'::regproc
             AND tgqual IS NULL
         ) THEN
             RAISE EXCEPTION 'Capture trigger missing or disabled on %', v_change.table_name;
@@ -730,14 +730,14 @@ BEGIN
     SELECT gen_random_uuid() INTO v_token;
     v_undo_public_id := 'undo_' || replace(gen_random_uuid()::text, '-', '');
     
-    INSERT INTO rowback.checkpoints (public_id, sql_text, classification, decision, agent_label, status, capability_token, exec_txid)
+    INSERT INTO lomberk.checkpoints (public_id, sql_text, classification, decision, agent_label, status, capability_token, exec_txid)
     VALUES (v_undo_public_id, 'UNDO ' || p_public_id, 'WRITE_UNDO', 'ALLOW', p_agent_label, 'executing', v_token, txid_current())
     RETURNING id INTO v_undo_cp_id;
 
     -- Set GUCs so trigger logs it
-    PERFORM set_config('rowback.checkpoint_id', v_undo_cp_id::text, true);
-    PERFORM set_config('rowback.capability_token', v_token::text, true);
-    PERFORM set_config('rowback.seq', '1', true);
+    PERFORM set_config('lomberk.checkpoint_id', v_undo_cp_id::text, true);
+    PERFORM set_config('lomberk.capability_token', v_token::text, true);
+    PERFORM set_config('lomberk.seq', '1', true);
     
     v_seq_val := 1;
 
@@ -747,7 +747,7 @@ BEGIN
     -- delete inserted rows; LIFO within each phase (covers self-referencing FKs).
     FOR v_change IN
         SELECT rc.table_schema, rc.table_name, rc.table_oid, rc.op, rc.pk, rc.old_row, rc.new_row, rc.schema_snapshot, rc.old_text
-        FROM rowback.row_changes rc
+        FROM lomberk.row_changes rc
         LEFT JOIN LATERAL (
             WITH RECURSIVE up(oid, d) AS (
                 SELECT rc.table_oid, 0
@@ -763,17 +763,17 @@ BEGIN
                  rc.seq DESC
     LOOP
         IF v_change.op <> 'D' AND NOT v_drained THEN
-            v_affected := v_affected + rowback.replay_deferred_inserts(v_retry_tables, v_retry_rows);
+            v_affected := v_affected + lomberk.replay_deferred_inserts(v_retry_tables, v_retry_rows);
             v_drained := true;
         END IF;
-        PERFORM set_config('rowback.seq', v_seq_val::text, true);
+        PERFORM set_config('lomberk.seq', v_seq_val::text, true);
         v_seq_val := v_seq_val + 1;
         
         v_full_table := quote_ident(v_change.table_schema) || '.' || quote_ident(v_change.table_name);
         
         -- Validate PK hasn't drifted
         BEGIN
-            v_live_pk := rowback.primary_key_columns(v_change.table_oid);
+            v_live_pk := lomberk.primary_key_columns(v_change.table_oid);
             IF v_live_pk IS NULL THEN
                 RAISE EXCEPTION 'Security Violation: Table % has no primary key', v_full_table;
             END IF;
@@ -832,13 +832,13 @@ BEGIN
             WHERE NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = v_change.table_oid
                               AND a.attname = key AND (a.attgenerated <> '' OR a.attidentity = 'a'));
 
-            v_old_text := rowback.old_row_text(v_full_table, v_change.old_text, v_change.old_row);
+            v_old_text := lomberk.old_row_text(v_full_table, v_change.old_text, v_change.old_row);
             EXECUTE format('UPDATE %s SET %s WHERE %s', v_full_table, v_set_clauses, v_where) USING v_old_text;
 
         ELSIF v_change.op = 'D' THEN
-            v_old_text := rowback.old_row_text(v_full_table, v_change.old_text, v_change.old_row);
+            v_old_text := lomberk.old_row_text(v_full_table, v_change.old_text, v_change.old_row);
             BEGIN
-                EXECUTE rowback.restore_insert_sql(v_full_table) USING v_old_text;
+                EXECUTE lomberk.restore_insert_sql(v_full_table) USING v_old_text;
             EXCEPTION WHEN foreign_key_violation THEN
                 v_retry_tables := v_retry_tables || v_full_table;
                 v_retry_rows := v_retry_rows || v_old_text;
@@ -852,12 +852,12 @@ BEGIN
     END LOOP;
 
     IF NOT v_drained THEN
-        v_affected := v_affected + rowback.replay_deferred_inserts(v_retry_tables, v_retry_rows);
+        v_affected := v_affected + lomberk.replay_deferred_inserts(v_retry_tables, v_retry_rows);
     END IF;
 
     -- Every row the undo touched is captured. More captured rows than replayed
     -- changes means an FK cascade reached rows written after the checkpoint.
-    SELECT count(*) INTO v_captured FROM rowback.row_changes WHERE checkpoint_id = v_undo_cp_id;
+    SELECT count(*) INTO v_captured FROM lomberk.row_changes WHERE checkpoint_id = v_undo_cp_id;
     IF v_captured <> v_affected THEN
         RAISE EXCEPTION 'Conflict: undo would cascade into % row(s) changed after checkpoint %', v_captured - v_affected, p_public_id;
     END IF;
@@ -867,10 +867,10 @@ BEGIN
     END LOOP;
 
     -- 5. Mark old checkpoint undone, new checkpoint applied
-    UPDATE rowback.checkpoints SET status = 'undone' WHERE id = v_cp_id;
-    UPDATE rowback.checkpoints SET status = 'applied' WHERE id = v_undo_cp_id;
+    UPDATE lomberk.checkpoints SET status = 'undone' WHERE id = v_cp_id;
+    UPDATE lomberk.checkpoints SET status = 'applied' WHERE id = v_undo_cp_id;
     
-    INSERT INTO rowback.undo_operations (source_checkpoint_id, undo_checkpoint_id)
+    INSERT INTO lomberk.undo_operations (source_checkpoint_id, undo_checkpoint_id)
     VALUES (v_cp_id, v_undo_cp_id);
 
     RETURN jsonb_build_object(
@@ -879,18 +879,18 @@ BEGIN
         'rows_affected', v_affected
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
 -- The rows the in-flight write captured so far, for an approval preview. Callable only inside
 -- the write's own transaction with its live capability token (the same proof the capture
 -- trigger demands), and it drops every column the calling role can't SELECT, so it never shows
 -- more than that role could read anyway. The executor reads it, then rolls the write back.
-CREATE OR REPLACE FUNCTION rowback.preview_changes(p_capability_token UUID, p_limit INT DEFAULT 20)
+CREATE OR REPLACE FUNCTION lomberk.preview_changes(p_capability_token UUID, p_limit INT DEFAULT 20)
 RETURNS JSONB AS $$
 DECLARE
     v_cp BIGINT;
 BEGIN
-    SELECT id INTO v_cp FROM rowback.checkpoints
+    SELECT id INTO v_cp FROM lomberk.checkpoints
      WHERE capability_token = p_capability_token AND status = 'executing' AND exec_txid = txid_current();
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Security Violation: a preview needs the live execution token of this transaction.';
@@ -898,15 +898,15 @@ BEGIN
     -- Rows of a partition are shown, and their columns checked, against the partitioned table
     -- the agent writes through: privileges live there, not on the leaf.
     RETURN jsonb_build_object(
-        'rows', (SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = v_cp),
+        'rows', (SELECT count(*) FROM lomberk.row_changes WHERE checkpoint_id = v_cp),
         'tables', (SELECT coalesce(jsonb_object_agg(t, n), '{}') FROM (
                        SELECT coalesce(pg_partition_root(table_oid)::regclass::text, table_schema || '.' || table_name) AS t,
                               count(*) AS n
-                       FROM rowback.row_changes WHERE checkpoint_id = v_cp GROUP BY 1) x),
+                       FROM lomberk.row_changes WHERE checkpoint_id = v_cp GROUP BY 1) x),
         -- Which rows, not their values: approval re-runs the write and refuses if this differs.
         'digest', (SELECT md5(coalesce(string_agg(table_oid::text || ':' || op || ':' || pk::text, ','
                                                   ORDER BY table_oid, op, pk::text), ''))
-                   FROM rowback.row_changes WHERE checkpoint_id = v_cp),
+                   FROM lomberk.row_changes WHERE checkpoint_id = v_cp),
         'sample', (SELECT coalesce(jsonb_agg(jsonb_build_object(
                        'table', coalesce(pg_partition_root(s.table_oid)::regclass::text, s.table_schema || '.' || s.table_name),
                        'op', s.op, 'key', s.pk,
@@ -915,19 +915,19 @@ BEGIN
                        'after',  (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(s.new_row) e
                                   WHERE has_column_privilege(session_user, coalesce(pg_partition_root(s.table_oid), s.table_oid), e.key, 'SELECT')))
                      ORDER BY s.seq), '[]')
-                   FROM (SELECT * FROM rowback.row_changes WHERE checkpoint_id = v_cp
+                   FROM (SELECT * FROM lomberk.row_changes WHERE checkpoint_id = v_cp
                          ORDER BY seq LIMIT greatest(0, least(p_limit, 100))) s)
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
 -- Row-limit hold: an auto-approved write that touched too many rows is rolled
 -- back by the executor and sent back to the human approval queue.
-CREATE OR REPLACE FUNCTION rowback.requeue_checkpoint(
+CREATE OR REPLACE FUNCTION lomberk.requeue_checkpoint(
     p_public_id TEXT
 ) RETURNS VOID AS $$
 BEGIN
-    UPDATE rowback.checkpoints
+    UPDATE lomberk.checkpoints
     SET status = 'pending', decision = 'REQUIRE_APPROVAL', capability_token = NULL, exec_txid = NULL
     WHERE public_id = p_public_id AND status = 'approved';
 
@@ -935,7 +935,7 @@ BEGIN
         RAISE EXCEPTION 'Checkpoint % not found or not in approved state.', p_public_id;
     END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
 -- ---------------------------------------------------------------------------
 -- Tamper-evident ledger. Every checkpoint row carries sha256(prev_hash + its
@@ -944,7 +944,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = rowback, pg_temp;
 -- principal if write throughput ever needs it. The chain lives in the same DB as
 -- an attacker with superuser, so ship verify_ledger()'s head hash to your SIEM.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION rowback.checkpoint_hash(
+CREATE OR REPLACE FUNCTION lomberk.checkpoint_hash(
     p_prev TEXT, p_public_id TEXT, p_created_at TIMESTAMPTZ, p_principal TEXT,
     p_agent_label TEXT, p_classification TEXT, p_sql_text TEXT, p_operation_id TEXT
 ) RETURNS TEXT
@@ -957,52 +957,52 @@ AS $$
     )::text, 'UTF8')), 'hex')
 $$;
 
-CREATE OR REPLACE FUNCTION rowback.chain_checkpoint() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION lomberk.chain_checkpoint() RETURNS TRIGGER AS $$
 DECLARE
     v_prev TEXT;
     v_seq BIGINT;
 BEGIN
-    PERFORM pg_advisory_xact_lock(hashtext('rowback.ledger'));
+    PERFORM pg_advisory_xact_lock(hashtext('lomberk.ledger'));
     SELECT hash, chain_seq INTO v_prev, v_seq
-    FROM rowback.checkpoints WHERE chain_seq IS NOT NULL
+    FROM lomberk.checkpoints WHERE chain_seq IS NOT NULL
     ORDER BY chain_seq DESC LIMIT 1;
 
     NEW.prev_hash := coalesce(v_prev, 'genesis');
     NEW.chain_seq := coalesce(v_seq, 0) + 1;
-    NEW.hash := rowback.checkpoint_hash(NEW.prev_hash, NEW.public_id, NEW.created_at, NEW.principal,
+    NEW.hash := lomberk.checkpoint_hash(NEW.prev_hash, NEW.public_id, NEW.created_at, NEW.principal,
                                          NEW.agent_label, NEW.classification, NEW.sql_text, NEW.operation_id);
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SET search_path = lomberk, pg_temp;
 
-CREATE OR REPLACE FUNCTION rowback.guard_checkpoint_immutability() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION lomberk.guard_checkpoint_immutability() RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        RAISE EXCEPTION 'Rowback ledger is append-only: checkpoints cannot be deleted.';
+        RAISE EXCEPTION 'Lomberk ledger is append-only: checkpoints cannot be deleted.';
     END IF;
     IF (NEW.public_id, NEW.created_at, NEW.principal, NEW.agent_label, NEW.classification, NEW.sql_text,
         NEW.operation_id, NEW.prev_hash, NEW.hash, NEW.chain_seq)
        IS DISTINCT FROM
        (OLD.public_id, OLD.created_at, OLD.principal, OLD.agent_label, OLD.classification, OLD.sql_text,
         OLD.operation_id, OLD.prev_hash, OLD.hash, OLD.chain_seq) THEN
-        RAISE EXCEPTION 'Rowback ledger is append-only: recorded checkpoint fields cannot be changed.';
+        RAISE EXCEPTION 'Lomberk ledger is append-only: recorded checkpoint fields cannot be changed.';
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SET search_path = rowback, pg_temp;
+$$ LANGUAGE plpgsql SET search_path = lomberk, pg_temp;
 
-DROP TRIGGER IF EXISTS rowback_chain ON rowback.checkpoints;
-CREATE TRIGGER rowback_chain BEFORE INSERT ON rowback.checkpoints
-    FOR EACH ROW EXECUTE FUNCTION rowback.chain_checkpoint();
-DROP TRIGGER IF EXISTS rowback_immutable ON rowback.checkpoints;
-CREATE TRIGGER rowback_immutable BEFORE UPDATE OR DELETE ON rowback.checkpoints
-    FOR EACH ROW EXECUTE FUNCTION rowback.guard_checkpoint_immutability();
+DROP TRIGGER IF EXISTS lomberk_chain ON lomberk.checkpoints;
+CREATE TRIGGER lomberk_chain BEFORE INSERT ON lomberk.checkpoints
+    FOR EACH ROW EXECUTE FUNCTION lomberk.chain_checkpoint();
+DROP TRIGGER IF EXISTS lomberk_immutable ON lomberk.checkpoints;
+CREATE TRIGGER lomberk_immutable BEFORE UPDATE OR DELETE ON lomberk.checkpoints
+    FOR EACH ROW EXECUTE FUNCTION lomberk.guard_checkpoint_immutability();
 
 -- Walks the chain; returns how many links were checked, the first broken one
 -- (NULL if intact) and the head hash to anchor externally.
-CREATE OR REPLACE FUNCTION rowback.verify_ledger()
+CREATE OR REPLACE FUNCTION lomberk.verify_ledger()
 RETURNS TABLE (checked BIGINT, first_broken_public_id TEXT, head_hash TEXT)
-SET search_path = rowback, pg_temp
+SET search_path = lomberk, pg_temp
 AS $$
 DECLARE
     r RECORD;
@@ -1010,9 +1010,9 @@ DECLARE
     v_expected_seq BIGINT := 1;
 BEGIN
     checked := 0;
-    FOR r IN SELECT * FROM rowback.checkpoints WHERE chain_seq IS NOT NULL ORDER BY chain_seq LOOP
+    FOR r IN SELECT * FROM lomberk.checkpoints WHERE chain_seq IS NOT NULL ORDER BY chain_seq LOOP
         IF r.chain_seq <> v_expected_seq OR r.prev_hash IS DISTINCT FROM v_prev
-           OR r.hash IS DISTINCT FROM rowback.checkpoint_hash(r.prev_hash, r.public_id, r.created_at, r.principal,
+           OR r.hash IS DISTINCT FROM lomberk.checkpoint_hash(r.prev_hash, r.public_id, r.created_at, r.principal,
                                                             r.agent_label, r.classification, r.sql_text, r.operation_id) THEN
             first_broken_public_id := r.public_id;
             head_hash := NULL;

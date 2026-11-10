@@ -15,7 +15,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
+from lomberk.capture.install import install_lomberk
 
 AGENT_KEY = "agent-key-remote-test"
 ADMIN_KEY = "admin-key-remote-test"
@@ -23,7 +23,7 @@ ADMIN_KEY = "admin-key-remote-test"
 
 @pytest.fixture(scope="module")
 def gateway(tmp_path_factory):
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 
@@ -31,28 +31,28 @@ def gateway(tmp_path_factory):
             return urlunparse((p.scheme, f"{role}:secret@{p.hostname}:{p.port}", p.path, "", "", ""))
 
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute("CREATE ROLE rowback_control LOGIN PASSWORD 'secret'")
+            cur.execute("CREATE ROLE lomberk_control LOGIN PASSWORD 'secret'")
             cur.execute("CREATE ROLE mcp_agent LOGIN PASSWORD 'secret'")
-        install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("CREATE TABLE public.accounts (id INT PRIMARY KEY, balance INT)")
             cur.execute("INSERT INTO public.accounts SELECT g, 100 FROM generate_series(1, 30) g")
-            cur.execute("SELECT rowback.register_table('public', 'accounts', 'id', 'mcp_agent')")
+            cur.execute("SELECT lomberk.register_table('public', 'accounts', 'id', 'mcp_agent')")
 
         mp = pytest.MonkeyPatch()
         cfg = tmp_path_factory.mktemp("cfg")
-        (cfg / "rowback.yaml").write_text("limits:\n  max_rows_without_approval: 5\n")
+        (cfg / "lomberk.yaml").write_text("limits:\n  max_rows_without_approval: 5\n")
         mp.chdir(cfg)
-        mp.setenv("ROWBACK_ADMIN_DSN", as_role("rowback_control"))
-        mp.setenv("ROWBACK_AGENT_DSN", as_role("mcp_agent"))
-        mp.setenv("ROWBACK_API_KEY", AGENT_KEY)
-        mp.setenv("ROWBACK_ADMIN_KEY", ADMIN_KEY)
-        mp.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+        mp.setenv("LOMBERK_ADMIN_DSN", as_role("lomberk_control"))
+        mp.setenv("LOMBERK_AGENT_DSN", as_role("mcp_agent"))
+        mp.setenv("LOMBERK_API_KEY", AGENT_KEY)
+        mp.setenv("LOMBERK_ADMIN_KEY", ADMIN_KEY)
+        mp.setattr("lomberk.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
 
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        server = uvicorn.Server(uvicorn.Config("rowback.api:app", host="127.0.0.1", port=port, log_level="warning"))
+        server = uvicorn.Server(uvicorn.Config("lomberk.api:app", host="127.0.0.1", port=port, log_level="warning"))
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{port}"

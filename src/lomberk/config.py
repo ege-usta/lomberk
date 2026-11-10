@@ -11,8 +11,8 @@ class _Strict(BaseModel):
 
 
 class DatabaseConfig(_Strict):
-    agent_dsn_env: str = "ROWBACK_AGENT_DSN"
-    admin_dsn_env: str = "ROWBACK_ADMIN_DSN"
+    agent_dsn_env: str = "LOMBERK_AGENT_DSN"
+    admin_dsn_env: str = "LOMBERK_ADMIN_DSN"
 
 class LimitsConfig(_Strict):
     max_rows_without_approval: int = 100
@@ -52,18 +52,18 @@ class SsoConfig(_Strict):
     # Shared admin key next to SSO. Default: on without SSO, off with SSO (the CLI
     # remains the break-glass path if the IdP is down).
     allow_admin_key: bool | None = None
-    # Public https URL of this gateway, e.g. https://rowback.corp.com. Turns on "Sign in
+    # Public https URL of this gateway, e.g. https://lomberk.corp.com. Turns on "Sign in
     # with SSO" in the web panel; register <panel_url>/panel/sso/callback at the IdP.
-    # The client secret, if the IdP needs one, comes from ROWBACK_SSO_CLIENT_SECRET.
+    # The client secret, if the IdP needs one, comes from LOMBERK_SSO_CLIENT_SECRET.
     panel_url: str | None = None
 
-class RowbackConfig(_Strict):
+class LomberkConfig(_Strict):
     version: int = 1
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     protected_tables: list[str] = Field(default_factory=list)
     # Column names (any table) treated like `password`: never readable by the agent, and
-    # hidden by the database itself on tables you `rowback register`. Use it for secrets the
+    # hidden by the database itself on tables you `lomberk register`. Use it for secrets the
     # built-in name list can't guess (`pass`, `pin`) and for JSON columns that hold secrets.
     sensitive_columns: list[str] = Field(default_factory=list)
     deny_patterns: list[str] = Field(default_factory=list)
@@ -97,38 +97,38 @@ def weak_key_reason(key: str) -> str | None:
     return None
 
 
-CONFIG_ENV = "ROWBACK_CONFIG"
-DEFAULT_CONFIG_PATH = "rowback.yaml"
+CONFIG_ENV = "LOMBERK_CONFIG"
+DEFAULT_CONFIG_PATH = "lomberk.yaml"
 _warned_missing: set[str] = set()
 
 
 def config_path() -> str:
-    """Where the config is read from: $ROWBACK_CONFIG when set, else ./rowback.yaml."""
+    """Where the config is read from: $LOMBERK_CONFIG when set, else ./lomberk.yaml."""
     return os.environ.get(CONFIG_ENV) or DEFAULT_CONFIG_PATH
 
 
-def load_config(path: str | None = None) -> RowbackConfig:
-    """Reads `path`, else $ROWBACK_CONFIG, else ./rowback.yaml.
+def load_config(path: str | None = None) -> LomberkConfig:
+    """Reads `path`, else $LOMBERK_CONFIG, else ./lomberk.yaml.
 
-    A file named by ROWBACK_CONFIG must exist: if it doesn't, startup is refused rather than
-    running without the protected tables it was meant to load. A missing ./rowback.yaml only
-    warns (on stderr, once), because a first run with defaults is a normal way to try Rowback.
+    A file named by LOMBERK_CONFIG must exist: if it doesn't, startup is refused rather than
+    running without the protected tables it was meant to load. A missing ./lomberk.yaml only
+    warns (on stderr, once), because a first run with defaults is a normal way to try Lomberk.
     """
     env_path = os.environ.get(CONFIG_ENV)
     path = path or env_path or DEFAULT_CONFIG_PATH
     if not os.path.exists(path):
         if path == env_path:
             raise ValueError(f"{CONFIG_ENV} points at {path}, which does not exist. "
-                             "Fix the path or unset it; Rowback won't guess which tables to protect.")
+                             "Fix the path or unset it; Lomberk won't guess which tables to protect.")
         full = os.path.abspath(path)
         if full not in _warned_missing:
             _warned_missing.add(full)
-            print(f"rowback: no config at {full}, so defaults apply (no protected tables). "
-                  f"Set {CONFIG_ENV} to your rowback.yaml.", file=sys.stderr)
-        return RowbackConfig()
+            print(f"lomberk: no config at {full}, so defaults apply (no protected tables). "
+                  f"Set {CONFIG_ENV} to your lomberk.yaml.", file=sys.stderr)
+        return LomberkConfig()
     with open(path) as f:
         data = yaml.safe_load(f) or {}
-    return RowbackConfig(**data)
+    return LomberkConfig(**data)
 
 
 def config_error_message(e: Exception) -> str:
@@ -141,16 +141,16 @@ def config_error_message(e: Exception) -> str:
     return str(e).splitlines()[0]
 
 
-def pro_features(config: RowbackConfig) -> list[str]:
-    """The configured features that need a Rowback Pro license."""
-    slack = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
+def pro_features(config: LomberkConfig) -> list[str]:
+    """The configured features that need a Lomberk Pro license."""
+    slack = os.environ.get("LOMBERK_SLACK_ENABLED", "").lower() == "true"
     return [name for name, on in (("SSO", bool(config.sso.issuer)), ("Slack approvals", slack),
                                   ("two-person approval", config.approvals.required > 1)) if on]
 
 
-def quorum_without_identity_source(config: RowbackConfig) -> bool:
+def quorum_without_identity_source(config: LomberkConfig) -> bool:
     """True if a >1 approval quorum is configured with no identity source. Admin-key and CLI
     approvals never count toward the quorum, so with neither SSO nor Slack every held checkpoint
     would be permanently un-approvable — a silent, self-inflicted deadlock caught at startup."""
-    slack = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
+    slack = os.environ.get("LOMBERK_SLACK_ENABLED", "").lower() == "true"
     return config.approvals.required > 1 and not config.sso.issuer and not slack

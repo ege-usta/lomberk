@@ -7,23 +7,23 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.config import RowbackConfig
-from rowback.executor import MASK, RowbackExecutor
-from rowback.policy import PolicyEngine
-from rowback.sql.classify import classify_sql
+from lomberk.capture.install import install_lomberk
+from lomberk.config import LomberkConfig
+from lomberk.executor import MASK, LomberkExecutor
+from lomberk.policy import PolicyEngine
+from lomberk.sql.classify import classify_sql
 
 PROTECTED = ["public.users"]
 
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            c.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             c.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(url, autocommit=True) as c:
             c.execute("CREATE TABLE public.users (id INT PRIMARY KEY, email TEXT, plan TEXT, api_token TEXT, ssn_hidden TEXT)")
             c.execute("CREATE TABLE public.payments (id INT PRIMARY KEY, user_id INT REFERENCES public.users ON DELETE CASCADE, amount INT)")
@@ -32,21 +32,21 @@ def db():
             c.execute("INSERT INTO public.payments VALUES (10, 1, 5), (11, 1, 7), (12, 2, 9)")
             c.execute("INSERT INTO public.notes SELECT g, 'n' FROM generate_series(1, 40) g")
             # ssn_hidden is hidden from the agent by PostgreSQL; api_token stays readable but masked by name.
-            c.execute("SELECT rowback.register_table('public', 'users', NULL, 'mcp_agent', ARRAY['ssn_hidden'])")
-            c.execute("SELECT rowback.register_table('public', 'payments', NULL, 'mcp_agent')")
-            c.execute("SELECT rowback.register_table('public', 'notes', NULL, 'mcp_agent')")
+            c.execute("SELECT lomberk.register_table('public', 'users', NULL, 'mcp_agent', ARRAY['ssn_hidden'])")
+            c.execute("SELECT lomberk.register_table('public', 'payments', NULL, 'mcp_agent')")
+            c.execute("SELECT lomberk.register_table('public', 'notes', NULL, 'mcp_agent')")
         host = url.split("@", 1)[1]
-        control, agent = f"postgresql://rowback_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
+        control, agent = f"postgresql://lomberk_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
         yield url, control, agent
 
 
 def executor(db, preview=True):
     _, control, agent = db
-    return RowbackExecutor(control, agent, max_rows_without_approval=25, protected_tables=PROTECTED, preview_writes=preview)
+    return LomberkExecutor(control, agent, max_rows_without_approval=25, protected_tables=PROTECTED, preview_writes=preview)
 
 
 def run(ex, sql):
-    config = RowbackConfig(protected_tables=PROTECTED)
+    config = LomberkConfig(protected_tables=PROTECTED)
     return ex.execute(PolicyEngine(config).evaluate(classify_sql(sql)[0]), agent_label="t", principal="t")
 
 
@@ -112,4 +112,4 @@ def test_preview_off_keeps_the_old_hold_without_running_the_write(db):
 def test_preview_function_needs_the_live_token(db):
     _, _, agent = db
     with psycopg.connect(agent) as c, pytest.raises(psycopg.errors.RaiseException, match="live execution token"):
-        c.execute("SELECT rowback.preview_changes(%s)", (str(uuid.uuid4()),))
+        c.execute("SELECT lomberk.preview_changes(%s)", (str(uuid.uuid4()),))

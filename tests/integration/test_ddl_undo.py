@@ -4,14 +4,14 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.executor import RowbackExecutor
-from rowback.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
+from lomberk.capture.install import install_lomberk
+from lomberk.executor import LomberkExecutor
+from lomberk.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
 
 
 @pytest.fixture(scope="module")
 def postgres():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
         yield postgres
 
 @pytest.fixture(scope="module")
@@ -28,11 +28,11 @@ def runtime_dsn(dsn):
 def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
-        cur.execute("DROP ROLE IF EXISTS rowback_control")
-        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS lomberk_control")
+        cur.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
 
-    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+    install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
@@ -41,11 +41,11 @@ def setup_db(dsn, runtime_dsn):
                     data TEXT
                 );
             """)
-        cur.execute("SELECT rowback.register_table('public', 'test_ddl', 'id', 'mcp_agent');")
+        cur.execute("SELECT lomberk.register_table('public', 'test_ddl', 'id', 'mcp_agent');")
         cur.execute("INSERT INTO public.test_ddl (data) VALUES ('A'), ('B')")
 
 def test_drop_table_undo(dsn, runtime_dsn, setup_db):
-    executor = RowbackExecutor(dsn, runtime_dsn)
+    executor = LomberkExecutor(dsn, runtime_dsn)
 
     stmt = ClassifiedStatement(sql="DROP TABLE public.test_ddl;", stmt_class=StatementClass.DDL_REVERSIBLE, tables=["public.test_ddl"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason="Test")
@@ -61,7 +61,7 @@ def test_drop_table_undo(dsn, runtime_dsn, setup_db):
             assert cur.fetchone()[0] == 1
 
 def test_truncate_undo(dsn, runtime_dsn, setup_db):
-    executor = RowbackExecutor(dsn, runtime_dsn)
+    executor = LomberkExecutor(dsn, runtime_dsn)
 
     stmt = ClassifiedStatement(sql="TRUNCATE public.test_ddl;", stmt_class=StatementClass.DDL_REVERSIBLE, tables=["public.test_ddl"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Test")
@@ -75,7 +75,7 @@ def test_truncate_undo(dsn, runtime_dsn, setup_db):
         assert cur.fetchone()[0] == 2
 
 def test_drop_column_undo(dsn, runtime_dsn, setup_db):
-    executor = RowbackExecutor(dsn, runtime_dsn)
+    executor = LomberkExecutor(dsn, runtime_dsn)
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE public.test_ddl ADD COLUMN extra INT DEFAULT 42;")

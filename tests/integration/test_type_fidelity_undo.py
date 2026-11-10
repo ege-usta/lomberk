@@ -7,14 +7,14 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.executor import RowbackExecutor
-from rowback.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
+from lomberk.capture.install import install_lomberk
+from lomberk.executor import LomberkExecutor
+from lomberk.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
 
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 
@@ -22,9 +22,9 @@ def db():
             return urlunparse((p.scheme, f"{role}:secret@{p.hostname}:{p.port}", p.path, "", "", ""))
 
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute("CREATE ROLE rowback_control LOGIN PASSWORD 'secret'")
+            cur.execute("CREATE ROLE lomberk_control LOGIN PASSWORD 'secret'")
             cur.execute("CREATE ROLE mcp_agent LOGIN PASSWORD 'secret'")
-        install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("""
                 CREATE TYPE public.mood AS ENUM ('ok', 'sad');
@@ -34,8 +34,8 @@ def db():
                     m public.mood, big text, ip inet, nul text, money_c money, pt point, bits bit varying(8),
                     tsr tstzrange, jn jsonb, g int GENERATED ALWAYS AS (id * 2) STORED);
             """)
-            cur.execute("SELECT rowback.register_table('public', 'typed', 'id', 'mcp_agent')")
-        yield dsn, RowbackExecutor(as_role("rowback_control"), as_role("mcp_agent"))
+            cur.execute("SELECT lomberk.register_table('public', 'typed', 'id', 'mcp_agent')")
+        yield dsn, LomberkExecutor(as_role("lomberk_control"), as_role("mcp_agent"))
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +59,7 @@ def seed(db):
 
 @pytest.fixture(autouse=True)
 def no_llm(monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("lomberk.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
 
 
 def snapshot(dsn):
@@ -94,7 +94,7 @@ def test_undo_restores_every_type_exactly(db, sql):
 
 
 def test_rows_captured_before_the_exact_copy_still_undo(db):
-    """Checkpoints written by an older Rowback have no old_text: undo falls back to the JSON copy."""
+    """Checkpoints written by an older Lomberk have no old_text: undo falls back to the JSON copy."""
     dsn, ex = db
     before = snapshot(dsn)
     sql = "UPDATE public.typed SET big = 'x', n = 2, arr = '{7}' WHERE id = 1"
@@ -102,7 +102,7 @@ def test_rows_captured_before_the_exact_copy_still_undo(db):
     res = ex.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason=""))
     assert res.status == "applied", res.message
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute("UPDATE rowback.row_changes SET old_text = NULL")
+        conn.execute("UPDATE lomberk.row_changes SET old_text = NULL")
     undo = ex.execute_undo(res.public_id)
     assert undo.status == "undone", undo.message
     after = snapshot(dsn)

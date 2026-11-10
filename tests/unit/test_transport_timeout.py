@@ -8,7 +8,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from rowback.recovery import RecoveryBudgetExhausted, TransientError, execute_with_recovery
+from lomberk.recovery import RecoveryBudgetExhausted, TransientError, execute_with_recovery
 
 app = FastAPI()
 health_check_passed = False

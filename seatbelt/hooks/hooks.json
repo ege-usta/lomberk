@@ -1,5 +1,5 @@
 {
-  "description": "Rowback Seatbelt: ask before destructive database commands",
+  "description": "Lomberk Seatbelt: ask before destructive database commands",
   "hooks": {
     "PreToolUse": [
       {

@@ -4,7 +4,7 @@ into a differently named column, or into one value, has to be refused before exe
 import pglast
 import pytest
 
-from rowback.sql.classify import check_sensitive_columns
+from lomberk.sql.classify import check_sensitive_columns
 
 
 def refused(sql: str) -> bool:
@@ -116,8 +116,8 @@ def test_configured_names_are_secrets_too():
 
 
 def test_secret_json_keys_are_masked_in_results():
-    from rowback.executor import RowbackExecutor
-    ex = RowbackExecutor("x", "y", sensitive_columns=["pin"])
+    from lomberk.executor import LomberkExecutor
+    ex = LomberkExecutor("x", "y", sensitive_columns=["pin"])
     rows = ex._mask_and_sanitize_rows(
         ["id", "settings", "raw", "pin"],
         [(1, {"theme": "dark", "api_key": "K", "nested": [{"token": "T", "pin": "1234"}]},

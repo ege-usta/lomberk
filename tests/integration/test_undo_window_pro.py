@@ -1,8 +1,8 @@
 """The CLI's undo window with a license key. Split from test_undo_window.py, which runs without ee/."""
 import test_undo_window as base
 
-import rowback.ee.license as lic
-from rowback.cli import app
+import lomberk.ee.license as lic
+from lomberk.cli import app
 
 db, env = base.db, base.env  # the same database fixtures
 age, exists, runner, write = base.age, base.exists, base.runner, base.write

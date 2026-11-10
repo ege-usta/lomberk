@@ -7,23 +7,23 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.config import RowbackConfig
-from rowback.executor import RowbackExecutor
-from rowback.policy import PolicyEngine
-from rowback.sql.classify import classify_sql
+from lomberk.capture.install import install_lomberk
+from lomberk.config import LomberkConfig
+from lomberk.executor import LomberkExecutor
+from lomberk.policy import PolicyEngine
+from lomberk.sql.classify import classify_sql
 
 T1 = str(uuid.UUID(int=1))
 
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            c.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             c.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(url, autocommit=True) as c:
             c.execute("CREATE TABLE public.memberships (org_id INT, user_id INT, role TEXT NOT NULL, "
                       "PRIMARY KEY (org_id, user_id))")
@@ -37,14 +37,14 @@ def db():
             c.execute("CREATE TABLE public.covered (id INT, note TEXT, PRIMARY KEY (id) INCLUDE (note))")
             for t in ("memberships", "grants", "docs", "covered"):
                 # No key given: registration reads it from the table.
-                c.execute("SELECT rowback.register_table('public', %s, NULL, 'mcp_agent')", (t,))
+                c.execute("SELECT lomberk.register_table('public', %s, NULL, 'mcp_agent')", (t,))
         host = url.split("@", 1)[1]
-        yield url, RowbackExecutor(f"postgresql://rowback_control:secret@{host}",
+        yield url, LomberkExecutor(f"postgresql://lomberk_control:secret@{host}",
                                    f"postgresql://mcp_agent:secret@{host}", max_rows_without_approval=50)
 
 
 def run(ex, sql):
-    return ex.execute(PolicyEngine(RowbackConfig()).evaluate(classify_sql(sql)[0]), agent_label="t", principal="t")
+    return ex.execute(PolicyEngine(LomberkConfig()).evaluate(classify_sql(sql)[0]), agent_label="t", principal="t")
 
 
 def rows(url, sql):
@@ -54,14 +54,14 @@ def rows(url, sql):
 
 def test_registration_reads_the_key_and_skips_covering_columns(db):
     url, _ = db
-    assert dict(rows(url, "SELECT table_name, pk_column FROM rowback.registered_tables")) == {
+    assert dict(rows(url, "SELECT table_name, pk_column FROM lomberk.registered_tables")) == {
         "memberships": "org_id,user_id", "grants": "org_id,user_id,perm", "docs": "tenant,id", "covered": "id"}
 
 
 def test_registration_refuses_a_wrong_key_up_front(db):
     url, _ = db
     with psycopg.connect(url, autocommit=True) as c, pytest.raises(psycopg.errors.RaiseException, match=r"is \(org_id,user_id\), not \(id\)"):
-        c.execute("SELECT rowback.register_table('public', 'memberships', 'id', 'mcp_agent')")
+        c.execute("SELECT lomberk.register_table('public', 'memberships', 'id', 'mcp_agent')")
 
 
 def test_update_undo_touches_only_the_row_with_the_full_key(db):

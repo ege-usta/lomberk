@@ -5,23 +5,23 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.config import RowbackConfig
-from rowback.executor import RowbackExecutor
-from rowback.policy import PolicyEngine
-from rowback.sql.classify import classify_sql
+from lomberk.capture.install import install_lomberk
+from lomberk.config import LomberkConfig
+from lomberk.executor import LomberkExecutor
+from lomberk.policy import PolicyEngine
+from lomberk.sql.classify import classify_sql
 
 PROTECTED = ["public.plans", "public.events"]
 
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            c.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             c.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(url, autocommit=True) as c:
             c.execute("CREATE TABLE public.plans (id INT PRIMARY KEY, tier TEXT, note TEXT)")
             c.execute("INSERT INTO public.plans VALUES (1, 'free', 'a'), (2, 'pro', 'b'), (3, 'pro', 'c')")
@@ -36,17 +36,17 @@ def db():
             c.execute("CREATE TRIGGER stamp BEFORE DELETE ON public.kids FOR EACH ROW EXECUTE FUNCTION public.stamp()")
             c.execute("INSERT INTO public.parents VALUES (1), (2)")
             c.execute("INSERT INTO public.kids VALUES (10, 1, NULL)")
-            c.execute("SELECT rowback.register_table('public', 'plans', NULL, 'mcp_agent')")
-            c.execute("SELECT rowback.register_table('public', 'events', NULL, 'mcp_agent', ARRAY['pin'])")
-            c.execute("SELECT rowback.register_table('public', 'parents', NULL, 'mcp_agent')")
-            c.execute("SELECT rowback.register_table('public', 'kids', NULL, 'mcp_agent')")
+            c.execute("SELECT lomberk.register_table('public', 'plans', NULL, 'mcp_agent')")
+            c.execute("SELECT lomberk.register_table('public', 'events', NULL, 'mcp_agent', ARRAY['pin'])")
+            c.execute("SELECT lomberk.register_table('public', 'parents', NULL, 'mcp_agent')")
+            c.execute("SELECT lomberk.register_table('public', 'kids', NULL, 'mcp_agent')")
         host = url.split("@", 1)[1]
-        yield url, RowbackExecutor(f"postgresql://rowback_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}",
+        yield url, LomberkExecutor(f"postgresql://lomberk_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}",
                                    max_rows_without_approval=50, protected_tables=PROTECTED, preview_writes=True)
 
 
 def run(ex, sql):
-    return ex.execute(PolicyEngine(RowbackConfig(protected_tables=PROTECTED)).evaluate(classify_sql(sql)[0]),
+    return ex.execute(PolicyEngine(LomberkConfig(protected_tables=PROTECTED)).evaluate(classify_sql(sql)[0]),
                       agent_label="t", principal="t")
 
 

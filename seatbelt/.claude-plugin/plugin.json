@@ -1,9 +1,9 @@
 {
   "name": "seatbelt",
   "version": "0.1.0",
-  "description": "Stops your agent before a destructive database command (DROP, TRUNCATE, DELETE/UPDATE without WHERE, prisma migrate reset, dropdb, db:drop, terraform destroy...) and asks you first. Free, stdlib Python, from the makers of Rowback.",
-  "author": { "name": "Rowback" },
-  "homepage": "https://github.com/ege-usta/rowback/tree/main/seatbelt",
+  "description": "Stops your agent before a destructive database command (DROP, TRUNCATE, DELETE/UPDATE without WHERE, prisma migrate reset, dropdb, db:drop, terraform destroy...) and asks you first. Free, stdlib Python, from the makers of Lomberk.",
+  "author": { "name": "Lomberk" },
+  "homepage": "https://github.com/ege-usta/lomberk/tree/main/seatbelt",
   "license": "Apache-2.0",
   "keywords": ["database", "safety", "postgres", "sql", "guardrail", "hooks"]
 }

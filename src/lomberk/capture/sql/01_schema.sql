@@ -1,0 +1,149 @@
+-- 1. Create Schemas
+CREATE SCHEMA IF NOT EXISTS lomberk;
+CREATE SCHEMA IF NOT EXISTS lomberk_trash;
+
+-- 2. Create Tables
+CREATE TABLE IF NOT EXISTS lomberk.checkpoints (
+    id            BIGSERIAL PRIMARY KEY,
+    public_id     TEXT UNIQUE NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    agent_label   TEXT,
+    sql_text      TEXT NOT NULL,
+    classification TEXT NOT NULL,
+    decision      TEXT NOT NULL,
+    status        TEXT NOT NULL, -- 'applied', 'undone', 'failed', 'pending'
+    rows_affected INTEGER,
+    exec_token UUID,
+    ddl_undo_plan JSONB,
+    prev_hash     TEXT,
+    hash          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS lomberk.row_changes (
+    id            BIGSERIAL PRIMARY KEY,
+    checkpoint_id BIGINT NOT NULL REFERENCES lomberk.checkpoints(id) ON DELETE CASCADE,
+    seq           BIGINT NOT NULL,
+    table_schema  TEXT NOT NULL,
+    table_name    TEXT NOT NULL,
+    table_oid     OID,
+    op            CHAR(1) NOT NULL, -- 'I', 'U', 'D'
+    pk            JSONB,
+    old_row       JSONB,
+    new_row       JSONB,
+    schema_snapshot JSONB
+);
+
+CREATE TABLE IF NOT EXISTS lomberk.registered_tables (
+    table_oid     OID PRIMARY KEY,
+    schema_name   TEXT NOT NULL,
+    table_name    TEXT NOT NULL,
+    pk_column     TEXT NOT NULL,
+    UNIQUE(schema_name, table_name)
+);
+-- Opt-in per table (lomberk register --allow-triggers): the owner vouches that the table's
+-- own triggers only change the row itself (updated_at) or registered tables, so undo may
+-- switch them off while it restores rows.
+ALTER TABLE lomberk.registered_tables ADD COLUMN IF NOT EXISTS allow_triggers BOOLEAN NOT NULL DEFAULT false;
+-- The old row in Postgres' own text form (OLD::text): exact for every type, unlike JSON,
+-- which turns a json 'null' into SQL NULL and re-orders/dedupes json keys. Undo prefers it.
+ALTER TABLE lomberk.row_changes ADD COLUMN IF NOT EXISTS old_text TEXT;
+
+CREATE SEQUENCE IF NOT EXISTS lomberk.seq_row_changes START 1;
+
+
+
+-- MIGRATION: Update columns for capability-based execution
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lomberk' AND table_name='checkpoints' AND column_name='capability_token') THEN
+        ALTER TABLE lomberk.checkpoints ADD COLUMN capability_token UUID UNIQUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lomberk' AND table_name='checkpoints' AND column_name='exec_txid') THEN
+        ALTER TABLE lomberk.checkpoints ADD COLUMN exec_txid BIGINT;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS lomberk.undo_operations (
+    id                   BIGSERIAL PRIMARY KEY,
+    source_checkpoint_id BIGINT NOT NULL UNIQUE REFERENCES lomberk.checkpoints(id),
+    undo_checkpoint_id   BIGINT NOT NULL UNIQUE REFERENCES lomberk.checkpoints(id),
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lomberk' AND table_name='row_changes' AND column_name='table_oid') THEN
+        ALTER TABLE lomberk.row_changes ADD COLUMN table_oid OID;
+    END IF;
+END $$;
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lomberk' AND table_name='row_changes' AND column_name='schema_snapshot') THEN
+        ALTER TABLE lomberk.row_changes ADD COLUMN schema_snapshot JSONB;
+    END IF;
+END $$;
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lomberk' AND table_name='checkpoints' AND column_name='operation_id') THEN
+        ALTER TABLE lomberk.checkpoints ADD COLUMN operation_id TEXT;
+        CREATE UNIQUE INDEX idx_checkpoints_idempotency ON lomberk.checkpoints (agent_label, operation_id) WHERE operation_id IS NOT NULL;
+    END IF;
+END $$;
+
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lomberk' AND table_name='checkpoints' AND column_name='principal') THEN
+        ALTER TABLE lomberk.checkpoints ADD COLUMN principal TEXT NOT NULL DEFAULT 'system';
+        DROP INDEX IF EXISTS lomberk.idx_checkpoints_idempotency;
+        CREATE UNIQUE INDEX idx_checkpoints_idempotency ON lomberk.checkpoints (principal, operation_id) WHERE operation_id IS NOT NULL;
+    END IF;
+END $$;
+
+-- MIGRATION: tamper-evident ledger ordering (chain position, assigned under a lock)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lomberk' AND table_name='checkpoints' AND column_name='chain_seq') THEN
+        ALTER TABLE lomberk.checkpoints ADD COLUMN chain_seq BIGINT UNIQUE;
+    END IF;
+END $$;
+
+-- Slack approval outbox: one row per pending checkpoint posted to Slack.
+-- The (team, channel, ts) binding is the ONLY thing that authorizes a button click.
+CREATE TABLE IF NOT EXISTS lomberk.slack_messages (
+    public_id   TEXT PRIMARY KEY REFERENCES lomberk.checkpoints(public_id),
+    team_id     TEXT,
+    channel_id  TEXT NOT NULL,
+    message_ts  TEXT,
+    state       TEXT NOT NULL CHECK (state IN ('publishing', 'bound', 'unknown')),
+    claimed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (channel_id, message_ts)
+);
+
+-- Who approved what: one row per (checkpoint, person). Append-only (see 02_functions.sql).
+-- With approvals.required > 1, a held write runs only after that many distinct people.
+CREATE TABLE IF NOT EXISTS lomberk.approvals (
+    public_id   TEXT NOT NULL REFERENCES lomberk.checkpoints(public_id),
+    actor       TEXT NOT NULL,
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (public_id, actor)
+);
+
+-- What a held write would change, recorded by a dry run (executed, read, rolled back) when it
+-- was held, so an approver sees rows, not just SQL. A snapshot of that moment, not a promise.
+CREATE TABLE IF NOT EXISTS lomberk.previews (
+    public_id   TEXT PRIMARY KEY REFERENCES lomberk.checkpoints(public_id),
+    preview     JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- This database's activation of a Pro license key. Pro keys cover a fixed number of databases;
+-- each one counts once with Polar under its own random label, kept here across restarts.
+CREATE TABLE IF NOT EXISTS lomberk.license_activation (
+    only_row      BOOLEAN PRIMARY KEY DEFAULT true CHECK (only_row),
+    label         TEXT NOT NULL DEFAULT 'lomberk-' || gen_random_uuid(),
+    activation_id TEXT
+);
+INSERT INTO lomberk.license_activation DEFAULT VALUES ON CONFLICT DO NOTHING;

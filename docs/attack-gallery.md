@@ -1,8 +1,8 @@
 # Attack gallery
 
-Below are 20 things an agent (or a prompt injection) might try, and what Rowback answers. Each row is checked by `tests/unit/test_attack_gallery.py`. If this page ever stops being true, that test fails.
+Below are 20 things an agent (or a prompt injection) might try, and what Lomberk answers. Each row is checked by `tests/unit/test_attack_gallery.py`. If this page ever stops being true, that test fails.
 
-Rowback has three layers. An attack only has to be stopped by one of them; most are stopped by all three.
+Lomberk has three layers. An attack only has to be stopped by one of them; most are stopped by all three.
 1. **The parser gate.** PostgreSQL's own parser reads the SQL before anything runs.
 2. **The policy.** The statement's class, the tables it touches, and hidden columns.
 3. **The database.** The agent's role has no rights beyond the tables you registered, and no `SELECT` on columns you hid.
@@ -16,7 +16,7 @@ Rowback has three layers. An attack only has to be stopped by one of them; most 
 | UPDATE with no WHERE | `UPDATE public.users SET balance = 0` | UPDATE statement missing WHERE clause |
 | Smuggle a second statement | `SELECT 1; DELETE FROM public.users WHERE true` | Multiple stacked SQL statements detected |
 | Hide a write inside a read | `WITH x AS (DELETE … RETURNING *) SELECT count(*) FROM x` | Writes nested inside another statement are structurally banned |
-| Erase the undo history | `DELETE FROM rowback.row_changes WHERE id > 0` | Blocked by the policy. The agent's role also has no rights on it. |
+| Erase the undo history | `DELETE FROM lomberk.row_changes WHERE id > 0` | Blocked by the policy. The agent's role also has no rights on it. |
 
 A `DELETE` or `UPDATE` with a real `WHERE` still runs. If it touches more rows than your limit, or touches a protected table, it waits for a person. Either way, it can be undone afterwards.
 
@@ -32,8 +32,8 @@ A `DELETE` or `UPDATE` with a real `WHERE` still runs. If it touches more rows t
 
 ## Reading secrets
 Each column listed in `sensitive_columns`, and each column whose name looks secret (`password`, `token`, `api_key`, …), is hidden in two places:
-- Rowback refuses any query that could reveal it.
-- `rowback register` revokes the agent's `SELECT` on it in the database itself.
+- Lomberk refuses any query that could reveal it.
+- `lomberk register` revokes the agent's `SELECT` on it in the database itself.
 
 | Attempt | SQL | Answer |
 |---|---|---|
@@ -48,6 +48,6 @@ Each column listed in `sensitive_columns`, and each column whose name looks secr
 Naming the columns you need still works: `SELECT id, email FROM public.users`. A `SELECT *` on a registered table with hidden columns is refused by the database, and the agent is told to name its columns. On tables registered before a column was marked secret, results are masked by column name.
 
 ## What this page does not claim
-- **Stolen credentials.** Rowback can't stop a person or a tool that holds your database's owner credentials. Keep them out of the agent's reach. Rowback exists so the agent never needs them.
-- **Infrastructure and cloud API tokens.** An agent with a cloud API token can delete the database server itself, and Rowback never sees that request. In the PocketOS incident, an agent deleted a production database and its backups through an infrastructure token, not through SQL.
+- **Stolen credentials.** Lomberk can't stop a person or a tool that holds your database's owner credentials. Keep them out of the agent's reach. Lomberk exists so the agent never needs them.
+- **Infrastructure and cloud API tokens.** An agent with a cloud API token can delete the database server itself, and Lomberk never sees that request. In the PocketOS incident, an agent deleted a production database and its backups through an infrastructure token, not through SQL.
 - The full threat model and limits are in [SECURITY.md](../SECURITY.md).

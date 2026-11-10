@@ -11,7 +11,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from test_firewall_attacks import MUST_ALLOW, MUST_BLOCK
 
-from rowback.sentinel import AISentinel
+from lomberk.sentinel import AISentinel
 
 fw = AISentinel()._ast_firewall
 

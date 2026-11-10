@@ -6,13 +6,13 @@ import pytest
 from fastapi.testclient import TestClient
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.api import app
-from rowback.capture.install import install_rowback
+from lomberk.api import app
+from lomberk.capture.install import install_lomberk
 
 
 @pytest.fixture(scope="module")
 def dsn():
-    postgres = PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine"))
+    postgres = PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine"))
     postgres.start()
     with psycopg.connect(postgres.get_connection_url().replace("postgresql+psycopg2", "postgresql"), autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER SYSTEM SET max_prepared_transactions = 100")
@@ -27,20 +27,20 @@ def runtime_dsn(dsn):
 @pytest.fixture(scope="function", autouse=True)
 def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("DROP SCHEMA IF EXISTS rowback CASCADE")
-        cur.execute("DROP SCHEMA IF EXISTS rowback_trash CASCADE")
+        cur.execute("DROP SCHEMA IF EXISTS lomberk CASCADE")
+        cur.execute("DROP SCHEMA IF EXISTS lomberk_trash CASCADE")
         try:
             cur.execute("DROP OWNED BY mcp_agent CASCADE")
         except psycopg.errors.UndefinedObject: pass
         try:
-            cur.execute("DROP OWNED BY rowback_control CASCADE")
+            cur.execute("DROP OWNED BY lomberk_control CASCADE")
         except psycopg.errors.UndefinedObject: pass
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
-        cur.execute("DROP ROLE IF EXISTS rowback_control")
-        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS lomberk_control")
+        cur.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
 
-    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+    install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
@@ -53,19 +53,19 @@ def setup_db(dsn, runtime_dsn):
         cur.execute("GRANT ALL PRIVILEGES ON SCHEMA public TO mcp_agent")
         cur.execute("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mcp_agent")
         cur.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO mcp_agent")
-        cur.execute("SELECT rowback.register_table('public', 'api_users', 'id', 'mcp_agent')")
+        cur.execute("SELECT lomberk.register_table('public', 'api_users', 'id', 'mcp_agent')")
 
 @pytest.fixture
 def client(dsn, runtime_dsn, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    monkeypatch.setenv("ROWBACK_ADMIN_DSN", dsn.replace('test:test', 'rowback_control:secret'))
-    monkeypatch.setenv("ROWBACK_AGENT_DSN", runtime_dsn)
-    monkeypatch.setenv("ROWBACK_API_KEY", "test-agent-key")
-    monkeypatch.setenv("ROWBACK_ADMIN_KEY", "test-admin-key")
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    monkeypatch.setenv("LOMBERK_ADMIN_DSN", dsn.replace('test:test', 'lomberk_control:secret'))
+    monkeypatch.setenv("LOMBERK_AGENT_DSN", runtime_dsn)
+    monkeypatch.setenv("LOMBERK_API_KEY", "test-agent-key")
+    monkeypatch.setenv("LOMBERK_ADMIN_KEY", "test-admin-key")
 
     # Reload config
-    monkeypatch.setattr("rowback.api._executor_instance", None)
-    monkeypatch.setattr("rowback.api._policy_engine_instance", None)
+    monkeypatch.setattr("lomberk.api._executor_instance", None)
+    monkeypatch.setattr("lomberk.api._policy_engine_instance", None)
 
     # Trigger lifespan
     with TestClient(app) as client:

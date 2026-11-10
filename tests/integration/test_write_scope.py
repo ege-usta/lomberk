@@ -1,4 +1,4 @@
-"""A write Rowback lets through must be fully captured. Inheritance children and rewrite
+"""A write Lomberk lets through must be fully captured. Inheritance children and rewrite
 rules move rows the capture trigger never sees, so such tables are refused before the write."""
 import os
 
@@ -6,21 +6,21 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.config import RowbackConfig
-from rowback.executor import RowbackExecutor
-from rowback.policy import PolicyEngine
-from rowback.sql.classify import classify_sql
+from lomberk.capture.install import install_lomberk
+from lomberk.config import LomberkConfig
+from lomberk.executor import LomberkExecutor
+from lomberk.policy import PolicyEngine
+from lomberk.sql.classify import classify_sql
 
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            c.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             c.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(url, autocommit=True) as c:
             c.execute("CREATE TABLE public.parent (id INT PRIMARY KEY, v TEXT)")
             c.execute("CREATE TABLE public.child_archive (note TEXT) INHERITS (public.parent)")
@@ -39,14 +39,14 @@ def db():
                       "password_hash TEXT)")
             c.execute("INSERT INTO public.people VALUES (1, 'a', 30, 'SECRETHASH_1')")
             for t in ("parent", "ruled", "stamped", "people"):
-                c.execute("SELECT rowback.register_table('public', %s, 'id', 'mcp_agent')", (t,))
+                c.execute("SELECT lomberk.register_table('public', %s, 'id', 'mcp_agent')", (t,))
         host = url.split("@", 1)[1]
-        yield url, RowbackExecutor(f"postgresql://rowback_control:secret@{host}",
+        yield url, LomberkExecutor(f"postgresql://lomberk_control:secret@{host}",
                                    f"postgresql://mcp_agent:secret@{host}", max_rows_without_approval=10)
 
 
 def run(ex, sql):
-    return ex.execute(PolicyEngine(RowbackConfig()).evaluate(classify_sql(sql)[0]), agent_label="t", principal="t")
+    return ex.execute(PolicyEngine(LomberkConfig()).evaluate(classify_sql(sql)[0]), agent_label="t", principal="t")
 
 
 def test_write_through_an_inheritance_parent_is_refused(db):
@@ -89,7 +89,7 @@ def test_registered_secret_columns_are_hidden_by_the_database(db):
     # Column privileges: PostgreSQL itself refuses, whatever the SQL looks like.
     url, ex = db
     with psycopg.connect(url, autocommit=True) as c:
-        c.execute("SELECT rowback.register_table('public', 'people', 'id', 'mcp_agent', ARRAY['password_hash'])")
+        c.execute("SELECT lomberk.register_table('public', 'people', 'id', 'mcp_agent', ARRAY['password_hash'])")
         assert c.execute("SELECT has_column_privilege('mcp_agent', 'public.people', 'password_hash', 'SELECT'), "
                          "has_column_privilege('mcp_agent', 'public.people', 'name', 'SELECT')").fetchone() == (False, True)
     res = run(ex, "SELECT * FROM public.people")
@@ -103,7 +103,7 @@ def test_registered_secret_columns_are_hidden_by_the_database(db):
 def test_whole_row_json_cannot_smuggle_a_hidden_column(db, sql):
     # to_jsonb() and friends are allowlisted for everyday scalar use; a whole-row reference is
     # still refused before it reaches the database (which would also refuse the hidden column).
-    from rowback.audit import EVENTS
+    from lomberk.audit import EVENTS
     _, ex = db
     before = EVENTS["denied"]
     res = run(ex, sql)

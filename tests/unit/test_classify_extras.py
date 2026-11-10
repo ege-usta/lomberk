@@ -1,7 +1,7 @@
 import pytest
 
-from rowback.models import StatementClass
-from rowback.sql.classify import classify_sql
+from lomberk.models import StatementClass
+from lomberk.sql.classify import classify_sql
 
 
 @pytest.mark.parametrize("sql, expected_class", [

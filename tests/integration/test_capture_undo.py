@@ -4,9 +4,9 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.executor import RowbackExecutor
-from rowback.models import (
+from lomberk.capture.install import install_lomberk
+from lomberk.executor import LomberkExecutor
+from lomberk.models import (
     ClassifiedStatement,
     PolicyDecision,
     StatementClass,
@@ -16,7 +16,7 @@ from rowback.models import (
 
 @pytest.fixture(scope="module")
 def postgres():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
         yield postgres
 
 @pytest.fixture(scope="module")
@@ -35,11 +35,11 @@ def setup_db(dsn, runtime_dsn):
     # Admin creates runtime role
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
-        cur.execute("DROP ROLE IF EXISTS rowback_control")
-        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS lomberk_control")
+        cur.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
 
-    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+    install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
 
     # Create test schema and table as Admin
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -50,7 +50,7 @@ def setup_db(dsn, runtime_dsn):
                     age INT
                 );
             """)
-        cur.execute("SELECT rowback.register_table('public', 'test_users', 'id', 'mcp_agent');")
+        cur.execute("SELECT lomberk.register_table('public', 'test_users', 'id', 'mcp_agent');")
 
 def assert_runtime_role(dsn):
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
@@ -62,9 +62,9 @@ def assert_runtime_role(dsn):
         assert cur.fetchone()[0] is False
 
 def test_insert_undo(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     assert_runtime_role(runtime_dsn)
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_users (name, age) VALUES ('Alice', 30)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_users"])
     eval = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test")
@@ -81,7 +81,7 @@ def test_insert_undo(dsn, runtime_dsn, setup_db, monkeypatch):
             assert cur.fetchone()[0] == 1
 
             # Check row_changes
-            cur.execute("SELECT op, new_row FROM rowback.row_changes WHERE checkpoint_id = %s", (cp_id,))
+            cur.execute("SELECT op, new_row FROM lomberk.row_changes WHERE checkpoint_id = %s", (cp_id,))
             changes = cur.fetchall()
             assert len(changes) == 1
             assert changes[0][0] == 'I'
@@ -96,8 +96,8 @@ def test_insert_undo(dsn, runtime_dsn, setup_db, monkeypatch):
         assert cur.fetchone()[0] == 0
 
 def test_update_undo(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     # Insert manually
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -123,8 +123,8 @@ def test_update_undo(dsn, runtime_dsn, setup_db, monkeypatch):
         assert cur.fetchone()[0] == 40
 
 def test_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     # Insert manually
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -150,8 +150,8 @@ def test_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
         assert cur.fetchone()[0] == 1
 
 def test_cascade_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     with psycopg.connect(dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
@@ -162,7 +162,7 @@ def test_cascade_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
                     total INT
                 );
             """)
-            cur.execute("SELECT rowback.register_table('public', 'test_orders', 'id', 'mcp_agent');")
+            cur.execute("SELECT lomberk.register_table('public', 'test_orders', 'id', 'mcp_agent');")
 
             # Insert User and Order
             cur.execute("INSERT INTO public.test_users (name, age) VALUES ('Dave', 60) RETURNING id")
@@ -183,21 +183,21 @@ def test_cascade_delete_undo(dsn, runtime_dsn, setup_db, monkeypatch):
         assert cur.fetchone()[0] == 1, "cascaded child row must be restored"
 
 def test_concurrent_undo_busy_while_locked(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
     import threading
 
     import psycopg
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_concurrent (id SERIAL PRIMARY KEY, name TEXT, age INT);")
-        cur.execute("SELECT rowback.register_table('public', 'test_concurrent', 'id', 'mcp_agent');")
+        cur.execute("SELECT lomberk.register_table('public', 'test_concurrent', 'id', 'mcp_agent');")
 
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_concurrent (name, age) VALUES ('Racer', 99)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_concurrent"])
     res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
 
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT id FROM rowback.checkpoints WHERE public_id = %s", (res.public_id,))
+        cur.execute("SELECT id FROM lomberk.checkpoints WHERE public_id = %s", (res.public_id,))
         cp_id = cur.fetchone()[0]
 
     # Hold the lock intentionally
@@ -206,7 +206,7 @@ def test_concurrent_undo_busy_while_locked(dsn, runtime_dsn, setup_db, monkeypat
     def hold_lock():
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
             cur.execute("BEGIN;")
-            cur.execute("SELECT 1 FROM rowback.checkpoints WHERE id = %s FOR UPDATE NOWAIT", (cp_id,))
+            cur.execute("SELECT 1 FROM lomberk.checkpoints WHERE id = %s FOR UPDATE NOWAIT", (cp_id,))
             locked = cur.fetchone()[0]
             if locked:
                 hold_event.set()
@@ -227,12 +227,12 @@ def test_concurrent_undo_busy_while_locked(dsn, runtime_dsn, setup_db, monkeypat
     t.join(timeout=5)
 
 def test_concurrent_undo_already_undone_after_commit(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_already (id SERIAL PRIMARY KEY, name TEXT, age INT);")
-        cur.execute("SELECT rowback.register_table('public', 'test_already', 'id', 'mcp_agent');")
+        cur.execute("SELECT lomberk.register_table('public', 'test_already', 'id', 'mcp_agent');")
 
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_already (name, age) VALUES ('Already', 99)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_already"])
     res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
@@ -245,29 +245,29 @@ def test_concurrent_undo_already_undone_after_commit(dsn, runtime_dsn, setup_db,
     assert "already undone" in res2.message.lower()
 
 def test_undo_privilege_boundary(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_chain (id SERIAL PRIMARY KEY, name TEXT, age INT);")
-        cur.execute("SELECT rowback.register_table('public', 'test_chain', 'id', 'mcp_agent');")
+        cur.execute("SELECT lomberk.register_table('public', 'test_chain', 'id', 'mcp_agent');")
 
     stmt = ClassifiedStatement(sql="INSERT INTO public.test_chain (name, age) VALUES ('Hacker', 100)", stmt_class=StatementClass.WRITE_DML, tables=["public.test_chain"])
     res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
 
-    hacker_executor = RowbackExecutor(runtime_dsn, runtime_dsn)
+    hacker_executor = LomberkExecutor(runtime_dsn, runtime_dsn)
     res_undo = hacker_executor.execute_undo(res.public_id)
 
     assert res_undo.status == "failed" or res_undo.status == "busy" or res_undo.status == "busy"
     assert "permission denied" in res_undo.message.lower()
 
 def test_undo_chaining_lifo(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_chain (id SERIAL PRIMARY KEY, name TEXT, age INT);")
-        cur.execute("SELECT rowback.register_table('public', 'test_chain', 'id', 'mcp_agent');")
+        cur.execute("SELECT lomberk.register_table('public', 'test_chain', 'id', 'mcp_agent');")
 
     stmt = ClassifiedStatement(
         sql='''
@@ -294,11 +294,11 @@ END $$;
 
 
 def test_idempotent_dml_replay(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    os.environ["ROWBACK_ADMIN_DSN"] = dsn
-    os.environ["ROWBACK_AGENT_DSN"] = runtime_dsn
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    os.environ["LOMBERK_ADMIN_DSN"] = dsn
+    os.environ["LOMBERK_AGENT_DSN"] = runtime_dsn
 
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     stmt = ClassifiedStatement(
         sql="INSERT INTO public.test_users (name, age) VALUES ('Idempotent Test', 25)",
@@ -323,8 +323,8 @@ def test_idempotent_dml_replay(dsn, runtime_dsn, setup_db, monkeypatch):
         assert cur.fetchone()[0] == 1
 
 def test_idempotent_approval_replay(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    control_dsn = dsn.replace('test:test@', 'rowback_control:secret@'); executor = RowbackExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    control_dsn = dsn.replace('test:test@', 'lomberk_control:secret@'); executor = LomberkExecutor(control_dsn, runtime_dsn)
 
     stmt = ClassifiedStatement(
         sql="INSERT INTO public.test_users (name, age) VALUES ('Idempotent Appr', 25)",

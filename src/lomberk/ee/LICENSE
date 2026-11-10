@@ -1,11 +1,11 @@
 Copyright (c) 2026 Yusuf Ege Usta. All rights reserved.
 
-The files in the "src/rowback/ee/" directory are licensed under the Elastic
+The files in the "src/lomberk/ee/" directory are licensed under the Elastic
 License 2.0, below. Everything outside that directory is licensed under the
 Apache License 2.0 (see the LICENSE file at the repository root).
 
-The licensor is Yusuf Ege Usta. The license key functionality is the Rowback
-Pro license check (src/rowback/ee/license.py and the code that calls it).
+The licensor is Yusuf Ege Usta. The license key functionality is the Lomberk
+Pro license check (src/lomberk/ee/license.py and the code that calls it).
 
 ----------------------------------------------------------------------------
 

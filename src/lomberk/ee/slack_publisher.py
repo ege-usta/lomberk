@@ -11,7 +11,7 @@ import logging
 
 import psycopg
 
-logger = logging.getLogger("rowback.ee.slack_publisher")
+logger = logging.getLogger("lomberk.ee.slack_publisher")
 
 SQL_PREVIEW_CHARS = 1500
 STALE_CLAIM = "2 minutes"  # a claim this old outlived its sender (crash/restart)
@@ -42,40 +42,40 @@ class SlackPublisher:
     def _claim_batch(self) -> list[tuple]:
         with psycopg.connect(self.dsn) as conn:
             conn.execute(
-                f"UPDATE rowback.slack_messages SET state = 'unknown' "
+                f"UPDATE lomberk.slack_messages SET state = 'unknown' "
                 f"WHERE state = 'publishing' AND claimed_at < now() - interval '{STALE_CLAIM}'")  # STALE_CLAIM is a module constant  # nosec B608
             return conn.execute("""
                 WITH claimed AS (
-                    INSERT INTO rowback.slack_messages (public_id, channel_id, state)
-                    SELECT c.public_id, %s, 'publishing' FROM rowback.checkpoints c
+                    INSERT INTO lomberk.slack_messages (public_id, channel_id, state)
+                    SELECT c.public_id, %s, 'publishing' FROM lomberk.checkpoints c
                     WHERE c.status = 'pending'
-                      AND NOT EXISTS (SELECT 1 FROM rowback.slack_messages m WHERE m.public_id = c.public_id)
+                      AND NOT EXISTS (SELECT 1 FROM lomberk.slack_messages m WHERE m.public_id = c.public_id)
                     ORDER BY c.id LIMIT %s
                     ON CONFLICT DO NOTHING
                     RETURNING public_id
                 )
                 SELECT c.public_id, c.agent_label, c.principal, c.classification, c.sql_text, c.created_at, p.preview
-                FROM rowback.checkpoints c JOIN claimed USING (public_id)
-                LEFT JOIN rowback.previews p USING (public_id) ORDER BY c.id
+                FROM lomberk.checkpoints c JOIN claimed USING (public_id)
+                LEFT JOIN lomberk.previews p USING (public_id) ORDER BY c.id
             """, (self.channel_id, self.batch_size)).fetchall()
 
     def _record(self, public_id: str, state: str, team_id: str | None = None, ts: str | None = None) -> None:
         with psycopg.connect(self.dsn) as conn:
             conn.execute(
-                "UPDATE rowback.slack_messages SET state = %s, team_id = %s, message_ts = %s WHERE public_id = %s",
+                "UPDATE lomberk.slack_messages SET state = %s, team_id = %s, message_ts = %s WHERE public_id = %s",
                 (state, team_id, ts, public_id))
 
     def _lookup(self, team_id: str, channel_id: str, ts: str) -> str | None:
         with psycopg.connect(self.dsn) as conn:
             row = conn.execute(
-                "SELECT public_id FROM rowback.slack_messages "
+                "SELECT public_id FROM lomberk.slack_messages "
                 "WHERE team_id = %s AND channel_id = %s AND message_ts = %s AND state = 'bound'",
                 (team_id, channel_id, ts)).fetchone()
         return row[0] if row else None
 
     # -- Slack ---------------------------------------------------------------
     def _blocks(self, public_id, agent_label, principal, classification, sql_text, created_at, preview=None) -> tuple[str, list]:
-        text = f"Rowback approval needed: {public_id}"
+        text = f"Lomberk approval needed: {public_id}"
         detail = (f"*Approval needed* `{public_id}`\n"
                   f"Agent: `{_inline(agent_label)}` ({_inline(principal)}) · {_inline(classification)} · {created_at:%Y-%m-%d %H:%M:%S %Z}")
         if preview:
@@ -86,7 +86,7 @@ class SlackPublisher:
             preview = sql_text if len(sql_text) <= SQL_PREVIEW_CHARS else sql_text[:SQL_PREVIEW_CHARS] + " …"
             detail += f"\n```{_esc(preview).replace('```', '` ` `')}```"
         else:
-            detail += f"\nReview the SQL before deciding: `rowback show {public_id}`"
+            detail += f"\nReview the SQL before deciding: `lomberk show {public_id}`"
         return text, [
             {"type": "section", "text": {"type": "mrkdwn", "text": detail}},
             {"type": "actions", "elements": [

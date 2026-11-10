@@ -15,11 +15,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-from rowback import api
-from rowback.config import SsoConfig
-from rowback.ee.sso import OidcVerifier, SsoError
+from lomberk import api
+from lomberk.config import SsoConfig
+from lomberk.ee.sso import OidcVerifier, SsoError
 
-AUD = "rowback-approvals"
+AUD = "lomberk-approvals"
 
 
 def _rsa():

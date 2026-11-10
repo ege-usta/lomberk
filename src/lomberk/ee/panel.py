@@ -2,9 +2,9 @@
 
 Sign-in: SSO (OIDC authorization code flow with PKCE, done server side) or the shared admin key.
 Session: an HMAC-signed cookie keyed from a random per-process server secret, independent of
-ROWBACK_ADMIN_KEY (so holding the admin key cannot forge a session, and a restart signs
+LOMBERK_ADMIN_KEY (so holding the admin key cannot forge a session, and a restart signs
 everyone out), HttpOnly and SameSite=Strict. State-changing requests also need the
-X-Rowback-Panel header, which a cross-site form cannot send. Agent SQL is untrusted input: the
+X-Lomberk-Panel header, which a cross-site form cannot send. Agent SQL is untrusted input: the
 page renders it as text only, and the CSP allows no inline script.
 """
 import base64
@@ -22,11 +22,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
-from rowback.audit import audit
-from rowback.ee.sso import SsoError, _get_json, _require_https
+from lomberk.audit import audit
+from lomberk.ee.sso import SsoError, _get_json, _require_https
 
-SESSION_COOKIE = "rowback_session"
-OIDC_COOKIE = "rowback_oidc"
+SESSION_COOKIE = "lomberk_session"
+OIDC_COOKIE = "lomberk_oidc"
 # Admin-key sessions; SSO sessions end sooner, when the IdP's ID token expires (usually 1 hour),
 # so removing someone at the IdP signs them out of the panel then.
 SESSION_SECONDS = 8 * 3600
@@ -46,7 +46,7 @@ _discovery: dict = {}
 
 def _api():
     # The running gateway's state; imported late to avoid an import cycle.
-    from rowback import api
+    from lomberk import api
     return api
 
 
@@ -55,10 +55,10 @@ def _b64(b: bytes) -> str:
 
 
 def _mac(payload: str) -> str:
-    # Keyed from a random per-process server secret, NOT ROWBACK_ADMIN_KEY: the admin key is
+    # Keyed from a random per-process server secret, NOT LOMBERK_ADMIN_KEY: the admin key is
     # deliberately excluded from the approval quorum, so holding it must not let anyone forge a
     # panel session (and assert an `oidc:` approver that never signed in).
-    key = hmac.new(_api()._SESSION_SECRET, b"rowback-panel-session-v1", hashlib.sha256).digest()
+    key = hmac.new(_api()._SESSION_SECRET, b"lomberk-panel-session-v1", hashlib.sha256).digest()
     return _b64(hmac.new(key, payload.encode(), hashlib.sha256).digest())
 
 
@@ -118,8 +118,8 @@ def _actor(request: Request) -> str:
 
 
 def _csrf(request: Request) -> None:
-    if request.headers.get("x-rowback-panel") != "1":
-        raise HTTPException(status_code=403, detail="Missing X-Rowback-Panel header.")
+    if request.headers.get("x-lomberk-panel") != "1":
+        raise HTTPException(status_code=403, detail="Missing X-Lomberk-Panel header.")
 
 
 def _oidc():
@@ -146,8 +146,8 @@ def _redirect_uri(cfg) -> str:
 def _exchange_code(cfg, doc: dict, code: str, verifier: str) -> str:
     form = {"grant_type": "authorization_code", "code": code, "redirect_uri": _redirect_uri(cfg),
             "client_id": cfg.audience, "code_verifier": verifier}
-    if os.environ.get("ROWBACK_SSO_CLIENT_SECRET"):
-        form["client_secret"] = os.environ["ROWBACK_SSO_CLIENT_SECRET"]
+    if os.environ.get("LOMBERK_SSO_CLIENT_SECRET"):
+        form["client_secret"] = os.environ["LOMBERK_SSO_CLIENT_SECRET"]
     req = urllib.request.Request(doc["token_endpoint"], data=urllib.parse.urlencode(form).encode(),
                                  headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
     try:
@@ -274,12 +274,12 @@ def build_panel() -> FastAPI:
     @panel.get("/api/export")
     def export(request: Request, format: str = "csv"):
         actor = _actor(request)
-        from rowback.ee.export import FORMATS, render
+        from lomberk.ee.export import FORMATS, render
         if format not in FORMATS:
             raise HTTPException(status_code=422, detail=f"format must be one of {sorted(FORMATS)}")
         rows = _api()._executor_instance.list_checkpoints()
         audit("exported", actor=actor, rows=len(rows), format=format)
         return Response(render(rows, format), media_type=FORMATS[format],
-                        headers={"Content-Disposition": f'attachment; filename="rowback-audit.{format}"'})
+                        headers={"Content-Disposition": f'attachment; filename="lomberk-audit.{format}"'})
 
     return panel

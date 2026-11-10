@@ -5,7 +5,7 @@ import pglast
 from pglast import enums
 from pglast.visitors import Visitor, referenced_relations
 
-from rowback.models import ClassifiedStatement, StatementClass
+from lomberk.models import ClassifiedStatement, StatementClass
 
 
 class StatementTypeVisitor(Visitor):
@@ -81,7 +81,7 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
 
         # Check for blocked schemas
         for table in tables:
-            if table.startswith(("rowback.", "rowback_trash.")) or table in ("rowback", "rowback_trash"):
+            if table.startswith(("lomberk.", "lomberk_trash.")) or table in ("lomberk", "lomberk_trash"):
                 stmt_class = StatementClass.BLOCKED
 
         results.append(ClassifiedStatement(

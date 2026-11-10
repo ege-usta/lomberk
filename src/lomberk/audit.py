@@ -5,14 +5,14 @@ from collections import Counter
 from datetime import UTC, datetime
 
 # Configure standard logger to write JSON to a file or stream
-logger = logging.getLogger("rowback_audit")
+logger = logging.getLogger("lomberk_audit")
 logger.setLevel(logging.INFO)
 # Audit lines carry full SQL (possible secrets/PII). Never let them propagate to the
 # root logger, where an operator's INFO handler would copy them to stdout/journald.
 logger.propagate = False
 
 # Audit lines contain full SQL text (may include PII): keep them owner-only, never in /tmp.
-log_path = os.environ.get("ROWBACK_AUDIT_LOG") or os.path.expanduser("~/.local/state/rowback/audit.jsonl")
+log_path = os.environ.get("LOMBERK_AUDIT_LOG") or os.path.expanduser("~/.local/state/lomberk/audit.jsonl")
 os.makedirs(os.path.dirname(log_path) or ".", mode=0o700, exist_ok=True)
 os.close(os.open(log_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600))
 handler = logging.FileHandler(log_path)
@@ -33,7 +33,7 @@ def audit(event: str, *, actor: str, public_id: str | None = None, **fields) -> 
     EVENTS[event] += 1
     record = {
         "timestamp": datetime.now(UTC).isoformat(),
-        "event_type": f"rowback.{event}",
+        "event_type": f"lomberk.{event}",
         "actor": actor,
         "public_id": public_id,
         **fields,

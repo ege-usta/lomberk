@@ -7,15 +7,15 @@ import pytest
 from fastapi.testclient import TestClient
 from testcontainers.community.postgres import PostgresContainer
 
-import rowback.api
-import rowback.config
-from rowback.api import app, get_executor, get_policy_engine
-from rowback.ee.slack import SlackInteractionAdapter
+import lomberk.api
+import lomberk.config
+from lomberk.api import app, get_executor, get_policy_engine
+from lomberk.ee.slack import SlackInteractionAdapter
 
 
 @pytest.fixture(scope="module")
 def postgres():
-    postgres = PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine"))
+    postgres = PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine"))
     postgres.start()
     yield postgres
     postgres.stop()
@@ -34,40 +34,40 @@ def runtime_dsn(dsn):
 def admin_dsn(dsn):
     from urllib.parse import urlparse, urlunparse
     parsed = urlparse(dsn)
-    return urlunparse((parsed.scheme, f"rowback_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return urlunparse((parsed.scheme, f"lomberk_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 @pytest.fixture(scope="module")
 def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
-        cur.execute("DROP ROLE IF EXISTS rowback_control")
-        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS lomberk_control")
+        cur.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
 
-    from rowback.capture.install import install_rowback
-    install_rowback(dsn, control_role='rowback_control', agent_role='mcp_agent')
+    from lomberk.capture.install import install_lomberk
+    install_lomberk(dsn, control_role='lomberk_control', agent_role='mcp_agent')
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.users (id SERIAL PRIMARY KEY, data TEXT)")
         cur.execute("INSERT INTO public.users (data) VALUES ('val1')")
-        cur.execute("SELECT rowback.register_table('public', 'users', 'id', 'mcp_agent')")
+        cur.execute("SELECT lomberk.register_table('public', 'users', 'id', 'mcp_agent')")
         cur.execute("GRANT ALL ON SCHEMA public TO mcp_agent")
         cur.execute("GRANT ALL ON ALL TABLES IN SCHEMA public TO mcp_agent")
         cur.execute("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO mcp_agent")
 
 @pytest.fixture
 def auth_and_config(monkeypatch, runtime_dsn, admin_dsn):
-    monkeypatch.setenv("ROWBACK_AGENT_DSN", runtime_dsn)
-    monkeypatch.setenv("ROWBACK_ADMIN_DSN", admin_dsn)
-    monkeypatch.setenv("ROWBACK_API_KEY", "real_agent_key")
-    monkeypatch.setenv("ROWBACK_ADMIN_KEY", "real_admin_key")
+    monkeypatch.setenv("LOMBERK_AGENT_DSN", runtime_dsn)
+    monkeypatch.setenv("LOMBERK_ADMIN_DSN", admin_dsn)
+    monkeypatch.setenv("LOMBERK_API_KEY", "real_agent_key")
+    monkeypatch.setenv("LOMBERK_ADMIN_KEY", "real_admin_key")
 
-    old_api_key = rowback.api._API_KEY
-    old_admin_key = rowback.api._ADMIN_KEY
-    rowback.api._API_KEY = "real_agent_key"
-    rowback.api._ADMIN_KEY = "real_admin_key"
+    old_api_key = lomberk.api._API_KEY
+    old_admin_key = lomberk.api._ADMIN_KEY
+    lomberk.api._API_KEY = "real_agent_key"
+    lomberk.api._ADMIN_KEY = "real_admin_key"
 
-    original_load = rowback.config.load_config
+    original_load = lomberk.config.load_config
     def mock_load(*a, **kw):
         cfg = original_load(*a, **kw)
         cfg.limits.max_rows_without_approval = 0
@@ -75,11 +75,11 @@ def auth_and_config(monkeypatch, runtime_dsn, admin_dsn):
         return cfg
 
     def override_get_executor():
-        from rowback.executor import RowbackExecutor
-        return RowbackExecutor(admin_dsn, runtime_dsn)
+        from lomberk.executor import LomberkExecutor
+        return LomberkExecutor(admin_dsn, runtime_dsn)
 
     def override_get_policy_engine():
-        from rowback.policy import PolicyEngine
+        from lomberk.policy import PolicyEngine
         return PolicyEngine(mock_load())
 
     app.dependency_overrides.clear()
@@ -88,8 +88,8 @@ def auth_and_config(monkeypatch, runtime_dsn, admin_dsn):
 
     yield
 
-    rowback.api._API_KEY = old_api_key
-    rowback.api._ADMIN_KEY = old_admin_key
+    lomberk.api._API_KEY = old_api_key
+    lomberk.api._ADMIN_KEY = old_admin_key
     app.dependency_overrides.clear()
 
 @pytest.mark.asyncio
@@ -159,19 +159,19 @@ async def test_slack_adapter_db_concurrency_and_auth(setup_db, auth_and_config, 
 
 @pytest.mark.asyncio
 async def test_api_lifespan_slack_transport_disabled(setup_db, auth_and_config, monkeypatch):
-    import rowback.api
+    import lomberk.api
     # Even if token is present, it shouldn't connect if NOT enabled
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake_token")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake_token")
-    monkeypatch.delenv("ROWBACK_SLACK_ENABLED", raising=False)
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "fake_token")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "fake_token")
+    monkeypatch.delenv("LOMBERK_SLACK_ENABLED", raising=False)
 
-    async with rowback.api.lifespan(app):
-        assert getattr(rowback.api, "_slack_transport_instance", None) is None
+    async with lomberk.api.lifespan(app):
+        assert getattr(lomberk.api, "_slack_transport_instance", None) is None
 
 @pytest.fixture(autouse=True)
 def clean_app_state():
-    import rowback.api
-    app = rowback.api.app
+    import lomberk.api
+    app = lomberk.api.app
     # Save original state if we want, but these are set per test
     yield
     for attr in ["slack_target_resolver", "slack_update_callback", "slack_client_factory", "_db_workers"]:
@@ -180,19 +180,19 @@ def clean_app_state():
 
 @pytest.mark.asyncio
 async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_and_config, monkeypatch):
-    import rowback.api
-    monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
+    import lomberk.api
+    monkeypatch.setenv("LOMBERK_SLACK_ENABLED", "true")
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "fake")
 
-    original_config = rowback.config.load_config()
+    original_config = lomberk.config.load_config()
     original_config.slack.admin_allowlist = ["U1"]
     original_config.slack.team_allowlist = []
-    monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
+    monkeypatch.setattr(lomberk.api, "load_config", lambda: original_config)
 
     # 1. Missing team allowlist
     with pytest.raises(ValueError, match="team_allowlist is missing or empty"):
-        async with rowback.api.lifespan(app):
+        async with lomberk.api.lifespan(app):
             pass
 
     original_config.slack.team_allowlist = ["T1"]
@@ -201,7 +201,7 @@ async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_
     async def fake_resolver(t, c, ts): return "cp_test"
     app.state.slack_target_resolver = fake_resolver
     with pytest.raises(ValueError, match="slack_update_callback dependency missing or not an async function"):
-        async with rowback.api.lifespan(app):
+        async with lomberk.api.lifespan(app):
             pass
 
     # 3. Missing resolver
@@ -209,26 +209,26 @@ async def test_api_lifespan_slack_transport_missing_dependencies(setup_db, auth_
     async def fake_update(c, ts, m): pass
     app.state.slack_update_callback = fake_update
     with pytest.raises(ValueError, match="slack_target_resolver dependency missing or not an async function"):
-        async with rowback.api.lifespan(app):
+        async with lomberk.api.lifespan(app):
             pass
 
     # 4. Sync function bypass prevention
     app.state.slack_target_resolver = lambda t, c, ts: "cp_test"
     with pytest.raises(ValueError, match="slack_target_resolver dependency missing or not an async function"):
-        async with rowback.api.lifespan(app):
+        async with lomberk.api.lifespan(app):
             pass
 
 @pytest.mark.asyncio
 async def test_api_lifespan_slack_transport_successful_fake(setup_db, auth_and_config, monkeypatch):
-    import rowback.api
-    monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
+    import lomberk.api
+    monkeypatch.setenv("LOMBERK_SLACK_ENABLED", "true")
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "fake")
 
-    original_config = rowback.config.load_config()
+    original_config = lomberk.config.load_config()
     original_config.slack.admin_allowlist = ["U1"]
     original_config.slack.team_allowlist = ["T1"]
-    monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
+    monkeypatch.setattr(lomberk.api, "load_config", lambda: original_config)
 
     from unittest.mock import AsyncMock, MagicMock
 
@@ -260,8 +260,8 @@ async def test_api_lifespan_slack_transport_successful_fake(setup_db, auth_and_c
         approve_called = True
         return MagicMock(status="applied")
 
-    async with rowback.api.lifespan(app):
-        adapter = rowback.api._slack_transport_instance.business_adapter
+    async with lomberk.api.lifespan(app):
+        adapter = lomberk.api._slack_transport_instance.business_adapter
 
         # Override the bound callback for this test to avoid real DB execution
         # (Alternatively, we could let it hit the real DB if setup_db provides one)
@@ -314,17 +314,17 @@ async def test_api_lifespan_slack_transport_successful_fake(setup_db, auth_and_c
 
 @pytest.mark.asyncio
 async def test_api_lifespan_slack_transport_exception_cleanup(setup_db, auth_and_config, monkeypatch):
-    import rowback.api
-    from rowback.config import load_config
+    import lomberk.api
+    from lomberk.config import load_config
 
-    monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
+    monkeypatch.setenv("LOMBERK_SLACK_ENABLED", "true")
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "fake")
 
     original_config = load_config()
     original_config.slack.admin_allowlist = ["U123"]
     original_config.slack.team_allowlist = ["T1"]
-    monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
+    monkeypatch.setattr(lomberk.api, "load_config", lambda: original_config)
 
 
 
@@ -337,23 +337,23 @@ async def test_api_lifespan_slack_transport_exception_cleanup(setup_db, auth_and
     app.state.slack_update_callback = dummy_cb
     app.state.slack_target_resolver = dummy_cb
 
-    async with rowback.api.lifespan(app):
-        assert rowback.api._slack_transport_instance is not None
-        assert rowback.api._slack_transport_instance.client is None
+    async with lomberk.api.lifespan(app):
+        assert lomberk.api._slack_transport_instance is not None
+        assert lomberk.api._slack_transport_instance.client is None
 
     del app.state.slack_client_factory
 
 @pytest.mark.asyncio
 async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monkeypatch):
-    import rowback.api
-    monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
+    import lomberk.api
+    monkeypatch.setenv("LOMBERK_SLACK_ENABLED", "true")
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "fake")
 
-    original_config = rowback.config.load_config()
+    original_config = lomberk.config.load_config()
     original_config.slack.admin_allowlist = ["U_ADMIN"]
     original_config.slack.team_allowlist = ["T1"]
-    monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
+    monkeypatch.setattr(lomberk.api, "load_config", lambda: original_config)
 
     from unittest.mock import AsyncMock, MagicMock
     def mock_factory(token):
@@ -366,8 +366,8 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
     app.state.slack_update_callback = AsyncMock()
     app.state.slack_target_resolver = AsyncMock(return_value="cp_mock")
 
-    async with rowback.api.lifespan(app):
-        adapter = rowback.api._slack_transport_instance.business_adapter
+    async with lomberk.api.lifespan(app):
+        adapter = lomberk.api._slack_transport_instance.business_adapter
         adapter.shutdown_timeout = 0.05  # Force very short wait
 
         import threading
@@ -383,7 +383,7 @@ async def test_api_lifespan_thread_cancellation(setup_db, auth_and_config, monke
             thread_finished.set()
             return MagicMock(status="applied")
 
-        monkeypatch.setattr(rowback.api._executor_instance, "execute_pending", slow_execute)
+        monkeypatch.setattr(lomberk.api._executor_instance, "execute_pending", slow_execute)
 
         async def resolve_target(*args):
             return "cp_mock"
@@ -448,15 +448,15 @@ async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, mon
     # Test worker completion within budget and exceeding budget on lifespan exit
     import logging
 
-    import rowback.api
-    monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
+    import lomberk.api
+    monkeypatch.setenv("LOMBERK_SLACK_ENABLED", "true")
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "fake")
 
-    original_config = rowback.config.load_config()
+    original_config = lomberk.config.load_config()
     original_config.slack.admin_allowlist = ["U1"]
     original_config.slack.team_allowlist = ["T1"]
-    monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
+    monkeypatch.setattr(lomberk.api, "load_config", lambda: original_config)
 
     from unittest.mock import AsyncMock, MagicMock
     app.state.slack_target_resolver = AsyncMock(return_value="cp_test")
@@ -464,8 +464,8 @@ async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, mon
     app.state.slack_client_factory = lambda token: MagicMock(connect=AsyncMock(), close=AsyncMock(), socket_mode_request_listeners=[])
 
     # Variant 1: Finishes within budget
-    with caplog.at_level(logging.INFO, logger="rowback.api"):
-        async with rowback.api.lifespan(app):
+    with caplog.at_level(logging.INFO, logger="lomberk.api"):
+        async with lomberk.api.lifespan(app):
             # inject a fake worker
             async def fake_worker(): await asyncio.sleep(0.05)
             t = asyncio.create_task(fake_worker())
@@ -479,8 +479,8 @@ async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, mon
     caplog.clear()
 
     # Variant 2: Exceeds budget
-    with caplog.at_level(logging.INFO, logger="rowback.api"):
-        async with rowback.api.lifespan(app):
+    with caplog.at_level(logging.INFO, logger="lomberk.api"):
+        async with lomberk.api.lifespan(app):
             # inject a fake worker
             async def slow_worker(): await asyncio.sleep(6.0) # > 5s
             t = asyncio.create_task(slow_worker())
@@ -504,25 +504,25 @@ async def test_api_lifespan_worker_drain_variants(setup_db, auth_and_config, mon
 @pytest.mark.asyncio
 async def test_api_worker_tracking_capacity_and_exception(setup_db, auth_and_config, monkeypatch, caplog):
 
-    import rowback.api
-    monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake")
+    import lomberk.api
+    monkeypatch.setenv("LOMBERK_SLACK_ENABLED", "true")
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "fake")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "fake")
 
-    original_config = rowback.config.load_config()
+    original_config = lomberk.config.load_config()
     original_config.slack.admin_allowlist = ["U1"]
     original_config.slack.team_allowlist = ["T1"]
-    monkeypatch.setattr(rowback.api, "load_config", lambda: original_config)
+    monkeypatch.setattr(lomberk.api, "load_config", lambda: original_config)
 
     from unittest.mock import AsyncMock, MagicMock
     app.state.slack_target_resolver = AsyncMock(return_value="cp_test")
     app.state.slack_update_callback = AsyncMock()
     app.state.slack_client_factory = lambda token: MagicMock(connect=AsyncMock(), close=AsyncMock(), socket_mode_request_listeners=[])
 
-    async with rowback.api.lifespan(app):
+    async with lomberk.api.lifespan(app):
         import threading
 
-        from rowback.ee.slack import TaskCapacityExceededError
+        from lomberk.ee.slack import TaskCapacityExceededError
 
         release_event = threading.Event()
 
@@ -532,9 +532,9 @@ async def test_api_worker_tracking_capacity_and_exception(setup_db, auth_and_con
                 return MagicMock(status="applied")
             raise ValueError("Test detached exception")
 
-        monkeypatch.setattr(rowback.api._executor_instance, "execute_pending", hanging_execute)
+        monkeypatch.setattr(lomberk.api._executor_instance, "execute_pending", hanging_execute)
 
-        adapter = rowback.api._slack_transport_instance.business_adapter
+        adapter = lomberk.api._slack_transport_instance.business_adapter
 
         tasks = []
         try:
@@ -602,22 +602,22 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     from offline_pilot import InMemoryBindingStore, OfflinePublisher, OfflineUpdater, PublishOutcomeUnknown
     from slack_sdk.socket_mode.request import SocketModeRequest
 
-    import rowback.api
-    from rowback.api import app
+    import lomberk.api
+    from lomberk.api import app
 
-    monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "fake_app_token")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "fake_bot_token")
+    monkeypatch.setenv("LOMBERK_SLACK_ENABLED", "true")
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "fake_app_token")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "fake_bot_token")
 
-    config = rowback.config.load_config()
+    config = lomberk.config.load_config()
     config.slack.admin_allowlist = ["U_ADMIN"]
     config.slack.team_allowlist = ["T_VALID"]
     # Force real policy to block this table
     config.protected_tables = ["public.test_e2e"]
-    monkeypatch.setattr(rowback.api, "load_config", lambda: config)
+    monkeypatch.setattr(lomberk.api, "load_config", lambda: config)
 
-    from rowback.policy import PolicyEngine
-    app.dependency_overrides[rowback.api.get_policy_engine] = lambda: PolicyEngine(config)
+    from lomberk.policy import PolicyEngine
+    app.dependency_overrides[lomberk.api.get_policy_engine] = lambda: PolicyEngine(config)
 
     binding_store = InMemoryBindingStore()
     publisher = OfflinePublisher(binding_store)
@@ -634,12 +634,12 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
     app.state.slack_client_factory = lambda token: fake_socket_client
 
     import psycopg
-    admin_dsn = os.environ.get("ROWBACK_ADMIN_DSN")
+    admin_dsn = os.environ.get("LOMBERK_ADMIN_DSN")
 
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE IF NOT EXISTS public.test_e2e (id int PRIMARY KEY);")
-        cur.execute("SELECT rowback.register_table('public', 'test_e2e', 'id', 'mcp_agent');")
-        # Do NOT grant to rowback_control, only mcp_agent needs DML on business table
+        cur.execute("SELECT lomberk.register_table('public', 'test_e2e', 'id', 'mcp_agent');")
+        # Do NOT grant to lomberk_control, only mcp_agent needs DML on business table
         cur.execute("GRANT ALL PRIVILEGES ON public.test_e2e TO mcp_agent;")
         conn.commit()
 
@@ -659,9 +659,9 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         # Verify completely pending and empty before action
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (pid,))
+                cur.execute("SELECT status FROM lomberk.checkpoints WHERE public_id = %s", (pid,))
                 assert cur.fetchone()[0] == "pending"
-                cur.execute("SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = (SELECT id FROM rowback.checkpoints WHERE public_id = %s)", (pid,))
+                cur.execute("SELECT count(*) FROM lomberk.row_changes WHERE checkpoint_id = (SELECT id FROM lomberk.checkpoints WHERE public_id = %s)", (pid,))
                 assert cur.fetchone()[0] == 0
         with psycopg.connect(dsn) as conn:
             with conn.cursor() as cur:
@@ -672,8 +672,8 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
         ts = await publisher.publish_checkpoint("T_VALID", "C_VALID", pid)
         return pid, ts
 
-    async with rowback.api.lifespan(app):
-        transport = rowback.api._slack_transport_instance
+    async with lomberk.api.lifespan(app):
+        transport = lomberk.api._slack_transport_instance
         adapter = transport.business_adapter
 
         async def deliver(payload, envelope_id):
@@ -704,9 +704,9 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
 
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (pid1,))
+                cur.execute("SELECT status FROM lomberk.checkpoints WHERE public_id = %s", (pid1,))
                 assert cur.fetchone()[0] == "applied"
-                cur.execute("SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = (SELECT id FROM rowback.checkpoints WHERE public_id = %s)", (pid1,))
+                cur.execute("SELECT count(*) FROM lomberk.row_changes WHERE checkpoint_id = (SELECT id FROM lomberk.checkpoints WHERE public_id = %s)", (pid1,))
                 assert cur.fetchone()[0] == 1
         with psycopg.connect(dsn) as conn:
             with conn.cursor() as cur:
@@ -741,7 +741,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
                 assert cur.fetchone()[0] == 1
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = (SELECT id FROM rowback.checkpoints WHERE public_id = %s)", (pid1,))
+                cur.execute("SELECT count(*) FROM lomberk.row_changes WHERE checkpoint_id = (SELECT id FROM lomberk.checkpoints WHERE public_id = %s)", (pid1,))
                 assert cur.fetchone()[0] == 1
 
         # Cleanup for next cases
@@ -767,9 +767,9 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
 
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (pid2,))
+                cur.execute("SELECT status FROM lomberk.checkpoints WHERE public_id = %s", (pid2,))
                 assert cur.fetchone()[0] == "rejected"
-                cur.execute("SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = (SELECT id FROM rowback.checkpoints WHERE public_id = %s)", (pid2,))
+                cur.execute("SELECT count(*) FROM lomberk.row_changes WHERE checkpoint_id = (SELECT id FROM lomberk.checkpoints WHERE public_id = %s)", (pid2,))
                 assert cur.fetchone()[0] == 0
         with psycopg.connect(dsn) as conn:
             with conn.cursor() as cur:
@@ -806,7 +806,7 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
 
         with psycopg.connect(admin_dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (pid4,))
+                cur.execute("SELECT status FROM lomberk.checkpoints WHERE public_id = %s", (pid4,))
                 assert cur.fetchone()[0] == "pending", "Must remain pending (unmutated)"
 
         # ---------------------------------------------------------
@@ -838,9 +838,9 @@ async def test_offline_pilot_e2e_flow(dsn, setup_db, auth_and_config, monkeypatc
             await deliver(payload, f"unauthorized-{index}")
             assert len(updater.updates) == count_before
             with psycopg.connect(admin_dsn) as conn, conn.cursor() as cur:
-                cur.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (pid5,))
+                cur.execute("SELECT status FROM lomberk.checkpoints WHERE public_id = %s", (pid5,))
                 assert cur.fetchone()[0] == "pending"
-                cur.execute("SELECT count(*) FROM rowback.row_changes WHERE checkpoint_id = (SELECT id FROM rowback.checkpoints WHERE public_id = %s)", (pid5,))
+                cur.execute("SELECT count(*) FROM lomberk.row_changes WHERE checkpoint_id = (SELECT id FROM lomberk.checkpoints WHERE public_id = %s)", (pid5,))
                 assert cur.fetchone()[0] == 0
             with psycopg.connect(dsn) as conn, conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM public.test_e2e")

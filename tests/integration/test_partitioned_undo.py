@@ -1,6 +1,6 @@
 """Declarative partitioning: register the partitioned table once, and every write through it,
 including one that moves a row to another partition, is captured and can be undone.
-Runs on whichever PostgreSQL ROWBACK_TEST_PG_IMAGE names (CI covers 14-18); 14 differs because
+Runs on whichever PostgreSQL LOMBERK_TEST_PG_IMAGE names (CI covers 14-18); 14 differs because
 triggers cloned to partitions are marked internal there."""
 import os
 
@@ -8,21 +8,21 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.config import RowbackConfig
-from rowback.executor import RowbackExecutor
-from rowback.policy import PolicyEngine
-from rowback.sql.classify import classify_sql
+from lomberk.capture.install import install_lomberk
+from lomberk.config import LomberkConfig
+from lomberk.executor import LomberkExecutor
+from lomberk.policy import PolicyEngine
+from lomberk.sql.classify import classify_sql
 
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            c.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             c.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(url, autocommit=True) as c:
             c.execute("CREATE TABLE public.events (region TEXT, id INT, v TEXT, PRIMARY KEY (region, id)) PARTITION BY LIST (region)")
             c.execute("CREATE TABLE public.events_eu PARTITION OF public.events FOR VALUES IN ('eu')")
@@ -30,20 +30,20 @@ def db():
             c.execute("CREATE TABLE public.events_us_low PARTITION OF public.events_us FOR VALUES FROM (0) TO (1000)")
             c.execute("CREATE TABLE public.events_us_high PARTITION OF public.events_us FOR VALUES FROM (1000) TO (MAXVALUE)")
             c.execute("INSERT INTO public.events VALUES ('eu', 1, 'a'), ('eu', 2, 'b'), ('us', 5, 'c'), ('us', 2000, 'd')")
-            c.execute("SELECT rowback.register_table('public', 'events', NULL, 'mcp_agent')")
+            c.execute("SELECT lomberk.register_table('public', 'events', NULL, 'mcp_agent')")
             c.execute("CREATE TABLE public.stamped (k INT, id INT, v TEXT, PRIMARY KEY (k, id)) PARTITION BY LIST (k)")
             c.execute("CREATE TABLE public.stamped_1 PARTITION OF public.stamped FOR VALUES IN (1)")
             c.execute("INSERT INTO public.stamped VALUES (1, 1, 'x')")
-            c.execute("SELECT rowback.register_table('public', 'stamped', NULL, 'mcp_agent')")
+            c.execute("SELECT lomberk.register_table('public', 'stamped', NULL, 'mcp_agent')")
             c.execute("CREATE FUNCTION public.noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$")
             c.execute("CREATE TRIGGER noop BEFORE UPDATE ON public.stamped FOR EACH ROW EXECUTE FUNCTION public.noop()")
         host = url.split("@", 1)[1]
-        yield url, RowbackExecutor(f"postgresql://rowback_control:secret@{host}",
+        yield url, LomberkExecutor(f"postgresql://lomberk_control:secret@{host}",
                                    f"postgresql://mcp_agent:secret@{host}", max_rows_without_approval=50)
 
 
 def run(ex, sql):
-    return ex.execute(PolicyEngine(RowbackConfig()).evaluate(classify_sql(sql)[0]), agent_label="t", principal="t")
+    return ex.execute(PolicyEngine(LomberkConfig()).evaluate(classify_sql(sql)[0]), agent_label="t", principal="t")
 
 
 def snapshot(url):
@@ -95,19 +95,19 @@ def test_writing_to_a_partition_directly_is_refused(db):
 def test_registering_a_partition_points_at_its_parent(db):
     url, _ = db
     with psycopg.connect(url, autocommit=True) as c, pytest.raises(psycopg.errors.RaiseException, match="register its partitioned table public.events instead"):
-        c.execute("SELECT rowback.register_table('public', 'events_eu', NULL, 'mcp_agent')")
+        c.execute("SELECT lomberk.register_table('public', 'events_eu', NULL, 'mcp_agent')")
 
 
 def test_a_partition_with_capture_switched_off_blocks_the_write(db):
     url, ex = db
     with psycopg.connect(url, autocommit=True) as c:
-        c.execute("ALTER TABLE public.events_us_low DISABLE TRIGGER rowback_capture")
+        c.execute("ALTER TABLE public.events_us_low DISABLE TRIGGER lomberk_capture")
     try:
         res = run(ex, "UPDATE public.events SET v = 'q' WHERE region = 'eu' AND id = 1")
-        assert res.status == "failed" and "events_us_low has no enabled Rowback capture trigger" in res.message
+        assert res.status == "failed" and "events_us_low has no enabled Lomberk capture trigger" in res.message
     finally:
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("ALTER TABLE public.events_us_low ENABLE TRIGGER rowback_capture")
+            c.execute("ALTER TABLE public.events_us_low ENABLE TRIGGER lomberk_capture")
 
 
 def test_partitioned_table_with_its_own_trigger_is_refused_before_writing(db):
@@ -117,4 +117,4 @@ def test_partitioned_table_with_its_own_trigger_is_refused_before_writing(db):
     with psycopg.connect(url) as c:
         assert c.execute("SELECT v FROM public.stamped").fetchone()[0] == "x"
     with psycopg.connect(url, autocommit=True) as c, pytest.raises(psycopg.errors.RaiseException, match="not supported yet"):
-        c.execute("SELECT rowback.register_table('public', 'stamped', NULL, 'mcp_agent', '{}', true)")
+        c.execute("SELECT lomberk.register_table('public', 'stamped', NULL, 'mcp_agent', '{}', true)")

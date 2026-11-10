@@ -5,7 +5,7 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
+from lomberk.capture.install import install_lomberk
 
 # primary_key_columns: a plain catalog read (not SECURITY DEFINER) the pre-write check needs.
 AGENT_MAY_EXECUTE = {"claim_checkpoint", "finish_checkpoint", "unprotected_cascade_child", "primary_key_columns", "preview_changes",
@@ -14,20 +14,20 @@ AGENT_MAY_EXECUTE = {"claim_checkpoint", "finish_checkpoint", "unprotected_casca
 
 @pytest.fixture(scope="module")
 def dsn():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            conn.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             conn.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")  # upgrades re-run it
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")  # upgrades re-run it
         yield url
 
 
 def _functions(conn, where: str) -> set[str]:
     return {r[0] for r in conn.execute(
         "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-        f"WHERE n.nspname = 'rowback' AND {where}")}
+        f"WHERE n.nspname = 'lomberk' AND {where}")}
 
 
 def test_every_security_definer_function_pins_search_path(dsn):
@@ -56,4 +56,4 @@ def test_control_role_cannot_run_register_table(dsn):
     # must not be able to grant itself DML/SELECT on arbitrary tables through it.
     with psycopg.connect(dsn) as conn:
         assert not _functions(conn, "p.proname = 'register_table' "
-                              "AND has_function_privilege('rowback_control', p.oid, 'EXECUTE')")
+                              "AND has_function_privilege('lomberk_control', p.oid, 'EXECUTE')")

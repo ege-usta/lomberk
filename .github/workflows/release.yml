@@ -1,6 +1,6 @@
 # Push a tag like v0.2.0 (matching pyproject's version) to publish:
 #   - the package to PyPI (trusted publishing: no token stored here; set it up once on pypi.org)
-#   - the gateway image to ghcr.io/ege-usta/rowback:<version> and :latest
+#   - the gateway image to ghcr.io/ege-usta/lomberk:<version> and :latest
 #   - the server entry (server.json) to the MCP Registry, once PyPI has the package
 #   - a GitHub release with generated notes
 name: Release

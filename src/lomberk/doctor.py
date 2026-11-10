@@ -1,13 +1,13 @@
-"""`rowback doctor`: checks a deployment read-only and says how to fix each problem."""
+"""`lomberk doctor`: checks a deployment read-only and says how to fix each problem."""
 import os
 
 import psycopg
 import yaml
 from pydantic import ValidationError
 
-from rowback.config import (
+from lomberk.config import (
     CONFIG_ENV,
-    RowbackConfig,
+    LomberkConfig,
     config_error_message,
     config_path,
     load_config,
@@ -40,9 +40,9 @@ def run_checks(path: str | None = None) -> list[tuple[str, str, str]]:
             return out
         add(OK, f"{path} is valid")
     else:
-        config = RowbackConfig()
+        config = LomberkConfig()
         add(WARN, f"no {path} in this directory, so defaults apply (no protected tables)",
-            f"Run the gateway from the directory that holds rowback.yaml, or set {CONFIG_ENV} to its path.")
+            f"Run the gateway from the directory that holds lomberk.yaml, or set {CONFIG_ENV} to its path.")
 
     control, agent = _env_checks(config, add)
     if control and agent:
@@ -58,14 +58,14 @@ def _env_checks(config, add):
         if not value:
             add(FAIL, f"{env} is not set", f"Set it to the {label} role's connection string, e.g. postgresql://{label}_role:…@host/db")
         dsns.append(value)
-    agent_key, admin_key = os.environ.get("ROWBACK_API_KEY"), os.environ.get("ROWBACK_ADMIN_KEY")
-    for env, value in (("ROWBACK_API_KEY", agent_key), ("ROWBACK_ADMIN_KEY", admin_key)):
+    agent_key, admin_key = os.environ.get("LOMBERK_API_KEY"), os.environ.get("LOMBERK_ADMIN_KEY")
+    for env, value in (("LOMBERK_API_KEY", agent_key), ("LOMBERK_ADMIN_KEY", admin_key)):
         if not value:
             add(FAIL, f"{env} is not set", "Generate one with: openssl rand -hex 32")
         elif reason := weak_key_reason(value):
-            if os.environ.get("ROWBACK_ALLOW_WEAK_KEYS", "").lower() == "true":
-                add(WARN, f"{env} {reason}; accepted only because ROWBACK_ALLOW_WEAK_KEYS=true",
-                    "Fine on a laptop demo. Anywhere else: openssl rand -hex 32, and unset ROWBACK_ALLOW_WEAK_KEYS.")
+            if os.environ.get("LOMBERK_ALLOW_WEAK_KEYS", "").lower() == "true":
+                add(WARN, f"{env} {reason}; accepted only because LOMBERK_ALLOW_WEAK_KEYS=true",
+                    "Fine on a laptop demo. Anywhere else: openssl rand -hex 32, and unset LOMBERK_ALLOW_WEAK_KEYS.")
             else:
                 add(FAIL, f"{env} {reason}, so the gateway refuses to start", "Use a random key: openssl rand -hex 32")
     if agent_key and agent_key == admin_key:
@@ -89,7 +89,7 @@ def _db_checks(config, control: str, agent: str, add) -> None:
         return
     if roles["control"][0] == roles["agent"][0]:
         add(FAIL, f"both connection strings log in as {roles['agent'][0]}",
-            "Use two roles: a control role for Rowback and a separate agent role.")
+            "Use two roles: a control role for Lomberk and a separate agent role.")
     for label, (user, superuser) in roles.items():
         if superuser:
             add(FAIL, f"the {label} role {user} is a superuser", f"Use a non-superuser role for {label}.")
@@ -98,27 +98,27 @@ def _db_checks(config, control: str, agent: str, add) -> None:
 
     with psycopg.connect(control, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn:
         has_schema, has_approvals = conn.execute(
-            "SELECT to_regclass('rowback.checkpoints') IS NOT NULL, to_regclass('rowback.approvals') IS NOT NULL").fetchone()
+            "SELECT to_regclass('lomberk.checkpoints') IS NOT NULL, to_regclass('lomberk.approvals') IS NOT NULL").fetchone()
         if not has_schema:
-            add(FAIL, "Rowback is not installed in this database",
-                "Run: rowback init --control-role <control> --agent-role <agent>  (with ROWBACK_INSTALL_DSN set to an owner)")
+            add(FAIL, "Lomberk is not installed in this database",
+                "Run: lomberk init --control-role <control> --agent-role <agent>  (with LOMBERK_INSTALL_DSN set to an owner)")
             return
         if not has_approvals:
-            add(FAIL, "the Rowback schema is from an older version", "Re-run rowback init; it is safe to repeat and upgrades in place.")
+            add(FAIL, "the Lomberk schema is from an older version", "Re-run lomberk init; it is safe to repeat and upgrades in place.")
             return
-        registered = {f"{s}.{t}" for s, t in conn.execute("SELECT schema_name, table_name FROM rowback.registered_tables")}
+        registered = {f"{s}.{t}" for s, t in conn.execute("SELECT schema_name, table_name FROM lomberk.registered_tables")}
         _secret_column_checks(config, conn, roles["agent"][0], add)
-        checked, broken, _ = conn.execute("SELECT * FROM rowback.verify_ledger()").fetchone()
+        checked, broken, _ = conn.execute("SELECT * FROM lomberk.verify_ledger()").fetchone()
 
     if registered:
         add(OK, f"{len(registered)} table(s) registered for undo: {', '.join(sorted(registered))}")
     else:
         add(WARN, "no tables are registered, so the agent can only read",
-            "Register each table the agent may write: rowback register public.orders --agent-role <agent>")
+            "Register each table the agent may write: lomberk register public.orders --agent-role <agent>")
     missing = sorted(set(config.protected_tables) - registered)
     if missing:
         add(WARN, f"protected but not registered: {', '.join(missing)}. Agent writes to them will be refused",
-            "Register them with rowback register, or remove them from protected_tables.")
+            "Register them with lomberk register, or remove them from protected_tables.")
     if broken:
         add(FAIL, f"the ledger is broken at checkpoint {broken}", "Someone edited history in the database. Investigate before trusting it.")
     else:
@@ -135,12 +135,12 @@ def _secret_column_checks(config, conn, agent_role: str, add) -> None:
     """Columns the agent role can SELECT in the database: secret ones should be hidden there too."""
     import re
 
-    from rowback.sql.classify import is_secret
+    from lomberk.sql.classify import is_secret
     rows = conn.execute(
         "SELECT n.nspname || '.' || c.relname || '.' || a.attname, a.attname, format_type(a.atttypid, NULL) "
         "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
         "WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND a.attnum > 0 AND NOT a.attisdropped "
-        "AND n.nspname NOT LIKE 'pg\\_%%' AND n.nspname NOT IN ('information_schema', 'rowback', 'rowback_trash') "
+        "AND n.nspname NOT LIKE 'pg\\_%%' AND n.nspname NOT IN ('information_schema', 'lomberk', 'lomberk_trash') "
         "AND has_column_privilege(%s, c.oid, a.attnum, 'SELECT') ORDER BY 1", (agent_role,)).fetchall()
     extra = config.sensitive_columns
 
@@ -149,41 +149,41 @@ def _secret_column_checks(config, conn, agent_role: str, add) -> None:
     readable = [full for full, name, _ in rows if is_secret(name, extra)]
     if readable:
         add(WARN, f"the agent role can read secret columns in the database: {listed(readable)}. "
-                  "Rowback's name filter still refuses them, but the database doesn't",
-            "Re-run rowback register for each table (it hides them), or REVOKE SELECT on those columns.")
+                  "Lomberk's name filter still refuses them, but the database doesn't",
+            "Re-run lomberk register for each table (it hides them), or REVOKE SELECT on those columns.")
     suspect = [full for full, name, _ in rows if not is_secret(name, extra)
                and set(re.split(r"[^a-z0-9]+", name.lower())) & SUSPECT_WORDS]
     if suspect:
-        add(WARN, f"columns that may hold secrets under a name Rowback doesn't know: {listed(suspect)}",
-            "If they do, add their names to sensitive_columns in rowback.yaml and re-run rowback register.")
+        add(WARN, f"columns that may hold secrets under a name Lomberk doesn't know: {listed(suspect)}",
+            "If they do, add their names to sensitive_columns in lomberk.yaml and re-run lomberk register.")
     json_cols = [full for full, name, typ in rows if typ in ("json", "jsonb") and not is_secret(name, extra)]
     if json_cols:
         add(WARN, f"the agent can read JSON columns: {listed(json_cols)}. Secret-looking keys are masked, "
                   "but JSON can hide a secret under any key",
-            "If one holds secrets, add its name to sensitive_columns and re-run rowback register.")
+            "If one holds secrets, add its name to sensitive_columns and re-run lomberk register.")
     if not (readable or suspect or json_cols):
         add(OK, "no secret-looking column is readable by the agent role")
 
 
 def _pro_checks(config, add) -> None:
-    features, key = pro_features(config), os.environ.get("ROWBACK_LICENSE_KEY")
-    if os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true":
-        for env in ("ROWBACK_SLACK_APP_TOKEN", "ROWBACK_SLACK_BOT_TOKEN"):
+    features, key = pro_features(config), os.environ.get("LOMBERK_LICENSE_KEY")
+    if os.environ.get("LOMBERK_SLACK_ENABLED", "").lower() == "true":
+        for env in ("LOMBERK_SLACK_APP_TOKEN", "LOMBERK_SLACK_BOT_TOKEN"):
             if not os.environ.get(env):
                 add(FAIL, f"Slack is enabled but {env} is not set", "Copy it from your Slack app settings (see README, Slack).")
     if not features and not key:
         return
     try:
-        from rowback.ee.license import BUY_URL, _need, validate_key
+        from lomberk.ee.license import BUY_URL, _need, validate_key
     except ImportError:
-        add(FAIL, f"{', '.join(features)} are configured but the Pro package (rowback.ee) is missing", "Install the full rowback package.")
+        add(FAIL, f"{', '.join(features)} are configured but the Pro package (lomberk.ee) is missing", "Install the full lomberk package.")
         return
     if not key:
-        add(FAIL, f"{_need(features)} a Pro license key", f"Set ROWBACK_LICENSE_KEY. Buy one at {BUY_URL}")
+        add(FAIL, f"{_need(features)} a Pro license key", f"Set LOMBERK_LICENSE_KEY. Buy one at {BUY_URL}")
         return
     result = validate_key(key).status
     if result == "granted":
-        add(OK, "Rowback license is valid")
+        add(OK, "Lomberk license is valid")
     elif result == "unreachable":
         add(WARN, "couldn't reach api.polar.sh to check the license", "The gateway still starts. Check outbound HTTPS if you expected it to work.")
     else:
@@ -194,7 +194,7 @@ def _pro_checks(config, add) -> None:
 
 
 def _sso_check(config, add) -> None:
-    from rowback.ee.sso import _get_json, _require_https
+    from lomberk.ee.sso import _get_json, _require_https
     try:
         doc = _get_json(config.sso.issuer.rstrip("/") + "/.well-known/openid-configuration")
         if doc.get("issuer") != config.sso.issuer:
