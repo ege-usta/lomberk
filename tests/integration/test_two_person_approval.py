@@ -6,38 +6,38 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.executor import RowbackExecutor
+from lomberk.capture.install import install_lomberk
+from lomberk.executor import LomberkExecutor
 
 
 @pytest.fixture(scope="module")
 def dsn():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            conn.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             conn.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("CREATE TABLE public.acct (id INT PRIMARY KEY, val INT)")
             conn.execute("INSERT INTO public.acct VALUES (1, 0)")
-            conn.execute("SELECT rowback.register_table('public', 'acct', 'id', 'mcp_agent')")
+            conn.execute("SELECT lomberk.register_table('public', 'acct', 'id', 'mcp_agent')")
         yield url
 
 
 def _roles(dsn):
     host = dsn.split("@", 1)[1]
-    return f"postgresql://rowback_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
+    return f"postgresql://lomberk_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
 
 
 def _executor(dsn, required):
     control, runtime = _roles(dsn)
-    return RowbackExecutor(control, runtime, required_approvals=required)
+    return LomberkExecutor(control, runtime, required_approvals=required)
 
 
 def _pending(dsn, sql="UPDATE public.acct SET val = val + 1 WHERE id = 1"):
     control, _ = _roles(dsn)
-    return RowbackExecutor(control, "unused").create_pending_checkpoint(sql, "DML_WRITE", "REQUIRE_APPROVAL", "agent")
+    return LomberkExecutor(control, "unused").create_pending_checkpoint(sql, "DML_WRITE", "REQUIRE_APPROVAL", "agent")
 
 
 def _val(dsn):
@@ -56,7 +56,7 @@ def test_second_distinct_person_is_required(dsn):
     done = ex.execute_pending(pid, actor="oidc:bob@co.com")
     assert done.status == "applied" and _val(dsn) == before + 1
     with psycopg.connect(dsn) as conn:
-        actors = {r[0] for r in conn.execute("SELECT actor FROM rowback.approvals WHERE public_id = %s", (pid,))}
+        actors = {r[0] for r in conn.execute("SELECT actor FROM lomberk.approvals WHERE public_id = %s", (pid,))}
     assert actors == {"oidc:alice@co.com", "oidc:bob@co.com"}
 
 
@@ -64,7 +64,7 @@ def test_single_approval_is_recorded_by_default(dsn):
     ex, pid = _executor(dsn, 1), _pending(dsn)
     assert ex.execute_pending(pid, actor="cli:carol").status == "applied"
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT actor FROM rowback.approvals WHERE public_id = %s", (pid,)).fetchall() == [("cli:carol",)]
+        assert conn.execute("SELECT actor FROM lomberk.approvals WHERE public_id = %s", (pid,)).fetchall() == [("cli:carol",)]
 
 
 def test_unverified_or_cross_system_approvals_do_not_make_a_quorum(dsn):
@@ -89,7 +89,7 @@ def test_approvals_are_append_only(dsn):
     ex, pid = _executor(dsn, 2), _pending(dsn)
     ex.execute_pending(pid, actor="oidc:alice@co.com")
     with psycopg.connect(dsn, autocommit=True) as conn:
-        for stmt in ("UPDATE rowback.approvals SET actor = 'oidc:bob@co.com'", "DELETE FROM rowback.approvals"):
+        for stmt in ("UPDATE lomberk.approvals SET actor = 'oidc:bob@co.com'", "DELETE FROM lomberk.approvals"):
             with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
                 conn.execute(stmt)
 
@@ -97,7 +97,7 @@ def test_approvals_are_append_only(dsn):
 def test_control_role_cannot_forge_approval_rows(dsn):
     control, _ = _roles(dsn)
     with psycopg.connect(control, autocommit=True) as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
-        conn.execute("INSERT INTO rowback.approvals (public_id, actor) VALUES ('cp_x', 'oidc:ghost')")
+        conn.execute("INSERT INTO lomberk.approvals (public_id, actor) VALUES ('cp_x', 'oidc:ghost')")
 
 
 def test_concurrent_second_approvals_apply_once(dsn):
@@ -120,10 +120,10 @@ def test_concurrent_second_approvals_apply_once(dsn):
 def test_api_shared_admin_key_counts_as_one_person(dsn, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from rowback.api import app, get_executor
+    from lomberk.api import app, get_executor
     control, runtime = _roles(dsn)
-    for k, v in {"ROWBACK_AGENT_DSN": runtime, "ROWBACK_ADMIN_DSN": control,
-                 "ROWBACK_API_KEY": "agent-k", "ROWBACK_ADMIN_KEY": "admin-k"}.items():
+    for k, v in {"LOMBERK_AGENT_DSN": runtime, "LOMBERK_ADMIN_DSN": control,
+                 "LOMBERK_API_KEY": "agent-k", "LOMBERK_ADMIN_KEY": "admin-k"}.items():
         monkeypatch.setenv(k, v)
     ex, pid, before = _executor(dsn, 2), _pending(dsn), _val(dsn)
     app.dependency_overrides[get_executor] = lambda: ex
@@ -140,13 +140,13 @@ def test_api_shared_admin_key_counts_as_one_person(dsn, monkeypatch):
 def test_gateway_refuses_to_start_without_a_valid_license(dsn, monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
 
-    import rowback.ee.license as lic
-    from rowback.api import app
+    import lomberk.ee.license as lic
+    from lomberk.api import app
     control, runtime = _roles(dsn)
-    for k, v in {"ROWBACK_AGENT_DSN": runtime, "ROWBACK_ADMIN_DSN": control,
-                 "ROWBACK_API_KEY": "agent-k", "ROWBACK_ADMIN_KEY": "admin-k"}.items():
+    for k, v in {"LOMBERK_AGENT_DSN": runtime, "LOMBERK_ADMIN_DSN": control,
+                 "LOMBERK_API_KEY": "agent-k", "LOMBERK_ADMIN_KEY": "admin-k"}.items():
         monkeypatch.setenv(k, v)
-    (tmp_path / "rowback.yaml").write_text("approvals:\n  required: 2\n")
+    (tmp_path / "lomberk.yaml").write_text("approvals:\n  required: 2\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("invalid"))
     with pytest.raises(lic.LicenseError, match="two-person approval"), TestClient(app):

@@ -2,9 +2,9 @@
 import pglast
 import pytest
 
-from rowback.models import StatementClass
-from rowback.sentinel import AISentinel
-from rowback.sql.classify import check_sensitive_columns, classify_sql
+from lomberk.models import StatementClass
+from lomberk.sentinel import AISentinel
+from lomberk.sql.classify import check_sensitive_columns, classify_sql
 
 GALLERY = [
     "DROP TABLE public.users",
@@ -19,7 +19,7 @@ GALLERY = [
     "SELECT * FROM dblink('host=evil', 'SELECT 1') AS t(x int)",
     "SELECT most_common_vals FROM pg_stats WHERE attname = 'password'",
     "GRANT ALL ON public.users TO PUBLIC",
-    "DELETE FROM rowback.row_changes WHERE id > 0",
+    "DELETE FROM lomberk.row_changes WHERE id > 0",
     "SELECT 1 /* ‮ */",
     "SELECT email, password_hash FROM public.users",
     "SELECT settings->>'api_key' FROM public.users",

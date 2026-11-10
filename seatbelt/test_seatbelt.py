@@ -119,7 +119,7 @@ class Seatbelt(unittest.TestCase):
         out = run({"tool_name": "Bash", "tool_input": {"command": "dropdb prod"}})
         decision = json.loads(out.stdout)["hookSpecificOutput"]
         self.assertEqual(decision["permissionDecision"], "ask")
-        self.assertIn("Rowback", decision["permissionDecisionReason"])
+        self.assertIn("Lomberk", decision["permissionDecisionReason"])
         self.assertEqual(run({"tool_name": "Bash", "tool_input": {"command": "ls"}}).stdout, "")
         denied = run({"tool_name": "Bash", "tool_input": {"command": "dropdb prod"}}, env={"SEATBELT_MODE": "deny", "PATH": ""})
         self.assertEqual(json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")

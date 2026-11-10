@@ -2,17 +2,17 @@
 escape the gateway. A new bypass found later belongs in this list."""
 import pytest
 
-from rowback.sentinel import AISentinel
+from lomberk.sentinel import AISentinel
 
 MUST_BLOCK = [
     # stacked / smuggled statements
     "SELECT 1; DELETE FROM public.users WHERE id = 1",
     "DELETE FROM public.users WHERE id = 1; COMMIT",
     # GUC tampering (checkpoint/capability spoofing)
-    "SELECT set_config('rowback.checkpoint_id', '1', false)",
-    "SELECT current_setting('rowback.capability_token')",
-    "UPDATE public.users SET name = current_setting('rowback.capability_token') WHERE id = 1",
-    "SET rowback.checkpoint_id = '1'",
+    "SELECT set_config('lomberk.checkpoint_id', '1', false)",
+    "SELECT current_setting('lomberk.capability_token')",
+    "UPDATE public.users SET name = current_setting('lomberk.capability_token') WHERE id = 1",
+    "SET lomberk.checkpoint_id = '1'",
     "SET session_replication_role = replica",
     "RESET ALL",
     # side-effect / exfiltration functions
@@ -27,7 +27,7 @@ MUST_BLOCK = [
     # DDL / privilege / session commands
     "DROP TABLE public.users",
     "TRUNCATE public.users",
-    "ALTER TABLE public.users DISABLE TRIGGER rowback_capture",
+    "ALTER TABLE public.users DISABLE TRIGGER lomberk_capture",
     "GRANT ALL ON public.users TO PUBLIC",
     "CREATE FUNCTION public.f() RETURNS int AS 'SELECT 1' LANGUAGE sql",
     "DO $$ BEGIN DELETE FROM public.users; END $$",
@@ -95,7 +95,7 @@ def test_sentinel_fence_is_an_unpredictable_per_request_nonce(monkeypatch):
     import re
     from contextlib import contextmanager
 
-    import rowback.sentinel as sentinel_mod
+    import lomberk.sentinel as sentinel_mod
 
     sent = []
 
@@ -123,7 +123,7 @@ def test_sentinel_fence_is_an_unpredictable_per_request_nonce(monkeypatch):
     fences = [re.search(r"--([0-9a-f]{32})-SQL--", m).group(1) for m in msgs]
     assert fences[0] != fences[1]  # a fresh nonce each request, not a fixed marker
     for m, fence in zip(msgs, fences, strict=True):
-        assert "ROWBACK_SQL" not in m          # the old public marker is gone
+        assert "LOMBERK_SQL" not in m          # the old public marker is gone
         assert fence not in attack             # the agent could not have embedded the real fence
         assert attack in m                     # its injected text is carried only as data
 

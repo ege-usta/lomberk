@@ -1,4 +1,4 @@
-// Rowback panel. Agent SQL is untrusted: everything is rendered with textContent, never as HTML.
+// Lomberk panel. Agent SQL is untrusted: everything is rendered with textContent, never as HTML.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -20,7 +20,7 @@ async function call(path, method = "GET", body) {
   const res = await fetch(path, {
     method,
     credentials: "same-origin",
-    headers: { "X-Rowback-Panel": "1", ...(body ? { "Content-Type": "application/json" } : {}) },
+    headers: { "X-Lomberk-Panel": "1", ...(body ? { "Content-Type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -43,7 +43,7 @@ function when(iso) {
 }
 
 async function act(id, action, button) {
-  if (action === "undo" && !confirm("Undo this write? Rowback restores the rows it changed, cascades included.")) return;
+  if (action === "undo" && !confirm("Undo this write? Lomberk restores the rows it changed, cascades included.")) return;
   button.disabled = true;
   try {
     const r = await call(`api/checkpoints/${encodeURIComponent(id)}/${action}`, "POST");

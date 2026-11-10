@@ -22,6 +22,6 @@ INSERT INTO public.payments (user_id, amount, status) VALUES
 (1, 1000.00, 'success'),
 (2, 500.00, 'success');
 
--- Rowback needs two non-superuser roles: control (approvals) and agent (AI writes).
-CREATE ROLE rowback_control LOGIN PASSWORD 'control-demo';
-CREATE ROLE rowback_agent LOGIN PASSWORD 'agent-demo';
+-- Lomberk needs two non-superuser roles: control (approvals) and agent (AI writes).
+CREATE ROLE lomberk_control LOGIN PASSWORD 'control-demo';
+CREATE ROLE lomberk_agent LOGIN PASSWORD 'agent-demo';

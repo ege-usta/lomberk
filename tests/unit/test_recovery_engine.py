@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from rowback.recovery import (
+from lomberk.recovery import (
     IdMismatchError,
     RecoveryBudgetExhausted,
     TransientError,

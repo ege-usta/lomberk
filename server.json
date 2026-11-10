@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.ege-usta/rowback",
-  "title": "Rowback",
+  "name": "io.github.ege-usta/lomberk",
+  "title": "Lomberk",
   "description": "Postgres gateway for AI agents: blocks destructive SQL, holds risky writes, undoes applied ones.",
   "repository": {
-    "url": "https://github.com/ege-usta/rowback",
+    "url": "https://github.com/ege-usta/lomberk",
     "source": "github"
   },
-  "websiteUrl": "https://ege-usta.github.io/rowback/",
+  "websiteUrl": "https://ege-usta.github.io/lomberk/",
   "version": "0.2.0",
   "packages": [
     {
       "registryType": "pypi",
-      "identifier": "rowback",
+      "identifier": "lomberk",
       "version": "0.2.0",
       "transport": {
         "type": "stdio"
@@ -25,20 +25,20 @@
       ],
       "environmentVariables": [
         {
-          "name": "ROWBACK_AGENT_DSN",
+          "name": "LOMBERK_AGENT_DSN",
           "description": "Connection string for the low-privilege role the agent's SQL runs as.",
           "isRequired": true,
           "isSecret": true
         },
         {
-          "name": "ROWBACK_ADMIN_DSN",
-          "description": "Connection string for the control role that owns the rowback schema (checkpoints, undo, ledger).",
+          "name": "LOMBERK_ADMIN_DSN",
+          "description": "Connection string for the control role that owns the lomberk schema (checkpoints, undo, ledger).",
           "isRequired": true,
           "isSecret": true
         },
         {
-          "name": "ROWBACK_CONFIG",
-          "description": "Absolute path to rowback.yaml (protected tables, limits). Without it, ./rowback.yaml or defaults.",
+          "name": "LOMBERK_CONFIG",
+          "description": "Absolute path to lomberk.yaml (protected tables, limits). Without it, ./lomberk.yaml or defaults.",
           "isRequired": false,
           "isSecret": false
         }

@@ -8,16 +8,16 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.executor import RowbackExecutor
-from rowback.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
+from lomberk.capture.install import install_lomberk
+from lomberk.executor import LomberkExecutor
+from lomberk.models import ClassifiedStatement, PolicyDecision, StatementClass, StatementEvaluation
 
 TABLES = ("accounts", "ledger")
 
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 
@@ -25,9 +25,9 @@ def db():
             return urlunparse((p.scheme, f"{role}:secret@{p.hostname}:{p.port}", p.path, "", "", ""))
 
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute("CREATE ROLE rowback_control LOGIN PASSWORD 'secret'")
+            cur.execute("CREATE ROLE lomberk_control LOGIN PASSWORD 'secret'")
             cur.execute("CREATE ROLE mcp_agent LOGIN PASSWORD 'secret'")
-        install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("""
                 -- Supabase dashboard / Django default
@@ -47,13 +47,13 @@ def db():
                 INSERT INTO public.ledger (account_id, cents) VALUES (1, 500), (1, 700), (2, 50);
             """)
             for t in TABLES:
-                cur.execute("SELECT rowback.register_table('public', %s, 'id', 'mcp_agent')", (t,))
-        yield dsn, RowbackExecutor(as_role("rowback_control"), as_role("mcp_agent"))
+                cur.execute("SELECT lomberk.register_table('public', %s, 'id', 'mcp_agent')", (t,))
+        yield dsn, LomberkExecutor(as_role("lomberk_control"), as_role("mcp_agent"))
 
 
 @pytest.fixture(autouse=True)
 def no_llm(monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("lomberk.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
 
 
 def run(ex, sql):

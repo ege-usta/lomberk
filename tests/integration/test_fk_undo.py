@@ -7,9 +7,9 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.executor import RowbackExecutor
-from rowback.models import (
+from lomberk.capture.install import install_lomberk
+from lomberk.executor import LomberkExecutor
+from lomberk.models import (
     ClassifiedStatement,
     PolicyDecision,
     StatementClass,
@@ -19,7 +19,7 @@ from rowback.models import (
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 
@@ -27,9 +27,9 @@ def db():
             return urlunparse((p.scheme, f"{role}:secret@{p.hostname}:{p.port}", p.path, "", "", ""))
 
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute("CREATE ROLE rowback_control LOGIN PASSWORD 'secret'")
+            cur.execute("CREATE ROLE lomberk_control LOGIN PASSWORD 'secret'")
             cur.execute("CREATE ROLE mcp_agent LOGIN PASSWORD 'secret'")
-        install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE public.users (id INT PRIMARY KEY, name TEXT);
@@ -44,8 +44,8 @@ def db():
                 INSERT INTO public.shadow VALUES (1, 1);
             """)
             for t in ("users", "payments", "notes", "orgs"):  # shadow deliberately NOT registered
-                cur.execute("SELECT rowback.register_table('public', %s, 'id', 'mcp_agent')", (t,))
-        yield dsn, RowbackExecutor(as_role("rowback_control"), as_role("mcp_agent"))
+                cur.execute("SELECT lomberk.register_table('public', %s, 'id', 'mcp_agent')", (t,))
+        yield dsn, LomberkExecutor(as_role("lomberk_control"), as_role("mcp_agent"))
 
 
 def run(ex, sql):
@@ -64,7 +64,7 @@ def snapshot(dsn):
 
 @pytest.fixture(autouse=True)
 def no_llm(monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr("lomberk.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
 
 
 def test_cascade_delete_is_fully_undone(db):
@@ -117,7 +117,7 @@ def test_self_referencing_cascade_is_undone(db):
         cur.execute("""
             CREATE TABLE public.tree (id INT PRIMARY KEY, parent INT REFERENCES public.tree(id) ON DELETE CASCADE);
             INSERT INTO public.tree VALUES (1, NULL), (2, 1), (3, 2), (4, 1);
-            SELECT rowback.register_table('public', 'tree', 'id', 'mcp_agent');
+            SELECT lomberk.register_table('public', 'tree', 'id', 'mcp_agent');
         """)
     res = run(ex, "DELETE FROM public.tree WHERE id = 1")
     assert res.status == "applied" and res.rows_affected == 1
@@ -138,8 +138,8 @@ def test_cascade_into_protected_table_is_held(db, monkeypatch):
                 ALTER TABLE public.users ADD COLUMN tenant_id INT REFERENCES public.tenants(id) ON DELETE CASCADE;
                 INSERT INTO public.tenants VALUES (7);
                 UPDATE public.users SET tenant_id = 7 WHERE id = 2;
-                SELECT rowback.register_table('public', 'tenants', 'id', 'mcp_agent');
-                SELECT rowback.register_table('public', 'users', 'id', 'mcp_agent');
+                SELECT lomberk.register_table('public', 'tenants', 'id', 'mcp_agent');
+                SELECT lomberk.register_table('public', 'users', 'id', 'mcp_agent');
             """)
         before = snapshot(dsn)
         res = run(ex, "DELETE FROM public.tenants WHERE id = 7")

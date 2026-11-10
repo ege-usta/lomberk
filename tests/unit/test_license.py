@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-import rowback.ee.license as lic
+import lomberk.ee.license as lic
 
 validate_key = lic.validate_key  # the real one; conftest stubs the module attribute for other tests
 PRO = next(iter(lic.PRO_BENEFIT_IDS))
@@ -44,7 +44,7 @@ def polar(monkeypatch):
 
 class Store:
     def __init__(self, activation_id=None):
-        self.label, self.activation_id = "rowback-test-db", activation_id
+        self.label, self.activation_id = "lomberk-test-db", activation_id
 
     def load(self):
         return self.label, self.activation_id
@@ -55,7 +55,7 @@ class Store:
 
 @pytest.mark.parametrize("reply, expected", [
     ((200, GRANTED), "granted"),
-    ((200, '{"status": "granted"}'), "invalid"),  # no benefit: not a Rowback key
+    ((200, '{"status": "granted"}'), "invalid"),  # no benefit: not a Lomberk key
     ((200, '{"status": "revoked"}'), "invalid"),
     ((404, '{"detail": "not found"}'), "invalid"),   # unknown, revoked or expired key
     ((422, '{"detail": []}'), "invalid"),
@@ -111,7 +111,7 @@ def test_invalid_key_with_pro_features_refuses_startup(monkeypatch):
 def test_missing_key(monkeypatch):
     monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: pytest.fail("must not call Polar without a key"))
     assert lic.check_license(None, []) == "free"
-    with pytest.raises(lic.LicenseError, match="SSO, Slack approvals need a Rowback Pro license"):
+    with pytest.raises(lic.LicenseError, match="SSO, Slack approvals need a Lomberk Pro license"):
         lic.check_license("", ["SSO", "Slack approvals"])
 
 
@@ -123,7 +123,7 @@ def test_first_start_on_a_database_activates_it_once(polar):
     assert lic.check_license("KEY-1", [], store) == "pro"
     assert store.activation_id == "act-9"
     assert polar.requests[-1] == ("/activate", {"key": "KEY-1", "organization_id": lic.POLAR_ORGANIZATION_ID,
-                                                "label": "rowback-test-db"})
+                                                "label": "lomberk-test-db"})
     polar.activations.add("act-9")
     polar.requests.clear()
     assert lic.check_license("KEY-1", [], store) == "pro"  # a restart reuses the activation

@@ -1,7 +1,7 @@
-# Demo stack: a "production" Postgres, a one-shot installer, and the Rowback gateway.
+# Demo stack: a "production" Postgres, a one-shot installer, and the Lomberk gateway.
 # Agents connect to http://localhost:8000/mcp with the agent key ONLY.
 # Replace every secret below before using this outside a laptop.
-name: rowback
+name: lomberk
 services:
   db:
     image: postgres:16-alpine
@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: test
       POSTGRES_DB: pocketos
     ports:
-      - "127.0.0.1:${ROWBACK_DEMO_DB_PORT:-5439}:5432"  # superuser test/test: never expose it beyond this machine
+      - "127.0.0.1:${LOMBERK_DEMO_DB_PORT:-5439}:5432"  # superuser test/test: never expose it beyond this machine
     volumes:
       - ./demo/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
@@ -18,35 +18,35 @@ services:
       interval: 2s
       retries: 30
 
-  rowback-init:
+  lomberk-init:
     build: .
     depends_on:
       db: { condition: service_healthy }
     environment:
-      ROWBACK_INSTALL_DSN: postgresql://test:test@db:5432/pocketos
+      LOMBERK_INSTALL_DSN: postgresql://test:test@db:5432/pocketos
     command: >
-      sh -c "rowback init --control-role rowback_control --agent-role rowback_agent &&
-             rowback register public.payments --agent-role rowback_agent &&
-             rowback register public.users --agent-role rowback_agent"
+      sh -c "lomberk init --control-role lomberk_control --agent-role lomberk_agent &&
+             lomberk register public.payments --agent-role lomberk_agent &&
+             lomberk register public.users --agent-role lomberk_agent"
     restart: "no"
 
   gateway:
     build: .
     depends_on:
-      rowback-init: { condition: service_completed_successfully }
+      lomberk-init: { condition: service_completed_successfully }
     environment:
-      ROWBACK_ADMIN_DSN: postgresql://rowback_control:control-demo@db:5432/pocketos
-      ROWBACK_AGENT_DSN: postgresql://rowback_agent:agent-demo@db:5432/pocketos
-      ROWBACK_API_KEY: ${ROWBACK_API_KEY:-demo-agent-key}
-      ROWBACK_ADMIN_KEY: ${ROWBACK_ADMIN_KEY:-demo-admin-key}
+      LOMBERK_ADMIN_DSN: postgresql://lomberk_control:control-demo@db:5432/pocketos
+      LOMBERK_AGENT_DSN: postgresql://lomberk_agent:agent-demo@db:5432/pocketos
+      LOMBERK_API_KEY: ${LOMBERK_API_KEY:-demo-agent-key}
+      LOMBERK_ADMIN_KEY: ${LOMBERK_ADMIN_KEY:-demo-admin-key}
       # The demo keys above are public, so the gateway only accepts them with this flag.
       # Outside a laptop: set real keys (openssl rand -hex 32) and remove this line.
-      ROWBACK_ALLOW_WEAK_KEYS: "true"
+      LOMBERK_ALLOW_WEAK_KEYS: "true"
     volumes:
-      - ./rowback.yaml:/etc/rowback/rowback.yaml:ro
+      - ./lomberk.yaml:/etc/lomberk/lomberk.yaml:ro
     ports:
-      - "127.0.0.1:${ROWBACK_PORT:-8000}:8000"
+      - "127.0.0.1:${LOMBERK_PORT:-8000}:8000"
     read_only: true
-    tmpfs: ["/tmp", "/var/log/rowback:uid=10001"]
+    tmpfs: ["/tmp", "/var/log/lomberk:uid=10001"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

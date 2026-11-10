@@ -16,14 +16,14 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from testcontainers.community.postgres import PostgresContainer
 
-import rowback.ee.license as lic
-from rowback.api import app
-from rowback.capture.install import install_rowback
-from rowback.executor import RowbackExecutor
+import lomberk.ee.license as lic
+from lomberk.api import app
+from lomberk.capture.install import install_lomberk
+from lomberk.executor import LomberkExecutor
 
 IDP_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-CLIENT_ID = "rowback-panel"
-H = {"X-Rowback-Panel": "1"}
+CLIENT_ID = "lomberk-panel"
+H = {"X-Lomberk-Panel": "1"}
 
 
 @pytest.fixture(scope="module")
@@ -71,32 +71,32 @@ def idp():
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            conn.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             conn.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("CREATE TABLE public.acct (id INT PRIMARY KEY, val INT)")
             conn.execute("INSERT INTO public.acct VALUES (1, 0)")
-            conn.execute("SELECT rowback.register_table('public', 'acct', 'id', 'mcp_agent')")
+            conn.execute("SELECT lomberk.register_table('public', 'acct', 'id', 'mcp_agent')")
         host = url.split("@", 1)[1]
-        yield url, f"postgresql://rowback_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
+        yield url, f"postgresql://lomberk_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
 
 
 @pytest.fixture
 def gateway(db, idp, monkeypatch, tmp_path):
-    """Starts the gateway with a rowback.yaml; yields (make_client, control_dsn)."""
+    """Starts the gateway with a lomberk.yaml; yields (make_client, control_dsn)."""
     _, control, runtime = db
     issuer, _ = idp
-    for k, v in {"ROWBACK_AGENT_DSN": runtime, "ROWBACK_ADMIN_DSN": control,
-                 "ROWBACK_API_KEY": "agent-k", "ROWBACK_ADMIN_KEY": "admin-k"}.items():
+    for k, v in {"LOMBERK_AGENT_DSN": runtime, "LOMBERK_ADMIN_DSN": control,
+                 "LOMBERK_API_KEY": "agent-k", "LOMBERK_ADMIN_KEY": "admin-k"}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.chdir(tmp_path)
 
     def start(yaml: str):
-        (tmp_path / "rowback.yaml").write_text(yaml.replace("ISSUER", issuer))
+        (tmp_path / "lomberk.yaml").write_text(yaml.replace("ISSUER", issuer))
         return TestClient(app, base_url="https://testserver")
     return start, control
 
@@ -113,7 +113,7 @@ sso:
 
 
 def pending(control, sql="UPDATE public.acct SET val = val + 1 WHERE id = 1"):
-    return RowbackExecutor(control, "unused").create_pending_checkpoint(sql, "DML_WRITE", "REQUIRE_APPROVAL", "agent")
+    return LomberkExecutor(control, "unused").create_pending_checkpoint(sql, "DML_WRITE", "REQUIRE_APPROVAL", "agent")
 
 
 def admin_login(c):
@@ -143,7 +143,7 @@ def test_admin_key_sign_in_session_and_csrf(gateway):
         assert c.post("/panel/login", json={"key": "admin-k"}).status_code == 403          # no CSRF header
         assert c.post("/panel/login", json={"key": "wrong"}, headers=H).status_code == 401
         admin_login(c)
-        cookie = c.cookies.get("rowback_session")
+        cookie = c.cookies.get("lomberk_session")
         assert c.get("/panel/api/session").json()["actor"] == "api_admin"
 
         pid = pending(control)
@@ -157,14 +157,14 @@ def test_admin_key_sign_in_session_and_csrf(gateway):
         forged = base64.urlsafe_b64encode(json.dumps({"actor": "oidc:boss@corp.com", "p": "session",
                                                       "exp": 9999999999}).encode()).rstrip(b"=").decode()
         c.cookies.clear()
-        send = lambda value: c.get("/panel/api/checkpoints", headers={"Cookie": f"rowback_session={value}"})
+        send = lambda value: c.get("/panel/api/checkpoints", headers={"Cookie": f"lomberk_session={value}"})
         assert send(cookie).status_code == 200                      # the real cookie works when sent this way
         assert send(forged + "." + sig).status_code == 401          # another actor under the old signature
         assert send(payload + "." + sig[:-2] + "AA").status_code == 401
 
 
 def test_admin_key_cannot_forge_a_panel_session(gateway):
-    # F2 regression: the session cookie must NOT be signed with ROWBACK_ADMIN_KEY. That key is
+    # F2 regression: the session cookie must NOT be signed with LOMBERK_ADMIN_KEY. That key is
     # deliberately excluded from the approval quorum, so a holder of it minting an `oidc:` session
     # (which the quorum DOES count) would single-handedly satisfy the two-person rule. We forge a
     # cookie with the old, admin-key-derived scheme for an allowed identity and group; only the
@@ -174,11 +174,11 @@ def test_admin_key_cannot_forge_a_panel_session(gateway):
         payload = base64.urlsafe_b64encode(json.dumps(
             {"actor": "oidc:alice@corp.com", "groups": ["db-approvers"], "p": "session", "exp": 9999999999}
         ).encode()).rstrip(b"=").decode()
-        key = hmac.new(b"admin-k", b"rowback-panel-session-v1", hashlib.sha256).digest()
+        key = hmac.new(b"admin-k", b"lomberk-panel-session-v1", hashlib.sha256).digest()
         sig = base64.urlsafe_b64encode(hmac.new(key, payload.encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
         forged = f"{payload}.{sig}"
-        assert c.get("/panel/api/session", headers={"Cookie": f"rowback_session={forged}"}).json()["actor"] is None
-        assert c.get("/panel/api/checkpoints", headers={"Cookie": f"rowback_session={forged}"}).status_code == 401
+        assert c.get("/panel/api/session", headers={"Cookie": f"lomberk_session={forged}"}).json()["actor"] is None
+        assert c.get("/panel/api/checkpoints", headers={"Cookie": f"lomberk_session={forged}"}).status_code == 401
 
 
 def test_sso_sign_in_then_two_people_apply(gateway, idp):
@@ -214,7 +214,7 @@ def test_sso_sign_in_then_two_people_apply(gateway, idp):
 
 
 def test_sso_session_ends_with_the_token_and_the_allowlist(gateway, idp):
-    from rowback import api
+    from lomberk import api
     start, _ = gateway
     _, fake = idp
     with start(SSO_YAML) as c:
@@ -222,7 +222,7 @@ def test_sso_session_ends_with_the_token_and_the_allowlist(gateway, idp):
             c.get("/panel/sso/login", follow_redirects=False).headers["location"]).query))
         fake["challenge"], fake["nonce"] = q["code_challenge"], q["nonce"]
         r = c.get("/panel/sso/callback", params={"code": "good-code", "state": q["state"]}, follow_redirects=False)
-        cookie = next(h for h in r.headers.get_list("set-cookie") if h.startswith("rowback_session="))
+        cookie = next(h for h in r.headers.get_list("set-cookie") if h.startswith("lomberk_session="))
         assert 290 <= int(cookie.split("Max-Age=")[1].split(";")[0]) <= 300  # the ID token's 5 minutes, not 8 hours
         assert c.get("/panel/api/session").json()["actor"] == "oidc:alice@corp.com"
         api._SSO.cfg.allowed_groups = ["someone-else"]  # the group is removed from the config

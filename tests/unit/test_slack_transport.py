@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from slack_sdk.socket_mode.request import SocketModeRequest
 
-from rowback.ee.slack import SlackInteractionAdapter, TaskCapacityExceededError
-from rowback.ee.slack_transport import SlackTransport
+from lomberk.ee.slack import SlackInteractionAdapter, TaskCapacityExceededError
+from lomberk.ee.slack_transport import SlackTransport
 
 
 @pytest.fixture

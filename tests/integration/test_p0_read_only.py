@@ -4,13 +4,13 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-from rowback.capture.install import install_rowback
-from rowback.executor import RowbackExecutor
+from lomberk.capture.install import install_lomberk
+from lomberk.executor import LomberkExecutor
 
 
 @pytest.fixture(scope="module")
 def postgres():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
         yield postgres
 
 @pytest.fixture(scope="module")
@@ -28,14 +28,14 @@ def runtime_dsn(dsn):
 def control_dsn(dsn):
     from urllib.parse import urlparse, urlunparse
     parsed = urlparse(dsn)
-    return urlunparse((parsed.scheme, f"rowback_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return urlunparse((parsed.scheme, f"lomberk_control:secret@{parsed.hostname}:{parsed.port}", parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 @pytest.fixture(scope="module")
 def setup_db(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
-    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+    install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("CREATE TABLE public.read_users (id INT, name TEXT, password TEXT);")
@@ -55,12 +55,12 @@ def setup_db(dsn):
         cur.execute("GRANT EXECUTE ON FUNCTION public.attempt_write TO mcp_agent;")
 
 def test_p0_read_only_path(dsn, control_dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = RowbackExecutor(control_dsn, runtime_dsn)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = LomberkExecutor(control_dsn, runtime_dsn)
 
-    from rowback.config import load_config
-    from rowback.policy import PolicyEngine
-    from rowback.sql.classify import classify_sql
+    from lomberk.config import load_config
+    from lomberk.policy import PolicyEngine
+    from lomberk.sql.classify import classify_sql
     policy = PolicyEngine(config=load_config())
 
     # We will verify that transaction_read_only is 'on'
@@ -83,10 +83,10 @@ def test_p0_read_only_db_level_enforcement(dsn, control_dsn, runtime_dsn, setup_
     # Bypass AST completely to prove DB-level enforcement
     # We construct a fake StatementEvaluation that is classified as READ,
     # but the SQL actually calls a function that does an INSERT.
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    executor = RowbackExecutor(control_dsn, runtime_dsn)
-    from rowback.models import ClassifiedStatement, StatementClass
-    from rowback.policy import PolicyDecision, StatementEvaluation
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    executor = LomberkExecutor(control_dsn, runtime_dsn)
+    from lomberk.models import ClassifiedStatement, StatementClass
+    from lomberk.policy import PolicyDecision, StatementEvaluation
 
     stmt = ClassifiedStatement(sql="SELECT public.attempt_write();", stmt_class=StatementClass.READ, tables=[], is_multistatement=False)
     eval_result = StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW, reason="Bypassed AST")
@@ -98,16 +98,16 @@ def test_p0_read_only_db_level_enforcement(dsn, control_dsn, runtime_dsn, setup_
 
 
 def _read(executor, sql):
-    from rowback.config import load_config
-    from rowback.policy import PolicyEngine
-    from rowback.sql.classify import classify_sql
+    from lomberk.config import load_config
+    from lomberk.policy import PolicyEngine
+    from lomberk.sql.classify import classify_sql
     return executor.execute(PolicyEngine(config=load_config()).evaluate(classify_sql(sql)[0]), agent_label="test")
 
 
 def test_large_read_fetches_only_what_it_returns(control_dsn, runtime_dsn, setup_db):
     """A read never pulls more rows into the gateway than it hands back: row 200 would divide
     by zero, so the query only succeeds if the gateway stopped reading after the first page."""
-    executor = RowbackExecutor(control_dsn, runtime_dsn)
+    executor = LomberkExecutor(control_dsn, runtime_dsn)
     res = _read(executor, "SELECT 1 / (g - 200) AS v FROM generate_series(1, 300) g")
     assert res.status == "applied", res.message
     assert len(res.data) == 100
@@ -118,8 +118,8 @@ def test_large_read_fetches_only_what_it_returns(control_dsn, runtime_dsn, setup
 
 
 def test_huge_values_are_cut_to_fit_an_agent_context(control_dsn, runtime_dsn, setup_db):
-    from rowback.executor import RESULT_TOTAL_CHARS, RESULT_VALUE_CHARS
-    executor = RowbackExecutor(control_dsn, runtime_dsn)
+    from lomberk.executor import RESULT_TOTAL_CHARS, RESULT_VALUE_CHARS
+    executor = LomberkExecutor(control_dsn, runtime_dsn)
     res = _read(executor, "SELECT string_agg('x', '') AS big FROM generate_series(1, 50000)")
     assert res.status == "applied", res.message
     big = res.data[0]["big"]

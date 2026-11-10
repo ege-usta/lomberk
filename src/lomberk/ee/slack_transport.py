@@ -7,13 +7,13 @@ from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 
-from rowback.ee.slack import (
+from lomberk.ee.slack import (
     InvalidPayloadError,
     SlackInteractionAdapter,
     TaskCapacityExceededError,
 )
 
-logger = logging.getLogger("rowback.ee.slack_transport")
+logger = logging.getLogger("lomberk.ee.slack_transport")
 
 
 class SlackTransport:

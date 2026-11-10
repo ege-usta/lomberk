@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from rowback.ee.slack import (
+from lomberk.ee.slack import (
     InvalidPayloadError,
     SlackInteractionAdapter,
     UnauthorizedUserError,

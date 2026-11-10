@@ -8,8 +8,8 @@ an agent that keeps hitting "not on the allowlist" gets uninstalled.
 import pglast
 import pytest
 
-from rowback.sentinel import ALLOWED_FUNCS, AISentinel
-from rowback.sql.classify import check_sensitive_columns
+from lomberk.sentinel import ALLOWED_FUNCS, AISentinel
+from lomberk.sql.classify import check_sensitive_columns
 
 
 def gate(sql: str) -> tuple[bool, str]:
@@ -141,7 +141,7 @@ NEWLY_OPENED_ATTACKS = [
     "SELECT public.jsonb_set(meta, '{a}', '1') FROM public.users",
     "SELECT evil.generate_series(1, 3)",
     "SELECT * FROM generate_series(1, 3), pg_sleep(10)",
-    "SELECT to_jsonb(current_setting('rowback.capability_token'))",
+    "SELECT to_jsonb(current_setting('lomberk.capability_token'))",
 ]
 
 

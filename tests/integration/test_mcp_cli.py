@@ -7,17 +7,17 @@ from mcp.client.stdio import stdio_client
 from testcontainers.community.postgres import PostgresContainer
 from typer.testing import CliRunner
 
-from rowback.capture.install import install_rowback
-from rowback.cli import app
-from rowback.executor import RowbackExecutor
-from rowback.models import StatementEvaluation
-from rowback.policy import PolicyDecision
-from rowback.sql.classify import ClassifiedStatement, StatementClass
+from lomberk.capture.install import install_lomberk
+from lomberk.cli import app
+from lomberk.executor import LomberkExecutor
+from lomberk.models import StatementEvaluation
+from lomberk.policy import PolicyDecision
+from lomberk.sql.classify import ClassifiedStatement, StatementClass
 
 
 @pytest.fixture(scope="module")
 def postgres():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as postgres:
         yield postgres
 
 @pytest.fixture(scope="module")
@@ -34,11 +34,11 @@ def runtime_dsn(dsn):
 def setup_db(dsn, runtime_dsn):
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("DROP ROLE IF EXISTS mcp_agent")
-        cur.execute("DROP ROLE IF EXISTS rowback_control")
-        cur.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+        cur.execute("DROP ROLE IF EXISTS lomberk_control")
+        cur.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
         cur.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'secret'")
 
-    install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+    install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE public.users (
@@ -51,14 +51,14 @@ def setup_db(dsn, runtime_dsn):
             );
         """)
         cur.execute("INSERT INTO public.users (data) VALUES ('test_admin');")
-        cur.execute("SELECT rowback.register_table('public', 'users', 'id', 'mcp_agent');")
+        cur.execute("SELECT lomberk.register_table('public', 'users', 'id', 'mcp_agent');")
 
 @pytest.mark.asyncio
 async def test_mcp_execute_unregistered_fails(dsn, runtime_dsn, setup_db):
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "python", "src/rowback/cli.py", "serve"],
-        env={"ROWBACK_AGENT_DSN": runtime_dsn, "ROWBACK_ADMIN_DSN": dsn.replace("test:test@", "rowback_control:secret@")}
+        args=["run", "python", "src/lomberk/cli.py", "serve"],
+        env={"LOMBERK_AGENT_DSN": runtime_dsn, "LOMBERK_ADMIN_DSN": dsn.replace("test:test@", "lomberk_control:secret@")}
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -78,8 +78,8 @@ async def test_mcp_execute_unregistered_fails(dsn, runtime_dsn, setup_db):
 async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "python", "src/rowback/cli.py", "serve"],
-        env={"ROWBACK_AGENT_DSN": runtime_dsn, "ROWBACK_ADMIN_DSN": dsn.replace("test:test@", "rowback_control:secret@")}
+        args=["run", "python", "src/lomberk/cli.py", "serve"],
+        env={"LOMBERK_AGENT_DSN": runtime_dsn, "LOMBERK_ADMIN_DSN": dsn.replace("test:test@", "lomberk_control:secret@")}
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -99,7 +99,7 @@ async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
                 cur.execute("SELECT data FROM public.users WHERE id = 1")
                 assert cur.fetchone()[0] == 'test_admin'
 
-            executor = RowbackExecutor(dsn, runtime_dsn)
+            executor = LomberkExecutor(dsn, runtime_dsn)
             exec_res = executor.execute_pending(token)
             assert exec_res.status == "applied"
 
@@ -112,11 +112,11 @@ async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
 runner = CliRunner()
 
 def test_cli_undo_success(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    os.environ["ROWBACK_ADMIN_DSN"] = dsn
-    os.environ["ROWBACK_AGENT_DSN"] = runtime_dsn
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    os.environ["LOMBERK_ADMIN_DSN"] = dsn
+    os.environ["LOMBERK_AGENT_DSN"] = runtime_dsn
 
-    executor = RowbackExecutor(dsn, runtime_dsn)
+    executor = LomberkExecutor(dsn, runtime_dsn)
     stmt = ClassifiedStatement(sql="INSERT INTO public.users (data) VALUES ('CLI User')", stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
     res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
 
@@ -125,11 +125,11 @@ def test_cli_undo_success(dsn, runtime_dsn, setup_db, monkeypatch):
     assert "Successfully undid checkpoint" in result.stdout
 
 def test_cli_undo_already_undone(dsn, runtime_dsn, setup_db, monkeypatch):
-    monkeypatch.setattr("rowback.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
-    os.environ["ROWBACK_ADMIN_DSN"] = dsn
-    os.environ["ROWBACK_AGENT_DSN"] = runtime_dsn
+    monkeypatch.setattr("lomberk.sentinel.AISentinel._ast_firewall", lambda self, sql: (True, ""))
+    os.environ["LOMBERK_ADMIN_DSN"] = dsn
+    os.environ["LOMBERK_AGENT_DSN"] = runtime_dsn
 
-    executor = RowbackExecutor(dsn, runtime_dsn)
+    executor = LomberkExecutor(dsn, runtime_dsn)
     stmt = ClassifiedStatement(sql="INSERT INTO public.users (data) VALUES ('CLI User 2')", stmt_class=StatementClass.WRITE_DML, tables=["public.users"])
     res = executor.execute(StatementEvaluation(statement=stmt, decision=PolicyDecision.ALLOW_WITH_CAPTURE, reason="Test"))
 
@@ -142,8 +142,8 @@ def test_cli_undo_already_undone(dsn, runtime_dsn, setup_db, monkeypatch):
     assert "already undone" in result.stdout
 
 def test_cli_undo_unknown_token(dsn, runtime_dsn, setup_db):
-    os.environ["ROWBACK_ADMIN_DSN"] = dsn
-    os.environ["ROWBACK_AGENT_DSN"] = runtime_dsn
+    os.environ["LOMBERK_ADMIN_DSN"] = dsn
+    os.environ["LOMBERK_AGENT_DSN"] = runtime_dsn
 
     result = runner.invoke(app, ["undo", "cp_invalid123"])
     assert result.exit_code == 1

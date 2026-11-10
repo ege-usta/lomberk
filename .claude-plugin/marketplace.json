@@ -1,8 +1,8 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "rowback",
+  "name": "lomberk",
   "description": "Database safety for AI agents",
-  "owner": { "name": "Rowback" },
+  "owner": { "name": "Lomberk" },
   "plugins": [
     {
       "name": "seatbelt",

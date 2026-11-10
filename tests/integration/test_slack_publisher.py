@@ -12,13 +12,13 @@ import psycopg
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
-import rowback.api
-from rowback.capture.install import install_rowback
-from rowback.config import RowbackConfig
-from rowback.ee.slack import UnauthorizedUserError
-from rowback.ee.slack_publisher import SlackPublisher
-from rowback.policy import PolicyEngine
-from rowback.sql.classify import classify_sql
+import lomberk.api
+from lomberk.capture.install import install_lomberk
+from lomberk.config import LomberkConfig
+from lomberk.ee.slack import UnauthorizedUserError
+from lomberk.ee.slack_publisher import SlackPublisher
+from lomberk.policy import PolicyEngine
+from lomberk.sql.classify import classify_sql
 
 
 class FakeWeb:
@@ -38,7 +38,7 @@ class FakeWeb:
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         dsn = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         p = urlparse(dsn)
 
@@ -46,18 +46,18 @@ def db():
             return urlunparse((p.scheme, f"{role}:secret@{p.hostname}:{p.port}", p.path, "", "", ""))
 
         with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute("CREATE ROLE rowback_control LOGIN PASSWORD 'secret'")
+            conn.execute("CREATE ROLE lomberk_control LOGIN PASSWORD 'secret'")
             conn.execute("CREATE ROLE mcp_agent LOGIN PASSWORD 'secret'")
-        install_rowback(dsn, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(dsn, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("CREATE TABLE public.users (id INT PRIMARY KEY, name TEXT)")
             conn.execute("INSERT INTO public.users VALUES (1, 'alice'), (2, 'bob')")
-            conn.execute("SELECT rowback.register_table('public', 'users', 'id', 'mcp_agent')")
-        yield dsn, as_role("rowback_control"), as_role("mcp_agent")
+            conn.execute("SELECT lomberk.register_table('public', 'users', 'id', 'mcp_agent')")
+        yield dsn, as_role("lomberk_control"), as_role("mcp_agent")
 
 
 def hold(executor, sql):
-    res = executor.execute(PolicyEngine(RowbackConfig(protected_tables=["public.users"])).evaluate(classify_sql(sql)[0]),
+    res = executor.execute(PolicyEngine(LomberkConfig(protected_tables=["public.users"])).evaluate(classify_sql(sql)[0]),
                            principal="agent")
     assert res.status == "approval_required", res.message
     return res.public_id
@@ -80,20 +80,20 @@ def click(public_id, ts, user="U_BOSS", action="approve_button", channel="C_APPR
 @pytest.mark.asyncio
 async def test_slack_publish_click_approve_end_to_end(db, monkeypatch, caplog):
     admin, control, agent = db
-    monkeypatch.setenv("ROWBACK_ADMIN_DSN", control)
-    monkeypatch.setenv("ROWBACK_AGENT_DSN", agent)
-    monkeypatch.setenv("ROWBACK_API_KEY", "k-agent")
-    monkeypatch.setenv("ROWBACK_ADMIN_KEY", "k-admin")
-    monkeypatch.setenv("ROWBACK_SLACK_ENABLED", "true")
-    monkeypatch.setenv("ROWBACK_SLACK_APP_TOKEN", "xapp-fake")
-    monkeypatch.setenv("ROWBACK_SLACK_BOT_TOKEN", "xoxb-fake")
-    cfg = RowbackConfig(protected_tables=["public.users"])
+    monkeypatch.setenv("LOMBERK_ADMIN_DSN", control)
+    monkeypatch.setenv("LOMBERK_AGENT_DSN", agent)
+    monkeypatch.setenv("LOMBERK_API_KEY", "k-agent")
+    monkeypatch.setenv("LOMBERK_ADMIN_KEY", "k-admin")
+    monkeypatch.setenv("LOMBERK_SLACK_ENABLED", "true")
+    monkeypatch.setenv("LOMBERK_SLACK_APP_TOKEN", "xapp-fake")
+    monkeypatch.setenv("LOMBERK_SLACK_BOT_TOKEN", "xoxb-fake")
+    cfg = LomberkConfig(protected_tables=["public.users"])
     cfg.slack.admin_allowlist, cfg.slack.team_allowlist, cfg.slack.channel_id = ["U_BOSS"], ["T1"], "C_APPROVALS"
-    monkeypatch.setattr(rowback.api, "load_config", lambda: cfg)
-    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    monkeypatch.setattr(lomberk.api, "load_config", lambda: cfg)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
 
     web = FakeWeb()
-    app = rowback.api.app
+    app = lomberk.api.app
 
     def socket_factory(token):
         m = MagicMock()
@@ -103,10 +103,10 @@ async def test_slack_publish_click_approve_end_to_end(db, monkeypatch, caplog):
     app.state.slack_client_factory = socket_factory
     app.state.slack_web_client_factory = lambda token: web
     try:
-        with caplog.at_level(logging.INFO, logger="rowback_audit"):
-            async with rowback.api.lifespan(app):
-                adapter = rowback.api._slack_transport_instance.business_adapter
-                public_id = await asyncio.to_thread(hold, rowback.api._executor_instance, "DELETE FROM public.users WHERE id = 2")
+        with caplog.at_level(logging.INFO, logger="lomberk_audit"):
+            async with lomberk.api.lifespan(app):
+                adapter = lomberk.api._slack_transport_instance.business_adapter
+                public_id = await asyncio.to_thread(hold, lomberk.api._executor_instance, "DELETE FROM public.users WHERE id = 2")
                 await wait_for(lambda: len(web.posts) == 1)
                 post = web.posts[0]
                 assert post["channel"] == "C_APPROVALS"
@@ -134,16 +134,16 @@ async def test_slack_publish_click_approve_end_to_end(db, monkeypatch, caplog):
             if hasattr(app.state, attr):
                 delattr(app.state, attr)
 
-    events = [json.loads(r.getMessage()) for r in caplog.records if r.name == "rowback_audit"]
-    assert ("rowback.approved", "slack:U_BOSS") in [(e["event_type"], e["actor"]) for e in events]
+    events = [json.loads(r.getMessage()) for r in caplog.records if r.name == "lomberk_audit"]
+    assert ("lomberk.approved", "slack:U_BOSS") in [(e["event_type"], e["actor"]) for e in events]
 
 
 @pytest.mark.asyncio
 async def test_unknown_send_outcome_is_never_resent_and_bindings_survive_restart(db, monkeypatch):
     admin, control, agent = db
-    monkeypatch.setattr("rowback.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
-    from rowback.executor import RowbackExecutor
-    ex = RowbackExecutor(control, agent)
+    monkeypatch.setattr("lomberk.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    from lomberk.executor import LomberkExecutor
+    ex = LomberkExecutor(control, agent)
     lost = hold(ex, "UPDATE public.users SET name = 'x' WHERE id = 1")
     ok = hold(ex, "UPDATE public.users SET name = 'y' WHERE id = 1")
 
@@ -163,7 +163,7 @@ async def test_unknown_send_outcome_is_never_resent_and_bindings_survive_restart
 
 def _row(dsn, public_id, col):
     with psycopg.connect(dsn) as conn:
-        row = conn.execute(f"SELECT {col} FROM rowback.slack_messages WHERE public_id = %s", (public_id,)).fetchone()
+        row = conn.execute(f"SELECT {col} FROM lomberk.slack_messages WHERE public_id = %s", (public_id,)).fetchone()
     return row[0] if row else None
 
 
@@ -177,7 +177,7 @@ def _ts(dsn, public_id):
 
 def _status(dsn, public_id):
     with psycopg.connect(dsn) as conn:
-        return conn.execute("SELECT status FROM rowback.checkpoints WHERE public_id = %s", (public_id,)).fetchone()[0]
+        return conn.execute("SELECT status FROM lomberk.checkpoints WHERE public_id = %s", (public_id,)).fetchone()[0]
 
 
 def test_agent_controlled_fields_cannot_inject_slack_markup():

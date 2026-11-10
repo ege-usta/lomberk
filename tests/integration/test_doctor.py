@@ -1,4 +1,4 @@
-"""rowback doctor: every problem gets a plain message and a fix, and the exit code says if it's safe to start."""
+"""lomberk doctor: every problem gets a plain message and a fix, and the exit code says if it's safe to start."""
 import os
 
 import psycopg
@@ -6,34 +6,34 @@ import pytest
 from testcontainers.community.postgres import PostgresContainer
 from typer.testing import CliRunner
 
-import rowback.ee.license as lic
-from rowback.capture.install import install_rowback
-from rowback.cli import app
+import lomberk.ee.license as lic
+from lomberk.capture.install import install_lomberk
+from lomberk.cli import app
 
-KEYS = {"ROWBACK_API_KEY": "3f9c2a7e1b8d4065c7a9e2f1d3b5a8c6", "ROWBACK_ADMIN_KEY": "8e1d7c4b2a9f6035e1c8b7a4d2f9e6c3"}
+KEYS = {"LOMBERK_API_KEY": "3f9c2a7e1b8d4065c7a9e2f1d3b5a8c6", "LOMBERK_ADMIN_KEY": "8e1d7c4b2a9f6035e1c8b7a4d2f9e6c3"}
 
 
 @pytest.fixture(scope="module")
 def db():
-    with PostgresContainer(os.environ.get("ROWBACK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
         with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute("CREATE ROLE rowback_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
+            conn.execute("CREATE ROLE lomberk_control WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             conn.execute("CREATE ROLE mcp_agent WITH LOGIN NOSUPERUSER PASSWORD 'secret'")
             conn.execute("CREATE DATABASE empty")
-        install_rowback(url, control_role="rowback_control", agent_role="mcp_agent")
+        install_lomberk(url, control_role="lomberk_control", agent_role="mcp_agent")
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("CREATE TABLE public.orders (id INT PRIMARY KEY)")
-            conn.execute("SELECT rowback.register_table('public', 'orders', 'id', 'mcp_agent')")
+            conn.execute("SELECT lomberk.register_table('public', 'orders', 'id', 'mcp_agent')")
         host = url.split("@", 1)[1]
-        yield f"postgresql://rowback_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
+        yield f"postgresql://lomberk_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
 
 
 def doctor(monkeypatch, tmp_path, env, yaml=""):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "rowback.yaml").write_text(yaml)
-    for k in ("ROWBACK_ADMIN_DSN", "ROWBACK_AGENT_DSN", "ROWBACK_API_KEY", "ROWBACK_ADMIN_KEY", "ROWBACK_LICENSE_KEY",
-              "ROWBACK_CONFIG"):
+    (tmp_path / "lomberk.yaml").write_text(yaml)
+    for k in ("LOMBERK_ADMIN_DSN", "LOMBERK_AGENT_DSN", "LOMBERK_API_KEY", "LOMBERK_ADMIN_KEY", "LOMBERK_LICENSE_KEY",
+              "LOMBERK_CONFIG"):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -42,7 +42,7 @@ def doctor(monkeypatch, tmp_path, env, yaml=""):
 
 def test_healthy_deployment(db, monkeypatch, tmp_path):
     control, agent = db
-    r = doctor(monkeypatch, tmp_path, {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS},
+    r = doctor(monkeypatch, tmp_path, {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent, **KEYS},
                "protected_tables: [public.orders]\n")
     assert r.exit_code == 0, r.output
     assert "public.orders" in r.output and "ledger intact" in r.output and "Ready" in r.output
@@ -50,64 +50,64 @@ def test_healthy_deployment(db, monkeypatch, tmp_path):
 
 def test_missing_env_and_same_keys(db, monkeypatch, tmp_path):
     control, _ = db
-    r = doctor(monkeypatch, tmp_path, {"ROWBACK_ADMIN_DSN": control, "ROWBACK_API_KEY": "k", "ROWBACK_ADMIN_KEY": "k"})
+    r = doctor(monkeypatch, tmp_path, {"LOMBERK_ADMIN_DSN": control, "LOMBERK_API_KEY": "k", "LOMBERK_ADMIN_KEY": "k"})
     assert r.exit_code == 1
-    assert "ROWBACK_AGENT_DSN is not set" in r.output and "are the same" in r.output and "openssl rand" in r.output
+    assert "LOMBERK_AGENT_DSN is not set" in r.output and "are the same" in r.output and "openssl rand" in r.output
 
 
 def test_same_role_twice_and_uninstalled_db(db, monkeypatch, tmp_path):
     control, _ = db
     empty = control.rsplit("/", 1)[0] + "/empty"
-    r = doctor(monkeypatch, tmp_path, {"ROWBACK_ADMIN_DSN": empty, "ROWBACK_AGENT_DSN": empty, **KEYS})
-    assert r.exit_code == 1 and "both connection strings log in as rowback_control" in r.output
-    assert "not installed" in r.output and "rowback init" in r.output
+    r = doctor(monkeypatch, tmp_path, {"LOMBERK_ADMIN_DSN": empty, "LOMBERK_AGENT_DSN": empty, **KEYS})
+    assert r.exit_code == 1 and "both connection strings log in as lomberk_control" in r.output
+    assert "not installed" in r.output and "lomberk init" in r.output
 
 
 def test_config_typo_and_unregistered_protected_table(db, monkeypatch, tmp_path):
     control, agent = db
-    env = {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS}
+    env = {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent, **KEYS}
     r = doctor(monkeypatch, tmp_path, env, "protected_table: [public.users]\n")
     assert r.exit_code == 1 and "invalid: protected_table" in r.output
     r = doctor(monkeypatch, tmp_path, env, "protected_tables: [public.users]\n")
     assert r.exit_code == 0 and "protected but not registered: public.users" in r.output
 
 
-def test_config_named_by_rowback_config(db, monkeypatch, tmp_path):
+def test_config_named_by_lomberk_config(db, monkeypatch, tmp_path):
     control, agent = db
     elsewhere = tmp_path / "etc"
     elsewhere.mkdir()
     (elsewhere / "prod.yaml").write_text("protected_tables: [public.orders]\n")
-    env = {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS,
-           "ROWBACK_CONFIG": str(elsewhere / "prod.yaml")}
+    env = {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent, **KEYS,
+           "LOMBERK_CONFIG": str(elsewhere / "prod.yaml")}
     r = doctor(monkeypatch, tmp_path, env)
     assert r.exit_code == 0 and "prod.yaml is valid" in r.output and "public.orders" in r.output, r.output
-    env["ROWBACK_CONFIG"] = str(elsewhere / "missing.yaml")
+    env["LOMBERK_CONFIG"] = str(elsewhere / "missing.yaml")
     r = doctor(monkeypatch, tmp_path, env)
     assert r.exit_code == 1 and "does not exist" in r.output and "refuse to start" in r.output
 
 
 def test_pro_feature_without_or_with_bad_key(db, monkeypatch, tmp_path):
     control, agent = db
-    env = {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS}
+    env = {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent, **KEYS}
     r = doctor(monkeypatch, tmp_path, env, "approvals:\n  required: 2\n")
     assert r.exit_code == 1 and "two-person approval needs a Pro license key" in r.output
     monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("invalid"))
-    r = doctor(monkeypatch, tmp_path, {**env, "ROWBACK_LICENSE_KEY": "bad"}, "approvals:\n  required: 2\n")
+    r = doctor(monkeypatch, tmp_path, {**env, "LOMBERK_LICENSE_KEY": "bad"}, "approvals:\n  required: 2\n")
     assert r.exit_code == 1 and "invalid, expired or cancelled" in r.output
 
 
 def test_secret_columns_the_database_still_shows(db, monkeypatch, tmp_path):
     control, agent = db
-    install = control.replace("rowback_control:secret", "test:test")
+    install = control.replace("lomberk_control:secret", "test:test")
     with psycopg.connect(install, autocommit=True) as conn:
         conn.execute("CREATE TABLE public.members (id INT PRIMARY KEY, password_hash TEXT, card_pin TEXT, prefs JSONB)")
-        conn.execute("SELECT rowback.register_table('public', 'members', 'id', 'mcp_agent')")
-    env = {"ROWBACK_ADMIN_DSN": control, "ROWBACK_AGENT_DSN": agent, **KEYS}
+        conn.execute("SELECT lomberk.register_table('public', 'members', 'id', 'mcp_agent')")
+    env = {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent, **KEYS}
     out = " ".join(doctor(monkeypatch, tmp_path, env).output.split())  # the console wraps lines
     assert "can read secret columns in the database: public.members.password_hash" in out, out
     assert "public.members.card_pin" in out and "JSON columns: public.members.prefs" in out
     with psycopg.connect(install, autocommit=True) as conn:
-        conn.execute("SELECT rowback.register_table('public', 'members', 'id', 'mcp_agent', "
+        conn.execute("SELECT lomberk.register_table('public', 'members', 'id', 'mcp_agent', "
                      "ARRAY['password_hash', 'card_pin', 'prefs'])")
     out = " ".join(doctor(monkeypatch, tmp_path, env, "sensitive_columns: [card_pin, prefs]\n").output.split())
     assert "no secret-looking column is readable" in out, out

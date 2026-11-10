@@ -6,14 +6,14 @@ import psycopg
 from psycopg import sql
 from pydantic import BaseModel
 
-from rowback.audit import audit
-from rowback.sentinel import BIDI_CONTROLS
+from lomberk.audit import audit
+from lomberk.sentinel import BIDI_CONTROLS
 
-logger = logging.getLogger("rowback.executor")
+logger = logging.getLogger("lomberk.executor")
 
 
 class LicenseActivationStore:
-    """This database's activation of the license key (rowback.license_activation), for ee/license.py."""
+    """This database's activation of the license key (lomberk.license_activation), for ee/license.py."""
 
     def __init__(self, dsn: str):
         self.dsn = dsn
@@ -21,14 +21,14 @@ class LicenseActivationStore:
     def load(self) -> tuple[str, str | None]:
         try:
             with psycopg.connect(self.dsn) as conn:
-                return conn.execute("SELECT label, activation_id FROM rowback.license_activation").fetchone()
+                return conn.execute("SELECT label, activation_id FROM lomberk.license_activation").fetchone()
         except psycopg.errors.UndefinedTable as e:
-            raise ValueError("Startup Refusal: the Rowback schema is older than this gateway. "
-                             "Run `rowback install` again to upgrade it.") from e
+            raise ValueError("Startup Refusal: the Lomberk schema is older than this gateway. "
+                             "Run `lomberk install` again to upgrade it.") from e
 
     def save(self, activation_id: str) -> None:
         with psycopg.connect(self.dsn) as conn:
-            conn.execute("UPDATE rowback.license_activation SET activation_id = %s", (activation_id,))
+            conn.execute("UPDATE lomberk.license_activation SET activation_id = %s", (activation_id,))
 
 
 class ExecutionResult(BaseModel):
@@ -88,8 +88,8 @@ UNDO_WINDOW_HOURS = {"free": 24, "pro": 30 * 24, "enterprise": None}
 
 def undo_window_message(hours: int) -> str:
     span = f"{hours // 24} days" if hours % 24 == 0 and hours > 24 else f"{hours} hours"
-    return (f"This checkpoint is older than the {span} undo window of this Rowback plan. "
-            "Rowback Pro undoes up to 30 days back, Enterprise without a limit: see https://github.com/ege-usta/rowback#pricing")
+    return (f"This checkpoint is older than the {span} undo window of this Lomberk plan. "
+            "Lomberk Pro undoes up to 30 days back, Enterprise without a limit: see https://github.com/ege-usta/lomberk#pricing")
 
 
 PREVIEW_ROWS = 20
@@ -125,13 +125,13 @@ CASCADE_TRIGGER_SQL = """
     SELECT n.nspname || '.' || c.relname FROM reach r
     JOIN pg_class c ON c.oid = r.oid JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE r.oid <> %(t)s
-      AND EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid = r.oid AND NOT g.tgisinternal AND g.tgname <> 'rowback_capture')
-      AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = r.oid), false)
+      AND EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid = r.oid AND NOT g.tgisinternal AND g.tgname <> 'lomberk_capture')
+      AND NOT coalesce((SELECT allow_triggers FROM lomberk.registered_tables WHERE table_oid = r.oid), false)
     ORDER BY 1 LIMIT 1
 """
 
 
-class RowbackExecutor:
+class LomberkExecutor:
     # ponytail: a fresh connection per step (~5 ms each, ~18 ms p50 per captured write
     # on localhost) keeps outcome-unknown handling exact. Add psycopg_pool when the DB
     # is remote/TLS and latency matters; pooled conns must be discarded after errors.
@@ -139,7 +139,7 @@ class RowbackExecutor:
     def _resolve_duplicate(self, principal: str, operation_id: str, sql_to_execute: str):
         import psycopg
         with psycopg.connect(self.dsn) as check_conn, check_conn.cursor() as check_cur:
-            check_cur.execute("SELECT id, public_id, status, rows_affected, sql_text FROM rowback.checkpoints WHERE principal = %s AND operation_id = %s", (principal, operation_id))
+            check_cur.execute("SELECT id, public_id, status, rows_affected, sql_text FROM lomberk.checkpoints WHERE principal = %s AND operation_id = %s", (principal, operation_id))
             existing = check_cur.fetchone()
             if existing:
                 if existing[4] != sql_to_execute:
@@ -147,7 +147,7 @@ class RowbackExecutor:
                 return ExecutionResult(checkpoint_id=existing[0], public_id=existing[1], operation_id=operation_id, status="approval_required" if existing[2] == "pending" else existing[2], rows_affected=existing[3] or 0, message="Idempotent replay")
         raise RuntimeError(f"UniqueViolation occurred but no existing record found for {principal}:{operation_id}")
 
-    def execute_undo(self, public_id: str, agent_label: str = "ROWBACK_SYSTEM") -> ExecutionResult:
+    def execute_undo(self, public_id: str, agent_label: str = "LOMBERK_SYSTEM") -> ExecutionResult:
         res = self._execute_undo(public_id, agent_label)
         audit("undone" if res.status == "undone" else "undo_failed", actor=agent_label, public_id=public_id,
               status=res.status, rows_affected=res.rows_affected, message=res.message)
@@ -157,8 +157,8 @@ class RowbackExecutor:
         with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 "SELECT c.public_id, c.status, c.classification, c.decision, c.agent_label, c.principal, c.sql_text, "
-                "c.rows_affected, c.created_at, p.preview FROM rowback.checkpoints c "
-                "LEFT JOIN rowback.previews p USING (public_id) WHERE c.public_id = %s", (public_id,))
+                "c.rows_affected, c.created_at, p.preview FROM lomberk.checkpoints c "
+                "LEFT JOIN lomberk.previews p USING (public_id) WHERE c.public_id = %s", (public_id,))
             cp = cur.fetchone()
             if cp and cp["status"] == "pending":
                 # Tell an approver, before they decide, if this write could not be undone — they
@@ -169,21 +169,21 @@ class RowbackExecutor:
     def _undo_warning(self, conn, sql_text: str) -> str | None:
         """Name any target table whose own schema makes this write impossible to undo: its own
         triggers (without --allow-triggers), rewrite rules, or inheritance — the same conditions
-        rowback.execute_undo refuses on. Read-only and defensive; returns None on any error."""
+        lomberk.execute_undo refuses on. Read-only and defensive; returns None on any error."""
         try:
             import pglast
 
-            from rowback.sql.classify import extract_tables_from_ast
+            from lomberk.sql.classify import extract_tables_from_ast
             tables = extract_tables_from_ast(pglast.parse_sql(sql_text))
             blocked = []
             with conn.cursor() as cur:
                 for schema, table in tables:
                     cur.execute(
                         "SELECT "
-                        "EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND t.tgname <> 'rowback_capture') "
-                        "  AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = c.oid), false), "
+                        "EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND t.tgname <> 'lomberk_capture') "
+                        "  AND NOT coalesce((SELECT allow_triggers FROM lomberk.registered_tables WHERE table_oid = c.oid), false), "
                         "EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class = c.oid AND rulename <> '_RETURN'), "
-                        "rowback.inheritance_problem(c.oid) "
+                        "lomberk.inheritance_problem(c.oid) "
                         "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
                         "WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')",
                         (schema, table))
@@ -216,8 +216,8 @@ class RowbackExecutor:
                 "SELECT c.public_id, c.created_at, c.status, c.classification, c.agent_label, c.principal, "
                 "c.sql_text, c.rows_affected, c.chain_seq, c.hash, "
                 "coalesce(array_agg(a.actor ORDER BY a.approved_at) FILTER (WHERE a.actor IS NOT NULL), '{}') AS approved_by, "
-                "(SELECT p.preview FROM rowback.previews p WHERE p.public_id = c.public_id) AS preview "
-                "FROM rowback.checkpoints c LEFT JOIN rowback.approvals a USING (public_id) "
+                "(SELECT p.preview FROM lomberk.previews p WHERE p.public_id = c.public_id) AS preview "
+                "FROM lomberk.checkpoints c LEFT JOIN lomberk.approvals a USING (public_id) "
                 "WHERE %(since)s::timestamptz IS NULL OR c.created_at >= %(since)s "
                 "GROUP BY c.id ORDER BY c.id DESC LIMIT %(limit)s",
                 {"since": since, "limit": limit})
@@ -227,7 +227,7 @@ class RowbackExecutor:
         """Reject a pending checkpoint. Returns False if it is not pending."""
         try:
             with psycopg.connect(self.dsn, autocommit=True) as conn:
-                conn.execute("SELECT rowback.reject_checkpoint(%s)", (public_id,))
+                conn.execute("SELECT lomberk.reject_checkpoint(%s)", (public_id,))
         except psycopg.errors.RaiseException:
             return False
         audit("rejected", actor=actor, public_id=public_id)
@@ -242,15 +242,15 @@ class RowbackExecutor:
                         if self.undo_window_hours is not None:
                             # Age counts from when the write ran: the last approval, else when it was made.
                             cur.execute(
-                                "SELECT now() - coalesce((SELECT max(a.approved_at) FROM rowback.approvals a "
+                                "SELECT now() - coalesce((SELECT max(a.approved_at) FROM lomberk.approvals a "
                                 "WHERE a.public_id = c.public_id), c.created_at) > make_interval(hours => %s) "
-                                "FROM rowback.checkpoints c WHERE c.public_id = %s",
+                                "FROM lomberk.checkpoints c WHERE c.public_id = %s",
                                 (self.undo_window_hours, public_id))
                             row = cur.fetchone()
                             if row and row[0]:
                                 return ExecutionResult(status="expired", message=undo_window_message(self.undo_window_hours),
                                                        public_id=public_id, rows_affected=0)
-                        cur.execute("SELECT rowback.execute_undo(%s, %s)", (public_id, agent_label))
+                        cur.execute("SELECT lomberk.execute_undo(%s, %s)", (public_id, agent_label))
                         result = cur.fetchone()[0]
                         return ExecutionResult(
                             status='undone',
@@ -295,7 +295,7 @@ class RowbackExecutor:
             val_str = re.sub(r'(?i)system:\s*override', '[SANITIZED_OVERRIDE]', val_str)
             return val_str
 
-        from rowback.sql.classify import is_secret
+        from lomberk.sql.classify import is_secret
 
         def secret(name) -> bool:
             return is_secret(name, self.sensitive_columns)
@@ -332,7 +332,7 @@ class RowbackExecutor:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM rowback.begin_checkpoint(%s, %s, %s, %s, %s)",
+                    "SELECT * FROM lomberk.begin_checkpoint(%s, %s, %s, %s, %s)",
                     (sql, stmt_class, agent_label, principal, operation_id)
                 )
                 row = cur.fetchone()
@@ -345,8 +345,8 @@ class RowbackExecutor:
         if not self.dsn or not self.runtime_dsn:
             raise ValueError("Both dsn and runtime_dsn are required for execution.")
 
-        from rowback.policy import PolicyDecision
-        from rowback.sentinel import AISentinel
+        from lomberk.policy import PolicyDecision
+        from lomberk.sentinel import AISentinel
 
 
         safe, reason = AISentinel()._ast_firewall(eval_result.statement.sql)
@@ -395,7 +395,7 @@ class RowbackExecutor:
                         with conn.transaction(), conn.cursor() as cur:
                             import pglast
 
-                            from rowback.sql.classify import check_sensitive_columns
+                            from lomberk.sql.classify import check_sensitive_columns
                             ast = pglast.parse_sql(eval_result.statement.sql)
                             sens_cols = check_sensitive_columns(ast, self.sensitive_columns)
                             if sens_cols:
@@ -408,7 +408,7 @@ class RowbackExecutor:
                             # A SELECT runs through a server-side cursor, so a query over millions of
                             # rows sends the gateway only the page it returns. EXPLAIN and SHOW can't.
                             is_select = type(ast[0].stmt).__name__ == "SelectStmt"
-                            with conn.cursor(name="rowback_read") if is_select else conn.cursor() as rc:
+                            with conn.cursor(name="lomberk_read") if is_select else conn.cursor() as rc:
                                 rc.execute(eval_result.statement.sql)
                                 if rc.description:
                                     columns = [desc[0] for desc in rc.description]
@@ -436,7 +436,7 @@ class RowbackExecutor:
     def _preview(self, cur, exec_token) -> dict:
         """What the in-flight write changed, masked like agent results. Updates list only the
         columns that changed; inserts and deletes list the row."""
-        from rowback.sql.classify import is_secret
+        from lomberk.sql.classify import is_secret
 
         def secret(name) -> bool:
             return is_secret(name, self.sensitive_columns)
@@ -459,7 +459,7 @@ class RowbackExecutor:
             row = row or {}  # NULL when the role may SELECT none of the columns
             return {shown(k): shown(MASK if secret(k) and v not in (None, "") else _mask_json(v, secret)) for k, v in row.items()}
 
-        cur.execute("SELECT rowback.preview_changes(%s, %s)", (exec_token, PREVIEW_ROWS))
+        cur.execute("SELECT lomberk.preview_changes(%s, %s)", (exec_token, PREVIEW_ROWS))
         p = cur.fetchone()[0]
         sample = []
         for item in p["sample"]:
@@ -488,14 +488,14 @@ class RowbackExecutor:
                 with runtime_conn.transaction():
                     with runtime_conn.cursor() as cur:
                         cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{self.statement_timeout_ms}ms",))
-                        cur.execute("SELECT rowback.claim_checkpoint(%s)", (exec_token,))
-                        cur.execute("SELECT set_config('rowback.checkpoint_id', %s, true)", (str(cp_id),))
-                        cur.execute("SELECT set_config('rowback.capability_token', %s, true)", (str(exec_token),))
-                        cur.execute("SELECT set_config('rowback.seq', '0', true)")
+                        cur.execute("SELECT lomberk.claim_checkpoint(%s)", (exec_token,))
+                        cur.execute("SELECT set_config('lomberk.checkpoint_id', %s, true)", (str(cp_id),))
+                        cur.execute("SELECT set_config('lomberk.capability_token', %s, true)", (str(exec_token),))
+                        cur.execute("SELECT set_config('lomberk.seq', '0', true)")
 
                         import pglast
 
-                        from rowback.sql.classify import (
+                        from lomberk.sql.classify import (
                             check_sensitive_columns,
                             extract_tables_from_ast,
                         )
@@ -507,10 +507,10 @@ class RowbackExecutor:
                             raise Exception(f"Access denied: Query contains sensitive columns {sens_cols}")
 
                         for schema, table in tables:
-                            if schema in ('rowback', 'rowback_trash', 'information_schema', 'pg_catalog'):
+                            if schema in ('lomberk', 'lomberk_trash', 'information_schema', 'pg_catalog'):
                                 raise Exception(f"Direct DML on system schema {schema} is forbidden.")
                             # Before LOCK, which needs privileges only registered tables have: say why plainly.
-                            cur.execute("SELECT EXISTS (SELECT 1 FROM rowback.registered_tables WHERE schema_name = %s AND table_name = %s)",
+                            cur.execute("SELECT EXISTS (SELECT 1 FROM lomberk.registered_tables WHERE schema_name = %s AND table_name = %s)",
                                         (schema, table))
                             if not cur.fetchone()[0]:
                                 raise Exception(f"Table {schema}.{table} is not registered for mutation. "
@@ -528,12 +528,12 @@ class RowbackExecutor:
                                     t.tgqual,
                                     t.tgfoid,
                                     p.oid AS expected_foid,
-                                    array_to_string(rowback.primary_key_columns(c.oid), ',') AS actual_pk_column
+                                    array_to_string(lomberk.primary_key_columns(c.oid), ',') AS actual_pk_column
                                 FROM pg_class c
                                 JOIN pg_namespace n ON n.oid = c.relnamespace
-                                LEFT JOIN rowback.registered_tables r ON r.schema_name = n.nspname AND r.table_name = c.relname
-                                LEFT JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = 'rowback_capture'
-                                LEFT JOIN pg_proc p ON p.proname = 'capture_row_change' AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'rowback') AND p.pronargs = 0
+                                LEFT JOIN lomberk.registered_tables r ON r.schema_name = n.nspname AND r.table_name = c.relname
+                                LEFT JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = 'lomberk_capture'
+                                LEFT JOIN pg_proc p ON p.proname = 'capture_row_change' AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'lomberk') AND p.pronargs = 0
                                 WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')
                             """, (schema, table))
                             row2 = cur.fetchone()
@@ -570,10 +570,10 @@ class RowbackExecutor:
                             # the capture trigger, so they could not be undone: refuse before writing.
                             # Partitioned tables pass when their whole tree is captured (inheritance_problem).
                             cur.execute(
-                                "SELECT rowback.inheritance_problem(%(t)s), "
+                                "SELECT lomberk.inheritance_problem(%(t)s), "
                                 "EXISTS (SELECT 1 FROM pg_rewrite WHERE ev_class = %(t)s AND rulename <> '_RETURN'), "
-                                "EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = %(t)s AND NOT tgisinternal AND tgname <> 'rowback_capture') "
-                                "AND NOT coalesce((SELECT allow_triggers FROM rowback.registered_tables WHERE table_oid = %(t)s), false)",
+                                "EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = %(t)s AND NOT tgisinternal AND tgname <> 'lomberk_capture') "
+                                "AND NOT coalesce((SELECT allow_triggers FROM lomberk.registered_tables WHERE table_oid = %(t)s), false)",
                                 {"t": c_oid})
                             in_inheritance, has_rules, has_user_triggers = cur.fetchone()
                             # Undo refuses every table it must restore that has triggers of its own,
@@ -602,10 +602,10 @@ class RowbackExecutor:
                             if tgattr and str(tgattr) != '' and str(tgattr) != 'b\'\'':
                                 raise Exception(f"Trigger column restrictions (UPDATE OF) are not allowed on {schema}.{table}.")
 
-                            cur.execute("SELECT rowback.unprotected_cascade_child(%s)", (c_oid,))
+                            cur.execute("SELECT lomberk.unprotected_cascade_child(%s)", (c_oid,))
                             unprotected = cur.fetchone()[0]
                             if unprotected:
-                                raise Exception(f"Write on {schema}.{table} could cascade into {unprotected}, which is not registered with Rowback; its rows could not be undone.")
+                                raise Exception(f"Write on {schema}.{table} could cascade into {unprotected}, which is not registered with Lomberk; its rows could not be undone.")
 
                         if enforce_row_limit and self.protected_tables:
                             # FK cascades can reach a protected table the SQL never names.
@@ -635,7 +635,7 @@ class RowbackExecutor:
                         if expect and expect.get("digest"):
                             # The person approved the rows the preview showed. If the data or the
                             # clock moved since (`WHERE ... OR now() > ...`), refuse; rollback below.
-                            cur.execute("SELECT rowback.preview_changes(%s, 0)", (exec_token,))
+                            cur.execute("SELECT lomberk.preview_changes(%s, 0)", (exec_token,))
                             now = cur.fetchone()[0]
                             if now["digest"] != expect["digest"]:
                                 raise Exception(f"This write now changes {now['rows']} row(s), not the {expect['rows']} previewed "
@@ -645,7 +645,7 @@ class RowbackExecutor:
                         if enforce_row_limit and limit is not None:
                             # Count what the capture trigger recorded, not the outer command tag:
                             # includes FK cascades and anything nested in the statement.
-                            cur.execute("SELECT current_setting('rowback.seq')::bigint")
+                            cur.execute("SELECT current_setting('lomberk.seq')::bigint")
                             changed = max(rows_affected, cur.fetchone()[0])
                             if changed > limit and not hold_reason:
                                 hold_reason = f"Rows changed ({changed}) exceeds limit ({limit})."
@@ -653,15 +653,15 @@ class RowbackExecutor:
                             # Leaving the with-block via exception rolls the write back.
                             preview = self._preview(cur, exec_token) if self.preview_writes else None
                             raise HoldForApproval(hold_reason, preview, policy=hold_reason.startswith("Policy requires"))
-                        cur.execute("SELECT rowback.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
+                        cur.execute("SELECT lomberk.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
                         execution_completed = True
         except HoldForApproval as e:
             try:
                 # One transaction: an approver never sees the held write without its preview.
                 with psycopg.connect(self.dsn) as rq_conn, rq_conn.transaction(), rq_conn.cursor() as rq_cur:
-                    rq_cur.execute("SELECT rowback.requeue_checkpoint(%s)", (public_id,))
+                    rq_cur.execute("SELECT lomberk.requeue_checkpoint(%s)", (public_id,))
                     if e.preview is not None:
-                        rq_cur.execute("INSERT INTO rowback.previews (public_id, preview) VALUES (%s, %s) "
+                        rq_cur.execute("INSERT INTO lomberk.previews (public_id, preview) VALUES (%s, %s) "
                                        "ON CONFLICT (public_id) DO UPDATE SET preview = EXCLUDED.preview, created_at = now()",
                                        (public_id, psycopg.types.json.Jsonb(e.preview)))
             except psycopg.Error:
@@ -679,7 +679,7 @@ class RowbackExecutor:
             try:
                 with psycopg.connect(self.dsn, autocommit=True) as fail_conn:
                     with fail_conn.cursor() as fail_cur:
-                        fail_cur.execute("SELECT rowback.fail_checkpoint(%s)", (public_id,))
+                        fail_cur.execute("SELECT lomberk.fail_checkpoint(%s)", (public_id,))
             except Exception as e:
                 # The write itself failed; only the bookkeeping did too. Surface it so an operator can close the checkpoint.
                 logger.error("Could not mark checkpoint %s as failed: %s", public_id, type(e).__name__)
@@ -699,14 +699,14 @@ class RowbackExecutor:
                 try:
                     with conn.transaction(), conn.cursor() as cur:
                         cur.execute(
-                            "SELECT * FROM rowback.begin_checkpoint(%s, %s, %s, %s, %s)",
+                            "SELECT * FROM lomberk.begin_checkpoint(%s, %s, %s, %s, %s)",
                             (sql_to_execute, classification, agent_label, principal, operation_id)
                         )
                         row = cur.fetchone()
                         cp_id = row[0]
                         public_id = row[1]
 
-                        cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                        cur.execute("SELECT lomberk.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                         exec_token = cur.fetchone()[0]
                 except psycopg.errors.UniqueViolation as e:
                     if e.diag.constraint_name == 'idx_checkpoints_idempotency':
@@ -727,7 +727,7 @@ class RowbackExecutor:
 
             with psycopg.connect(self.dsn, autocommit=False) as conn:
                 with conn.transaction(), conn.cursor() as cur:
-                    cur.execute("SELECT id, sql_text, status FROM rowback.get_pending_checkpoint(%s)", (public_id,))
+                    cur.execute("SELECT id, sql_text, status FROM lomberk.get_pending_checkpoint(%s)", (public_id,))
                     row = cur.fetchone()
                     if not row:
                         return ExecutionResult(operation_id=None, status="failed", message="Token not found.")
@@ -736,21 +736,21 @@ class RowbackExecutor:
                         return ExecutionResult(operation_id=None, status="failed", message=f"Checkpoint status is {status}, not pending.")
 
                     if self.approval_timeout_minutes is not None:
-                        cur.execute("SELECT created_at < now() - make_interval(mins => %s) FROM rowback.checkpoints WHERE id = %s", (self.approval_timeout_minutes, cp_id))
+                        cur.execute("SELECT created_at < now() - make_interval(mins => %s) FROM lomberk.checkpoints WHERE id = %s", (self.approval_timeout_minutes, cp_id))
                         if cur.fetchone()[0]:
-                            cur.execute("SELECT rowback.reject_checkpoint(%s)", (public_id,))
+                            cur.execute("SELECT lomberk.reject_checkpoint(%s)", (public_id,))
                             audit("expired", actor=actor, public_id=public_id, sql=sql_to_execute)
                             return ExecutionResult(operation_id=None, status="denied", message=f"Checkpoint expired: pending longer than {self.approval_timeout_minutes} minutes. Ask the agent to resubmit.")
 
-                    from rowback.sentinel import AISentinel
+                    from lomberk.sentinel import AISentinel
                     safe, reason = AISentinel()._ast_firewall(sql_to_execute)
                     if not safe:
-                        cur.execute("SELECT rowback.reject_checkpoint(%s)", (public_id,))
+                        cur.execute("SELECT lomberk.reject_checkpoint(%s)", (public_id,))
                         audit("rejected", actor="hard_gate", public_id=public_id, sql=sql_to_execute, reason=reason)
                         # Transaction context manager will commit
                         return ExecutionResult(operation_id=None, status="denied", message=f"Hard Gate Denied: {reason}")
 
-                    cur.execute("SELECT rowback.record_approval(%s, %s)", (public_id, actor))
+                    cur.execute("SELECT lomberk.record_approval(%s, %s)", (public_id, actor))
                     approvals = cur.fetchone()[0]
                     if self.required_approvals > 1 and approvals < self.required_approvals:
                         audit("approval_recorded", actor=actor, public_id=public_id, approvals=approvals, required=self.required_approvals)
@@ -759,9 +759,9 @@ class RowbackExecutor:
                         return ExecutionResult(operation_id=None, status="awaiting_approval", public_id=public_id,
                                                message=f"{approvals} of {self.required_approvals} approvals.{note}")
 
-                    cur.execute("SELECT rowback.approve_checkpoint(%s, 'ALLOW')", (public_id,))
+                    cur.execute("SELECT lomberk.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                     exec_token = cur.fetchone()[0]
-                    cur.execute("SELECT preview FROM rowback.previews WHERE public_id = %s", (public_id,))
+                    cur.execute("SELECT preview FROM lomberk.previews WHERE public_id = %s", (public_id,))
                     stored = cur.fetchone()
                     # Transaction context manager will commit
 
@@ -776,7 +776,7 @@ class RowbackExecutor:
         try:
             with psycopg.connect(self.dsn, autocommit=True) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT rowback.check_checkpoint_status(%s)", (public_id,))
+                    cur.execute("SELECT lomberk.check_checkpoint_status(%s)", (public_id,))
                     return cur.fetchone()[0]
         except psycopg.OperationalError:
             # Never print: stdout is the MCP JSON-RPC channel.

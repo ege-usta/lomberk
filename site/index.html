@@ -3,24 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rowback: every agent write, reversible</title>
+<title>Lomberk: every agent write, reversible</title>
 <meta name="description" content="An MCP gateway for PostgreSQL. Agents never hold the database password, destructive SQL is blocked, risky writes wait for a person, and every write can be undone.">
 <meta name="theme-color" content="#cf2e22">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="canonical" href="https://ege-usta.github.io/rowback/">
+<link rel="canonical" href="https://ege-usta.github.io/lomberk/">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Rowback">
-<meta property="og:title" content="Rowback: every agent write, reversible">
+<meta property="og:site_name" content="Lomberk">
+<meta property="og:title" content="Lomberk: every agent write, reversible">
 <meta property="og:description" content="An MCP gateway for PostgreSQL. Agents never hold the database password, destructive SQL is blocked, risky writes wait for a person, and every write can be undone.">
-<meta property="og:url" content="https://ege-usta.github.io/rowback/">
-<meta property="og:image" content="https://ege-usta.github.io/rowback/og.png">
+<meta property="og:url" content="https://ege-usta.github.io/lomberk/">
+<meta property="og:image" content="https://ege-usta.github.io/lomberk/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Rowback: DROP TABLE denied; a protected DELETE held, approved, then undone.">
+<meta property="og:image:alt" content="Lomberk: DROP TABLE denied; a protected DELETE held, approved, then undone.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Rowback: every agent write, reversible">
+<meta name="twitter:title" content="Lomberk: every agent write, reversible">
 <meta name="twitter:description" content="An MCP gateway for PostgreSQL. Agents never hold the database password, destructive SQL is blocked, risky writes wait for a person, and every write can be undone.">
-<meta name="twitter:image" content="https://ege-usta.github.io/rowback/og.png">
+<meta name="twitter:image" content="https://ege-usta.github.io/lomberk/og.png">
 <style>
 /* Fonts are served from this site, not Google: no visitor IP goes to a third party (GDPR). OFL licensed. */
 @font-face {
@@ -216,12 +216,12 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <header class="hero" id="top" data-state="deleted">
   <div class="wrap">
     <nav aria-label="Main">
-      <a class="mark" href="#top">Rowback</a>
+      <a class="mark" href="#top">Lomberk</a>
       <div class="navlinks">
         <a href="#how">How undo works</a>
         <a href="#pricing">Pricing</a>
-        <a href="https://github.com/ege-usta/rowback">GitHub</a>
-        <a class="btn" href="https://github.com/ege-usta/rowback#1-start-the-stack">Start free</a>
+        <a href="https://github.com/ege-usta/lomberk">GitHub</a>
+        <a class="btn" href="https://github.com/ege-usta/lomberk#1-start-the-stack">Start free</a>
       </div>
     </nav>
   </div>
@@ -230,7 +230,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
       <h1 class="display">Every agent write, reversible.</h1>
       <p class="sub">Agents never hold your database password. Destructive SQL is blocked, risky writes wait for a person, and every write can be undone.</p>
       <div class="ctas">
-        <a class="btn" href="https://github.com/ege-usta/rowback#1-start-the-stack">Start free</a>
+        <a class="btn" href="https://github.com/ege-usta/lomberk#1-start-the-stack">Start free</a>
         <a href="#pricing">See pricing</a>
       </div>
     </div>
@@ -281,7 +281,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
       <div><h3>The database records every change</h3><p>A trigger inside PostgreSQL captures each changed row, cascades included, and refuses agent writes that don't carry a single-use token.</p></div>
       <div><h3>Undo goes parents first</h3><p>Deleted rows come back in foreign-key order, then updates revert, then inserts disappear. That's why the users returned before their payments.</p></div>
       <div><h3>It refuses to overwrite</h3><p>If a row changed after the checkpoint, or the schema drifted, undo stops and names the row. It never guesses.</p></div>
-      <div><h3>The ledger can be checked</h3><p>Checkpoints are append-only and SHA-256 hash-chained. <code>rowback verify-ledger</code> finds the first altered entry.</p></div>
+      <div><h3>The ledger can be checked</h3><p>Checkpoints are append-only and SHA-256 hash-chained. <code>lomberk verify-ledger</code> finds the first altered entry.</p></div>
     </div>
   </div>
 </section>
@@ -291,13 +291,13 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
     <div>
       <h2 class="display">One command for your agent.</h2>
       <p class="lede">Claude Code, Cursor, or your own agent over MCP. It gets a URL and a key, nothing else.</p>
-      <pre>claude mcp add --transport http rowback \
+      <pre>claude mcp add --transport http lomberk \
   https://your-gateway/mcp \
   --header "Authorization: Bearer $AGENT_KEY"</pre>
       <table class="perf">
         <tbody>
           <tr><td>A captured, undoable write</td><td><strong>18.3</strong> ms</td></tr>
-          <tr><td>A read through Rowback</td><td><strong>5.4</strong> ms</td></tr>
+          <tr><td>A read through Lomberk</td><td><strong>5.4</strong> ms</td></tr>
           <tr><td>A plain write, new connection</td><td><strong>4.8</strong> ms</td></tr>
         </tbody>
       </table>
@@ -313,9 +313,9 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <section class="limits">
   <div class="wrap">
     <h2 class="display">What it doesn't cover.</h2>
-    <p class="lede">Your security team will ask, so here it is up front. The full model is in <a href="https://github.com/ege-usta/rowback/blob/main/SECURITY.md">SECURITY.md</a>, and 20 real attacks with the exact refusal for each are in the <a href="https://github.com/ege-usta/rowback/blob/main/docs/attack-gallery.md">attack gallery</a>.</p>
+    <p class="lede">Your security team will ask, so here it is up front. The full model is in <a href="https://github.com/ege-usta/lomberk/blob/main/SECURITY.md">SECURITY.md</a>, and 20 real attacks with the exact refusal for each are in the <a href="https://github.com/ege-usta/lomberk/blob/main/docs/attack-gallery.md">attack gallery</a>.</p>
     <ul class="limit-list">
-      <li><strong>Infrastructure tokens</strong>Rowback guards the SQL path. An agent holding a cloud or hosting API token can still delete a volume. Keep those tokens away from agents.</li>
+      <li><strong>Infrastructure tokens</strong>Lomberk guards the SQL path. An agent holding a cloud or hosting API token can still delete a volume. Keep those tokens away from agents.</li>
       <li><strong>Database superusers</strong>They can disable triggers and rewrite the ledger. Ship the ledger's head hash to your SIEM.</li>
       <li><strong>Some tables, for now</strong>Tables with rules or classic inheritance are refused rather than guessed at, and so are partitioned tables with their own triggers. Writes to other tables with their own triggers wait for a person, unless you register the table with <code>--allow-triggers</code>.</li>
       <li><strong>Schema changes</strong>DDL is blocked, not reversible. It goes through your normal migrations.</li>
@@ -328,21 +328,21 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
     <h2 class="display">Pricing.</h2>
     <p class="lede">The whole safety path is free and open source. Pro adds what a team needs to share it.</p>
     <div class="tiers">
-      <div class="tier"><h3>Free</h3><div class="amount">$0</div><p>Apache-2.0 and self-hosted. Hard gate, holds, capture, ledger, approvals from the API or CLI. Undo reaches back 24 hours.</p><a class="tier-cta" href="https://github.com/ege-usta/rowback#1-start-the-stack">Start free</a></div>
+      <div class="tier"><h3>Free</h3><div class="amount">$0</div><p>Apache-2.0 and self-hosted. Hard gate, holds, capture, ledger, approvals from the API or CLI. Undo reaches back 24 hours.</p><a class="tier-cta" href="https://github.com/ege-usta/lomberk#1-start-the-stack">Start free</a></div>
       <div class="tier pro"><h3>Pro</h3><div class="amount">$199<small> / month</small></div><p>Or $1,990 a year. Undo reaches back 30 days. Web approval panel, two-person rule, Slack approvals, approver SSO, audit export. One key covers up to 3 databases.</p><a class="btn tier-btn" href="https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU">Buy Pro</a></div>
-      <div class="tier"><h3>Enterprise</h3><div class="amount"><small>Custom</small></div><p>Undo with no time limit, unlimited databases, an annual invoice, priority answers, and help with your security questionnaire.</p><a class="tier-cta" href="https://github.com/ege-usta/rowback/discussions">Talk to us</a></div>
+      <div class="tier"><h3>Enterprise</h3><div class="amount"><small>Custom</small></div><p>Undo with no time limit, unlimited databases, an annual invoice, priority answers, and help with your security questionnaire.</p><a class="tier-cta" href="https://github.com/ege-usta/lomberk/discussions">Talk to us</a></div>
     </div>
-    <p class="partner">Self-hosted, so <strong>your data never reaches us</strong>. Pay by card through Polar and the license key arrives by email. No calls needed: <code>rowback doctor</code> checks your setup and tells you how to fix each problem.</p>
+    <p class="partner">Self-hosted, so <strong>your data never reaches us</strong>. Pay by card through Polar and the license key arrives by email. No calls needed: <code>lomberk doctor</code> checks your setup and tells you how to fix each problem.</p>
   </div>
 </section>
 
 <section class="close">
   <div class="wrap">
     <h2 class="display">Make your agent's next DELETE undoable.</h2>
-    <a class="btn" href="https://github.com/ege-usta/rowback#1-start-the-stack">Start free</a>
+    <a class="btn" href="https://github.com/ege-usta/lomberk#1-start-the-stack">Start free</a>
     <footer>
-      <span>Rowback. Open core: Apache-2.0, with <code>ee/</code> under the <a href="https://github.com/ege-usta/rowback/blob/main/src/rowback/ee/LICENSE">Elastic License 2.0</a>.</span>
-      <nav aria-label="Footer"><a href="https://github.com/ege-usta/rowback">GitHub</a><a href="https://github.com/ege-usta/rowback/blob/main/SECURITY.md">Security model</a></nav>
+      <span>Lomberk. Open core: Apache-2.0, with <code>ee/</code> under the <a href="https://github.com/ege-usta/lomberk/blob/main/src/lomberk/ee/LICENSE">Elastic License 2.0</a>.</span>
+      <nav aria-label="Footer"><a href="https://github.com/ege-usta/lomberk">GitHub</a><a href="https://github.com/ege-usta/lomberk/blob/main/SECURITY.md">Security model</a></nav>
     </footer>
   </div>
 </section>

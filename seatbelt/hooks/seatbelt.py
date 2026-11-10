@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Rowback Seatbelt: a Claude Code PreToolUse hook that stops an agent before a
+"""Lomberk Seatbelt: a Claude Code PreToolUse hook that stops an agent before a
 destructive database command and asks you first.
 
 It pattern-matches commands and SQL; it is a seatbelt, not a firewall. For a
 real gate with approvals and row-level undo on production Postgres, see
-https://github.com/ege-usta/rowback
+https://github.com/ege-usta/lomberk
 """
 import json
 import os
 import re
 import sys
 
-LEARN_MORE = "For production databases, Rowback adds approvals and row-level undo: github.com/ege-usta/rowback"
+LEARN_MORE = "For production databases, Lomberk adds approvals and row-level undo: github.com/ege-usta/lomberk"
 
 # Bash: only look for SQL when a database client is actually invoked, so commit
 # messages and greps that merely mention "DROP TABLE" pass. The preceding set
@@ -140,7 +140,7 @@ def main():
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": mode,
-        "permissionDecisionReason": f"Rowback Seatbelt: this looks destructive ({found}). Check the target database before allowing it. {LEARN_MORE}",
+        "permissionDecisionReason": f"Lomberk Seatbelt: this looks destructive ({found}). Check the target database before allowing it. {LEARN_MORE}",
     }}))
 
 

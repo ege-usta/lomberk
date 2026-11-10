@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Rowback Pilot",
-    "description": "Rowback isolated test workspace bot",
+    "name": "Lomberk Pilot",
+    "description": "Lomberk isolated test workspace bot",
     "background_color": "#0a0a0a"
   },
   "features": {
     "bot_user": {
-      "display_name": "Rowback",
+      "display_name": "Lomberk",
       "always_online": false
     }
   },

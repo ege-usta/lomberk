@@ -1,8 +1,8 @@
-"""Fake Slack pieces for the offline pilot. Test-only: it does not ship in the rowback package."""
+"""Fake Slack pieces for the offline pilot. Test-only: it does not ship in the lomberk package."""
 import asyncio
 import logging
 
-logger = logging.getLogger("rowback.offline_pilot")
+logger = logging.getLogger("lomberk.offline_pilot")
 
 class InMemoryBindingStore:
     def __init__(self):

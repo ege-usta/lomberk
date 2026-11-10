@@ -12,13 +12,13 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel
 from starlette.routing import Route
 
-from rowback.audit import audit
-from rowback.config import load_config, pro_features, quorum_without_identity_source, weak_key_reason
-from rowback.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, RowbackExecutor
-from rowback.policy import PolicyEngine
-from rowback.sentinel import AISentinel
-from rowback.server import build_mcp, package_version
-from rowback.sql.classify import classify_sql
+from lomberk.audit import audit
+from lomberk.config import load_config, pro_features, quorum_without_identity_source, weak_key_reason
+from lomberk.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, LomberkExecutor
+from lomberk.policy import PolicyEngine
+from lomberk.sentinel import AISentinel
+from lomberk.server import build_mcp, package_version
+from lomberk.sql.classify import classify_sql
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +36,10 @@ _ADMIN_KEY = None
 # the admin key is deliberately excluded from the approval quorum, so it must not be able to
 # mint (forge) panel sessions — least of all an `oidc:` identity. A restart ends all sessions.
 _SESSION_SECRET = None
-_METRICS_KEY = None  # ROWBACK_METRICS_KEY; unset = /metrics is off
+_METRICS_KEY = None  # LOMBERK_METRICS_KEY; unset = /metrics is off
 _SSO = None  # ee OidcVerifier when sso.issuer is set
 _ALLOW_ADMIN_KEY = True
-_PRO = False  # a valid Rowback Pro license is present
+_PRO = False  # a valid Lomberk Pro license is present
 _PLAN = "free"  # "free", "pro" or "enterprise": sets how far back undo reaches
 
 @asynccontextmanager
@@ -59,22 +59,22 @@ async def lifespan(app: FastAPI):
     config = load_config()
     dsn = os.environ.get(config.database.agent_dsn_env)
 
-    agent_key = os.environ.get("ROWBACK_API_KEY")
-    admin_key = os.environ.get("ROWBACK_ADMIN_KEY")
+    agent_key = os.environ.get("LOMBERK_API_KEY")
+    admin_key = os.environ.get("LOMBERK_ADMIN_KEY")
 
     if not dsn:
         raise ValueError(f"Startup Refusal: Database DSN must be provided via {config.database.agent_dsn_env}.")
     if not agent_key or not admin_key:
-        raise ValueError("Startup Refusal: Both ROWBACK_API_KEY and ROWBACK_ADMIN_KEY must be configured.")
+        raise ValueError("Startup Refusal: Both LOMBERK_API_KEY and LOMBERK_ADMIN_KEY must be configured.")
     if agent_key == admin_key:
         raise ValueError("Startup Refusal: Agent and Admin keys must NOT be identical.")
     # A guessable key is the one thing a rate limit would have to save; a random 32+ character
     # key can't be brute-forced, so refuse anything else. Demos opt out explicitly.
-    metrics_key = os.environ.get("ROWBACK_METRICS_KEY") or None
+    metrics_key = os.environ.get("LOMBERK_METRICS_KEY") or None
     if metrics_key in (agent_key, admin_key):
-        raise ValueError("Startup Refusal: ROWBACK_METRICS_KEY must differ from the agent and admin keys.")
-    if os.environ.get("ROWBACK_ALLOW_WEAK_KEYS", "").lower() != "true":
-        for env, key in (("ROWBACK_API_KEY", agent_key), ("ROWBACK_ADMIN_KEY", admin_key), ("ROWBACK_METRICS_KEY", metrics_key)):
+        raise ValueError("Startup Refusal: LOMBERK_METRICS_KEY must differ from the agent and admin keys.")
+    if os.environ.get("LOMBERK_ALLOW_WEAK_KEYS", "").lower() != "true":
+        for env, key in (("LOMBERK_API_KEY", agent_key), ("LOMBERK_ADMIN_KEY", admin_key), ("LOMBERK_METRICS_KEY", metrics_key)):
             if key and (reason := weak_key_reason(key)):
                 raise ValueError(f"Startup Refusal: {env} {reason}. Generate one with: openssl rand -hex 32")
     _METRICS_KEY = metrics_key
@@ -82,19 +82,19 @@ async def lifespan(app: FastAPI):
     _API_KEY = agent_key
     _ADMIN_KEY = admin_key
     _SESSION_SECRET = secrets.token_bytes(32)
-    slack_enabled = os.environ.get("ROWBACK_SLACK_ENABLED", "").lower() == "true"
+    slack_enabled = os.environ.get("LOMBERK_SLACK_ENABLED", "").lower() == "true"
     needs_pro = pro_features(config)
-    license_key = os.environ.get("ROWBACK_LICENSE_KEY")
+    license_key = os.environ.get("LOMBERK_LICENSE_KEY")
     _PLAN = "free"
     if needs_pro or license_key:
-        from rowback.ee.license import check_license
+        from lomberk.ee.license import check_license
         control_dsn = os.environ.get(config.database.admin_dsn_env)
         store = LicenseActivationStore(control_dsn) if license_key and control_dsn else None
         _PLAN = await asyncio.to_thread(check_license, license_key, needs_pro, store)
     _PRO = _PLAN != "free"
     _SSO, _ALLOW_ADMIN_KEY = None, True
     if config.sso.issuer:
-        from rowback.ee.sso import OidcVerifier
+        from lomberk.ee.sso import OidcVerifier
         _SSO = await asyncio.to_thread(OidcVerifier, config.sso)
         _ALLOW_ADMIN_KEY = bool(config.sso.allow_admin_key)
     elif config.sso.allow_admin_key is False:
@@ -126,16 +126,16 @@ async def lifespan(app: FastAPI):
         if runtime_super:
             raise ValueError("Startup Refusal: Agent role must not be a superuser.")
 
-        _executor_instance = RowbackExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns, preview_writes=config.approvals.preview, undo_window_hours=UNDO_WINDOW_HOURS[_PLAN])
+        _executor_instance = LomberkExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns, preview_writes=config.approvals.preview, undo_window_hours=UNDO_WINDOW_HOURS[_PLAN])
         _policy_engine_instance = PolicyEngine(config)
 
         # Production Slack Transport Wiring
         if slack_enabled:
-            app_token = os.environ.get("ROWBACK_SLACK_APP_TOKEN")
-            bot_token = os.environ.get("ROWBACK_SLACK_BOT_TOKEN")
+            app_token = os.environ.get("LOMBERK_SLACK_APP_TOKEN")
+            bot_token = os.environ.get("LOMBERK_SLACK_BOT_TOKEN")
 
             if not app_token or not bot_token:
-                raise ValueError("Startup Refusal: ROWBACK_SLACK_APP_TOKEN and ROWBACK_SLACK_BOT_TOKEN are required when Slack is enabled.")
+                raise ValueError("Startup Refusal: LOMBERK_SLACK_APP_TOKEN and LOMBERK_SLACK_BOT_TOKEN are required when Slack is enabled.")
 
             if not hasattr(config, "slack") or not config.slack.admin_allowlist:
                 raise ValueError("Startup Refusal: config.slack.admin_allowlist is missing or empty.")
@@ -156,8 +156,8 @@ async def lifespan(app: FastAPI):
                 from slack_sdk.socket_mode.aiohttp import SocketModeClient
                 from slack_sdk.web.async_client import AsyncWebClient
 
-                from rowback.ee.slack import SlackInteractionAdapter, slack_actor
-                from rowback.ee.slack_transport import SlackTransport
+                from lomberk.ee.slack import SlackInteractionAdapter, slack_actor
+                from lomberk.ee.slack_transport import SlackTransport
                 # Bind local registry to callbacks
                 def make_callbacks(executor, policy, resolver, updater, workers_set, shutdown_evt):
                     async def resolve_cb(team, channel, ts):
@@ -165,10 +165,10 @@ async def lifespan(app: FastAPI):
 
                     async def _run_tracked(func, *args):
                         if shutdown_evt.is_set():
-                            from rowback.ee.slack import TaskCapacityExceededError
+                            from lomberk.ee.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("Server is shutting down. Rejecting new DB workers.")
                         if len(workers_set) >= 50:
-                            from rowback.ee.slack import TaskCapacityExceededError
+                            from lomberk.ee.slack import TaskCapacityExceededError
                             raise TaskCapacityExceededError("DB worker capacity exceeded. Server is busy.")
 
                         t = asyncio.create_task(asyncio.to_thread(func, *args))
@@ -198,7 +198,7 @@ async def lifespan(app: FastAPI):
 
                 web_factory = getattr(app.state, "slack_web_client_factory", None) or AsyncWebClient
                 if use_publisher:
-                    from rowback.ee.slack_publisher import SlackPublisher
+                    from lomberk.ee.slack_publisher import SlackPublisher
                     publisher = SlackPublisher(
                         admin_dsn, web_factory(token=bot_token), config.slack.channel_id,
                         set(config.slack.team_allowlist), include_sql=config.slack.include_sql,
@@ -234,7 +234,7 @@ async def lifespan(app: FastAPI):
                 await _slack_transport_instance.connect()
             except Exception as e:
                 import logging
-                logging.getLogger("rowback.api").error(f"Failed to start Slack transport: {e}")
+                logging.getLogger("lomberk.api").error(f"Failed to start Slack transport: {e}")
                 # A failed connect is logged, not fatal. Config errors (missing tokens) are raised
                 # above, before this try, so a misconfigured Slack still refuses startup.
         else:
@@ -270,7 +270,7 @@ async def lifespan(app: FastAPI):
         _policy_engine_instance = None
 
 # No /docs or /openapi.json: they map every endpoint for anyone who can reach the port.
-app = FastAPI(title="Rowback API", version=package_version(), lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Lomberk API", version=package_version(), lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -335,7 +335,7 @@ def verify_approver(api_key: str = Security(api_key_header),
                     cred: HTTPAuthorizationCredentials | None = Security(_bearer)) -> str:
     """Who is approving: a person via SSO ("oidc:<email>"), or the shared admin key."""
     if _SSO is not None and cred is not None:
-        from rowback.ee.sso import SsoError
+        from lomberk.ee.sso import SsoError
         try:
             return _SSO.verify(cred.credentials)
         except SsoError:
@@ -365,7 +365,7 @@ class ExecuteRequest(BaseModel):
 def execute_query(
     req: ExecuteRequest,
     api_key: str = Depends(verify_api_key),
-    executor: RowbackExecutor = Depends(get_executor),
+    executor: LomberkExecutor = Depends(get_executor),
     policy_engine: PolicyEngine = Depends(get_policy_engine)
 ):
     # Step 1: Prevent multi-statement at the API boundary
@@ -406,12 +406,12 @@ def execute_query(
 @app.get("/v1/checkpoints/pending")
 def list_pending_checkpoints(
     actor: str = Depends(verify_approver),
-    executor: RowbackExecutor = Depends(get_executor)
+    executor: LomberkExecutor = Depends(get_executor)
 ):
     import psycopg
     with psycopg.connect(executor.dsn) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, public_id, sql_text, agent_label, created_at FROM rowback.list_pending_checkpoints()")
+            cur.execute("SELECT id, public_id, sql_text, agent_label, created_at FROM lomberk.list_pending_checkpoints()")
             rows = cur.fetchall()
             return [{"id": r[0], "public_id": r[1], "sql": r[2], "agent": r[3], "created_at": r[4]} for r in rows]
 
@@ -420,7 +420,7 @@ def list_pending_checkpoints(
 def check_checkpoint_status(
     public_id: str,
     actor: str = Depends(verify_approver),
-    executor: RowbackExecutor = Depends(get_executor)
+    executor: LomberkExecutor = Depends(get_executor)
 ):
     try:
         status = executor.check_status(public_id)
@@ -438,7 +438,7 @@ def check_checkpoint_status(
 def approve_checkpoint(
     public_id: str,
     actor: str = Depends(verify_approver),
-    executor: RowbackExecutor = Depends(get_executor)
+    executor: LomberkExecutor = Depends(get_executor)
 ):
     try:
         res = executor.execute_pending(public_id, actor=actor)
@@ -465,7 +465,7 @@ def approve_checkpoint(
 def reject_checkpoint(
     public_id: str,
     actor: str = Depends(verify_approver),
-    executor: RowbackExecutor = Depends(get_executor)
+    executor: LomberkExecutor = Depends(get_executor)
 ):
     if not executor.reject(public_id, actor=actor):
         raise HTTPException(status_code=404, detail="Token not found or not pending")
@@ -478,7 +478,7 @@ _UNDO_HTTP_STATUS = {"expired": 403, "already_undone": 409, "conflict": 409, "bu
 def get_checkpoint(
     public_id: str,
     actor: str = Depends(verify_approver),
-    executor: RowbackExecutor = Depends(get_executor)
+    executor: LomberkExecutor = Depends(get_executor)
 ):
     """What an approver reviews before deciding: the exact SQL and who sent it."""
     cp = executor.get_checkpoint(public_id)
@@ -491,7 +491,7 @@ def get_checkpoint(
 def undo_checkpoint(
     public_id: str,
     actor: str = Depends(verify_approver),
-    executor: RowbackExecutor = Depends(get_executor)
+    executor: LomberkExecutor = Depends(get_executor)
 ):
     res = executor.execute_undo(public_id, agent_label=actor)
     if res.status == "undone":
@@ -502,7 +502,7 @@ def undo_checkpoint(
 
 def _require_pro(feature: str) -> None:
     if not _PRO:
-        raise HTTPException(status_code=403, detail=f"{feature} is a Rowback Pro feature: set ROWBACK_LICENSE_KEY.")
+        raise HTTPException(status_code=403, detail=f"{feature} is a Lomberk Pro feature: set LOMBERK_LICENSE_KEY.")
 
 
 @app.get("/v1/audit/export")
@@ -510,19 +510,19 @@ def export_audit(
     format: str = "csv",
     since: datetime | None = None,
     actor: str = Depends(verify_approver),
-    executor: RowbackExecutor = Depends(get_executor)
+    executor: LomberkExecutor = Depends(get_executor)
 ):
     """Every checkpoint with who approved it (Pro)."""
     _require_pro("Audit export")
     from fastapi.responses import Response
 
-    from rowback.ee.export import FORMATS, render
+    from lomberk.ee.export import FORMATS, render
     if format not in FORMATS:
         raise HTTPException(status_code=422, detail=f"format must be one of {sorted(FORMATS)}")
     rows = executor.list_checkpoints(since=since)
     audit("exported", actor=actor, rows=len(rows), format=format)
     return Response(render(rows, format), media_type=FORMATS[format],
-                    headers={"Content-Disposition": f'attachment; filename="rowback-audit.{format}"'})
+                    headers={"Content-Disposition": f'attachment; filename="lomberk-audit.{format}"'})
 
 
 class _PanelGate:
@@ -537,14 +537,14 @@ class _PanelGate:
             await HTMLResponse(_PRO_ONLY_PAGE, status_code=403)(scope, receive, send)
             return
         if self.inner is None:
-            from rowback.ee.panel import build_panel
+            from lomberk.ee.panel import build_panel
             self.inner = build_panel()
         await self.inner(scope, receive, send)
 
 
-_PRO_ONLY_PAGE = """<!doctype html><meta charset="utf-8"><title>Rowback</title>
+_PRO_ONLY_PAGE = """<!doctype html><meta charset="utf-8"><title>Lomberk</title>
 <body style="font-family: system-ui, sans-serif; padding: 2rem; max-width: 40rem">
-<h1>Rowback</h1><p>The web approval panel is a Rowback Pro feature. Set <code>ROWBACK_LICENSE_KEY</code>
+<h1>Lomberk</h1><p>The web approval panel is a Lomberk Pro feature. Set <code>LOMBERK_LICENSE_KEY</code>
 and restart the gateway, or approve from the API or CLI.</p></body>"""
 
 app.mount("/panel", _PanelGate())
@@ -558,33 +558,33 @@ def healthz():
 
 @app.get("/metrics", include_in_schema=False)
 def metrics(cred: HTTPAuthorizationCredentials | None = Security(_bearer)):
-    """Prometheus text format, scraped with `Authorization: Bearer $ROWBACK_METRICS_KEY`. Counts
+    """Prometheus text format, scraped with `Authorization: Bearer $LOMBERK_METRICS_KEY`. Counts
     only: no SQL, rows or identities. Off (404) unless that key is set."""
     from fastapi.responses import PlainTextResponse
 
-    from rowback.audit import EVENTS
+    from lomberk.audit import EVENTS
     if not _METRICS_KEY:
         raise HTTPException(status_code=404)
     if not _key_matches(cred.credentials if cred else None, _METRICS_KEY):
         raise HTTPException(status_code=401, detail="Invalid metrics key")
-    out = ["# HELP rowback_events_total Security decisions since the gateway started, by audit event.",
-           "# TYPE rowback_events_total counter"]
-    out += [f'rowback_events_total{{event="{e}"}} {n}' for e, n in sorted(EVENTS.items())]  # event names are fixed strings
+    out = ["# HELP lomberk_events_total Security decisions since the gateway started, by audit event.",
+           "# TYPE lomberk_events_total counter"]
+    out += [f'lomberk_events_total{{event="{e}"}} {n}' for e, n in sorted(EVENTS.items())]  # event names are fixed strings
     import psycopg
     try:
         with psycopg.connect(_executor_instance.dsn, connect_timeout=3) as conn:
             pending, oldest = conn.execute(
                 "SELECT count(*), coalesce(extract(epoch FROM now() - min(created_at)), 0) "
-                "FROM rowback.checkpoints WHERE status = 'pending'").fetchone()
+                "FROM lomberk.checkpoints WHERE status = 'pending'").fetchone()
         up = 1
     except psycopg.Error:
         pending, oldest, up = 0, 0, 0
-    out += ["# HELP rowback_database_up Whether the control role could reach the database for this scrape.",
-            "# TYPE rowback_database_up gauge", f"rowback_database_up {up}",
-            "# HELP rowback_pending_checkpoints Held writes waiting for a person.",
-            "# TYPE rowback_pending_checkpoints gauge", f"rowback_pending_checkpoints {pending}",
-            "# HELP rowback_oldest_pending_seconds How long the oldest held write has waited.",
-            "# TYPE rowback_oldest_pending_seconds gauge", f"rowback_oldest_pending_seconds {float(oldest):.0f}"]
+    out += ["# HELP lomberk_database_up Whether the control role could reach the database for this scrape.",
+            "# TYPE lomberk_database_up gauge", f"lomberk_database_up {up}",
+            "# HELP lomberk_pending_checkpoints Held writes waiting for a person.",
+            "# TYPE lomberk_pending_checkpoints gauge", f"lomberk_pending_checkpoints {pending}",
+            "# HELP lomberk_oldest_pending_seconds How long the oldest held write has waited.",
+            "# TYPE lomberk_oldest_pending_seconds gauge", f"lomberk_oldest_pending_seconds {float(oldest):.0f}"]
     return PlainTextResponse("\n".join(out) + "\n", media_type="text/plain; version=0.0.4")
 
 
@@ -609,9 +609,9 @@ def dashboard():
     from fastapi.responses import HTMLResponse
     html = """
     <html>
-        <head><title>Rowback</title></head>
+        <head><title>Lomberk</title></head>
         <body style="font-family: sans-serif; padding: 2rem;">
-            <h1>Rowback gateway</h1>
+            <h1>Lomberk gateway</h1>
             <p style="color: #666;">Approve from the <a href="/panel/">web panel</a> (Pro), the API or the CLI.</p>
         </body>
     </html>

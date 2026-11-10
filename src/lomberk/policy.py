@@ -1,6 +1,6 @@
 
-from rowback.config import RowbackConfig
-from rowback.models import (
+from lomberk.config import LomberkConfig
+from lomberk.models import (
     ClassifiedStatement,
     PolicyDecision,
     StatementClass,
@@ -9,7 +9,7 @@ from rowback.models import (
 
 
 class PolicyEngine:
-    def __init__(self, config: RowbackConfig):
+    def __init__(self, config: LomberkConfig):
         self.config = config
 
     def evaluate(self, stmt: ClassifiedStatement, rows_affected: int | None = None) -> StatementEvaluation:
@@ -46,7 +46,7 @@ class PolicyEngine:
                 return StatementEvaluation(statement=stmt, decision=PolicyDecision.REQUIRE_APPROVAL, reason=f"Rows affected ({rows_affected}) exceeds limit ({self.config.limits.max_rows_without_approval}).")
 
             # AI Sentinel (Semantic Anomaly Detection)
-            from rowback.sentinel import AISentinel
+            from lomberk.sentinel import AISentinel
             sentinel = AISentinel()
             is_safe, ai_reason = sentinel.evaluate_intent(stmt.sql, stmt.tables)
             if not is_safe:

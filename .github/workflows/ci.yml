@@ -45,7 +45,7 @@ jobs:
           # OPENAI_API_KEY is never set here, so the optional LLM sentinel stays off; tests that cover it mock the call.
           # We use testcontainers to spin up fresh ephemeral databases for integration tests.
           PYTHONPATH: src
-          ROWBACK_TEST_PG_IMAGE: postgres:${{ matrix.pg }}-alpine
+          LOMBERK_TEST_PG_IMAGE: postgres:${{ matrix.pg }}-alpine
         run: |
           uv run --no-sync pytest tests/ \
             -v \
@@ -55,7 +55,7 @@ jobs:
 
       - name: Build container image
         if: matrix.pg == '16'
-        run: docker build -t rowback:ci .
+        run: docker build -t lomberk:ci .
 
       # Fail on any FIXABLE medium+ CVE or leaked secret in the shipped image. Unfixed Debian
       # CVEs are skipped: there is nothing to upgrade to yet, and the next rebuild picks them up.
@@ -65,7 +65,7 @@ jobs:
         run: >
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
           aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
-          image --scanners vuln,secret --ignore-unfixed --severity MEDIUM,HIGH,CRITICAL --exit-code 1 rowback:ci
+          image --scanners vuln,secret --ignore-unfixed --severity MEDIUM,HIGH,CRITICAL --exit-code 1 lomberk:ci
 
       - name: Upload Test Results
         if: always()
@@ -76,7 +76,7 @@ jobs:
           retention-days: 7
 
   core-without-enterprise:
-    # Open-core promise: everything outside src/rowback/ee/ works on its own.
+    # Open-core promise: everything outside src/lomberk/ee/ works on its own.
     name: Core tests without ee/
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -97,8 +97,8 @@ jobs:
         env:
           PYTHONPATH: src
         run: |
-          rm -rf src/rowback/ee
-          grep -rL "rowback\.ee" tests --include='test_*.py' | xargs uv run --no-sync pytest -q --strict-markers
+          rm -rf src/lomberk/ee
+          grep -rL "lomberk\.ee" tests --include='test_*.py' | xargs uv run --no-sync pytest -q --strict-markers
 
   dependency-audit:
     name: Known vulnerabilities in dependencies

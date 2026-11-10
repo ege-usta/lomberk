@@ -1,13 +1,13 @@
 import pytest
 
-from rowback.config import LimitsConfig, RowbackConfig
-from rowback.models import ClassifiedStatement, PolicyDecision, StatementClass
-from rowback.policy import PolicyEngine
+from lomberk.config import LimitsConfig, LomberkConfig
+from lomberk.models import ClassifiedStatement, PolicyDecision, StatementClass
+from lomberk.policy import PolicyEngine
 
 
 @pytest.fixture
 def policy_engine():
-    config = RowbackConfig(
+    config = LomberkConfig(
         limits=LimitsConfig(max_rows_without_approval=50),
         protected_tables=["public.users"],
         deny_patterns=["DROP_SCHEMA"]
@@ -63,8 +63,8 @@ def test_config_typo_is_rejected_not_silently_ignored(tmp_path):
     import pytest
     from pydantic import ValidationError
 
-    from rowback.config import load_config
-    cfg = tmp_path / "rowback.yaml"
+    from lomberk.config import load_config
+    cfg = tmp_path / "lomberk.yaml"
     cfg.write_text("protected_table:\n  - public.users\n")
     with pytest.raises(ValidationError):
         load_config(str(cfg))
@@ -77,4 +77,4 @@ def test_protected_tables_must_name_a_schema():
     # A bare name never matches the schema.table a write names, so it would protect nothing.
     import pydantic
     with pytest.raises(pydantic.ValidationError, match="schema.table"):
-        RowbackConfig(protected_tables=["orders"])
+        LomberkConfig(protected_tables=["orders"])
