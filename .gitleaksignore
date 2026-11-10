@@ -5,3 +5,6 @@
 4b80b3acb042882a52fa01651318ff3baf2c2647:demo/helpers.sh:curl-auth-header:10
 81359b115658ccb6afb4b1e85793a2f9748b27bb:demo/helpers.sh:curl-auth-header:6
 81359b115658ccb6afb4b1e85793a2f9748b27bb:demo/helpers.sh:curl-auth-header:10
+# Same reviewed false positives, touched again by the Lomberk rename (5b5ef71).
+5b5ef71a147b6577d6ce8373744fa0ae301826de:demo/helpers.sh:curl-auth-header:10
+5b5ef71a147b6577d6ce8373744fa0ae301826de:tests/integration/test_doctor.py:generic-api-key:13
