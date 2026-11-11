@@ -291,7 +291,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
     <div>
       <h2 class="display">One command to set it up.</h2>
       <p class="lede">Give it your database owner's connection string once. It creates two least-privilege roles, installs Lomberk, makes the tables you pick undoable, checks the result and prints the line for Claude Code, Cursor, Claude Desktop, VS Code or Codex.</p>
-      <pre>uvx lomberk setup --owner-dsn "$DATABASE_URL"
+      <pre>uvx lomberk setup   # asks for it, hidden
 
 claude mcp add lomberk \
   -e LOMBERK_CONFIG=$PWD/lomberk.yaml \

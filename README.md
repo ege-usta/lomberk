@@ -15,8 +15,9 @@ Lomberk is an MCP gateway for PostgreSQL. AI agents send SQL through it instead 
 ## Quickstart (60 seconds)
 You need [uv](https://docs.astral.sh/uv/) and the owner's connection string of a PostgreSQL 14+ database (a role that can create roles: `postgres` on Supabase, Neon and RDS).
 ```bash
-uvx lomberk setup --owner-dsn "postgresql://postgres:…@db.example.com:5432/app"
+uvx lomberk setup     # asks for the owner connection string; what you type stays out of your shell history
 ```
+In a script, set `LOMBERK_INSTALL_DSN` instead and add `--yes`.
 Setup creates two least-privilege roles with generated passwords, installs Lomberk, lists your tables and makes the ones you pick undoable, then writes `lomberk.yaml` and a private `.env` (mode 600) and runs `lomberk doctor` on them. It never changes a role or file that already exists. The owner connection string is used once and never saved. At the end it prints the line for your MCP client, for example:
 ```bash
 claude mcp add lomberk -e LOMBERK_CONFIG=/path/to/lomberk.yaml -- uvx lomberk serve

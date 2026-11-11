@@ -234,9 +234,12 @@ class LomberkExecutor:
         with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 "SELECT c.public_id, c.created_at, c.status, c.classification, c.rows_affected, c.sql_text, "
-                "c.required_approvals, (SELECT count(*) FROM lomberk.approvals a WHERE a.public_id = c.public_id) AS approvals "
-                "FROM lomberk.checkpoints c WHERE c.principal = %s AND (%s::text IS NULL OR c.public_id = %s) "
-                "ORDER BY c.id DESC LIMIT %s", (principal, public_id, public_id, limit))
+                "c.required_approvals, (SELECT count(*) FROM lomberk.approvals a WHERE a.public_id = c.public_id) AS approvals, "
+                # Past the approval timeout a pending write can no longer be approved, so say so instead of "waiting".
+                "(c.status = 'pending' AND %s::int IS NOT NULL AND c.created_at < now() - make_interval(mins => %s::int)) "
+                "AS expired FROM lomberk.checkpoints c WHERE c.principal = %s AND (%s::text IS NULL OR c.public_id = %s) "
+                "ORDER BY c.id DESC LIMIT %s",
+                (self.approval_timeout_minutes, self.approval_timeout_minutes, principal, public_id, public_id, limit))
             return cur.fetchall()
 
     def describe_tables(self) -> list[dict]:

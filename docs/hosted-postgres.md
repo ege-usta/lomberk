@@ -3,7 +3,7 @@
 ## The fast way: `lomberk setup`
 With the owner role's connection string (see your provider below), one command does steps 1 and 2:
 ```bash
-uvx lomberk setup --owner-dsn 'postgresql://<owner>:<password>@<host>:5432/<db>?sslmode=require'
+uvx lomberk setup   # paste postgresql://<owner>:<password>@<host>:5432/<db>?sslmode=require when asked
 ```
 It creates both roles with generated passwords, installs Lomberk, registers the tables you pick, writes `lomberk.yaml` and `.env`, runs `lomberk doctor` and prints the line for your MCP client. It flags tables with Row Level Security and no policy for the agent (see Supabase below) and tables without a primary key. The rest of this page is the manual way, and what to know about each provider either way.
 
