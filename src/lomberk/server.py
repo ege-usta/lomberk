@@ -12,6 +12,7 @@ from lomberk.executor import ExecutionResult, LomberkExecutor
 from lomberk.policy import PolicyEngine
 from lomberk.sentinel import AISentinel
 from lomberk.sql.classify import classify_sql
+from lomberk.startup import check_config, check_db_roles, new_executor, resolve_plan
 
 
 def format_result(res: ExecutionResult) -> str:
@@ -69,28 +70,24 @@ def build_mcp(get_deps: Callable[[], tuple[LomberkExecutor, PolicyEngine]], prin
 
 
 def build_executor() -> tuple[LomberkExecutor, PolicyEngine]:
+    """The same refusals as the HTTP gateway: a valid license for Pro features, two distinct non-superuser roles."""
     config = load_config()
     dsn = os.environ.get(config.database.agent_dsn_env)
     admin_dsn = os.environ.get(config.database.admin_dsn_env)
     if not dsn or not admin_dsn:
-        raise ValueError(f"Database DSNs must be provided via {config.database.agent_dsn_env} and {config.database.admin_dsn_env}")
-    executor = LomberkExecutor(
-        admin_dsn, dsn,
-        max_rows_without_approval=config.limits.max_rows_without_approval,
-        approval_timeout_minutes=config.agent.approval_timeout_minutes,
-        protected_tables=config.protected_tables,
-        statement_timeout_ms=config.limits.statement_timeout_ms,
-        sensitive_columns=config.sensitive_columns,
-        preview_writes=config.approvals.preview,
-    )
-    return executor, PolicyEngine(config)
+        raise ValueError(f"Startup Refusal: Database DSNs must be provided via {config.database.agent_dsn_env} and {config.database.admin_dsn_env}")
+    check_config(config)
+    plan = resolve_plan(config)
+    check_db_roles(admin_dsn, dsn)
+    return new_executor(config, admin_dsn, dsn, plan), PolicyEngine(config)
 
 
 def main() -> None:
     try:
         deps = build_executor()
-    except ValueError as e:
-        print(f"Startup Refusal: {e}", file=sys.stderr)
+    except Exception as e:  # LicenseError, ValueError, a DB that can't be reached: one line, not a traceback
+        msg = str(e) if str(e).startswith("Startup Refusal") else f"Startup Refusal: {e}"
+        print(msg, file=sys.stderr)
         sys.exit(1)
     build_mcp(lambda: deps).run()
 
