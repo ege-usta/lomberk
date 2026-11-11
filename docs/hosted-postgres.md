@@ -1,5 +1,13 @@
-# Lomberk on Supabase, Neon and Amazon RDS
+# Lomberk on Supabase, Neon, Amazon RDS and Railway
 
+## The fast way: `lomberk setup`
+With the owner role's connection string (see your provider below), one command does steps 1 and 2:
+```bash
+uvx lomberk setup --owner-dsn 'postgresql://<owner>:<password>@<host>:5432/<db>?sslmode=require'
+```
+It creates both roles with generated passwords, installs Lomberk, registers the tables you pick, writes `lomberk.yaml` and `.env`, runs `lomberk doctor` and prints the line for your MCP client. It flags tables with Row Level Security and no policy for the agent (see Supabase below) and tables without a primary key. The rest of this page is the manual way, and what to know about each provider either way.
+
+## The manual way
 Every setup has the same three steps:
 
 1. Create two login roles.
@@ -38,7 +46,8 @@ Then run `lomberk doctor`. It flags anything that is set up in an unsafe way.
 
 ## Supabase
 - **Owner role:** `postgres`. Tables you created in the dashboard or with migrations belong to it.
-- **Connection:** the *direct connection* or the *session pooler* (port 5432), from Project Settings → Database. Don't use the transaction pooler (port 6543) for Lomberk.
+- **Connection:** the *session pooler* (host `aws-0-<region>.pooler.supabase.com`, port 5432), from the **Connect** button. Its user name is `postgres.<project-ref>`. The *direct connection* (`db.<project-ref>.supabase.co`) works too, but only over IPv6 unless you have the IPv4 add-on. Don't use the transaction pooler (port 6543) for Lomberk.
+- **Pooler user names:** through the pooler every role logs in as `<role>.<project-ref>`, so the gateway's connection strings use `lomberk_control.<project-ref>` and `lomberk_agent.<project-ref>`. `lomberk setup` does this for you when the owner string has that form; by hand, write them that way in `LOMBERK_ADMIN_DSN` and `LOMBERK_AGENT_DSN`. The role names inside the database stay `lomberk_control` and `lomberk_agent` (that is what `--agent-role` and `CREATE POLICY ... TO` take).
 - **Row Level Security:** if a table has RLS on, `lomberk_agent` sees no rows until it has a policy. Give it one per table:
   ```sql
   CREATE POLICY lomberk_agent_all ON public.orders TO lomberk_agent USING (true) WITH CHECK (true);
@@ -60,9 +69,16 @@ Then run `lomberk doctor`. It flags anything that is set up in an unsafe way.
 - **Connection:** the instance or cluster *writer* endpoint, with `sslmode=require` (or `verify-full` with the RDS CA bundle). Not RDS Proxy.
 - **Network:** the gateway needs to reach the database on port 5432. Put it in the same VPC, and keep the database itself off the public internet.
 
+## Railway
+- **Owner role:** `postgres`, from the Postgres service's **Variables** tab (`PGUSER`, `PGPASSWORD`).
+- **Connection:** from your laptop, `DATABASE_PUBLIC_URL` (the TCP proxy, `<name>.proxy.rlwy.net:<port>`). A gateway running inside the same Railway project should use `DATABASE_URL` (`postgres.railway.internal`) with the `lomberk_control` and `lomberk_agent` users instead, so it never leaves the private network.
+- **Nothing else is special:** no pooler, no RLS by default.
+
 ## Common errors
 | Message | Fix |
 |---|---|
+| `could not connect: ...` | Check the host, port and password; on Supabase, use the session pooler string (IPv4). |
+| `could not create role ...` | The owner connection needs the `CREATEROLE` privilege; use the role named for your provider above. |
 | `Installation cannot be performed by the runtime or control role itself` | `LOMBERK_INSTALL_DSN` must be the owner role, not `lomberk_control` or `lomberk_agent`. |
 | `Role lomberk_agent must not be a superuser` | Create the role without `SUPERUSER` (step 1). |
 | `... has its own triggers, so this write can't be undone` | See `--allow-triggers` above, or approve those writes by hand. |
