@@ -14,7 +14,7 @@ from lomberk.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, LomberkE
 from lomberk.policy import PolicyEngine
 from lomberk.sql.classify import classify_sql
 
-dotenv.load_dotenv()
+dotenv.load_dotenv(dotenv.find_dotenv(usecwd=True))  # the project the command runs in, not the install dir
 
 app = typer.Typer(help="Lomberk: every agent write, reversible", no_args_is_help=True)
 
