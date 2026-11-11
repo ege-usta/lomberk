@@ -220,10 +220,21 @@ def setup(
         except wizard.SetupError as e:
             stop(str(e))
         console.print(f"Created roles {wizard.CONTROL_ROLE} and {wizard.AGENT_ROLE} (passwords are in .env only).")
+
+        def stop_keeping_passwords(msg: str):
+            # The roles exist now and their passwords live nowhere else, so show them this once rather than lose them.
+            console.print(f"[red]Setup stopped: {escape(msg)}[/red]\nThe roles {wizard.CONTROL_ROLE} and {wizard.AGENT_ROLE} "
+                          "exist. Save these two connection strings now (shown once) as LOMBERK_ADMIN_DSN and "
+                          "LOMBERK_AGENT_DSN, fix the problem, then finish with lomberk init and lomberk doctor:",
+                          highlight=False)
+            console.print(f"LOMBERK_ADMIN_DSN={wizard.env_quote(control_dsn)}\n"
+                          f"LOMBERK_AGENT_DSN={wizard.env_quote(agent_dsn)}", highlight=False, markup=False)
+            raise typer.Exit(1)
+
         try:
             install_lomberk(owner_dsn, control_role=wizard.CONTROL_ROLE, agent_role=wizard.AGENT_ROLE)
         except (psycopg.Error, ValueError) as e:
-            stop(f"install failed: {str(e).strip().splitlines()[0]}")
+            stop_keeping_passwords(f"install failed: {str(e).strip().splitlines()[0]}")
         console.print("Installed the lomberk schema.")
 
         registered = []
@@ -261,13 +272,7 @@ def setup(
     try:
         wizard.write_files(config_file, env_file, protected, control_dsn, agent_dsn)
     except OSError as e:
-        # The roles exist now and their passwords live nowhere else, so show them this once rather than lose them.
-        console.print(f"[red]Setup stopped: could not write {escape(env_file)}: {escape(e.strerror or str(e))}.[/red]\n"
-                      "The roles and the lomberk schema are in place. Save these two connection strings now (shown once) "
-                      "as LOMBERK_ADMIN_DSN and LOMBERK_AGENT_DSN, then run lomberk doctor:", highlight=False)
-        console.print(f"LOMBERK_ADMIN_DSN={wizard.env_quote(control_dsn)}\nLOMBERK_AGENT_DSN={wizard.env_quote(agent_dsn)}",
-                      highlight=False, markup=False)
-        raise typer.Exit(1) from None
+        stop_keeping_passwords(f"could not write {env_file}: {e.strerror or e}.")
     console.print(f"Wrote {config_file} and {env_file} (private, mode 600). Keep .env out of git.")
 
     results = run_checks(config_file)

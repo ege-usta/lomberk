@@ -116,7 +116,7 @@ def test_env_values_survive_quotes_and_spaces(monkeypatch, tmp_path):
     from lomberk import setup as wizard
     for k in ENV_KEYS:  # write_files exports what it wrote; keep that out of the other tests
         monkeypatch.setenv(k, "")
-    tricky = "host=db user=lomberk_agent password=a\"b\\c options='-c search_path=x'"
+    tricky = "host=db user=lomberk_agent password=a\"b\\c options='-c search_path=x' sslrootcert=/a b/ca.pem"
     wizard.write_files(str(tmp_path / "lomberk.yaml"), str(tmp_path / ".env"), [], tricky, tricky)
     assert dotenv.dotenv_values(tmp_path / ".env")["LOMBERK_AGENT_DSN"] == tricky
 
@@ -133,3 +133,21 @@ def test_client_snippets_quote_the_path(monkeypatch):
     assert shlex.split(claude)[5] == f"LOMBERK_CONFIG={path}"
     cursor = out.splitlines()[out.splitlines().index(next(x for x in out.splitlines() if x.startswith("Cursor"))) + 1]
     assert json.loads(cursor)["mcpServers"]["lomberk"]["env"]["LOMBERK_CONFIG"] == path
+
+
+def test_setup_shows_the_passwords_once_if_install_fails(owner, monkeypatch, tmp_path):
+    import lomberk.cli
+
+    def fail(*a, **kw):
+        raise psycopg.errors.InsufficientPrivilege("permission denied for database app")
+    monkeypatch.setattr(lomberk.cli, "install_lomberk", fail)
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", owner, "--tables", "public.orders", "--yes"])
+    assert r.exit_code == 1 and "install failed" in r.output and "shown once" in r.output
+    dsn = r.output.split("LOMBERK_ADMIN_DSN=", 1)[1].splitlines()[0]
+    with psycopg.connect(dotenv.dotenv_values(stream=__import__("io").StringIO(f"X={dsn}"))["X"]) as conn:
+        assert conn.execute("SELECT current_user").fetchone()[0] == "lomberk_control"
+
+
+def test_setup_refuses_a_dsn_dotenv_would_expand(monkeypatch, tmp_path):
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", "postgresql://o:x@db/app?sslrootcert=${HOME}/ca.pem", "--yes"])
+    assert r.exit_code == 1 and "${" in r.output and not (tmp_path / ".env").exists()

@@ -40,3 +40,21 @@ def test_startup_refuses_in_one_line(monkeypatch):
     hide(monkeypatch, "aiohttp")
     with pytest.raises(ValueError, match=r"Startup Refusal: Slack approvals need.*lomberk\[pro\]"):
         resolve_plan(LomberkConfig())
+
+
+def test_solo_features_import_without_the_pro_extra(monkeypatch):
+    import builtins
+    import importlib
+    import sys
+
+    real_import = builtins.__import__
+
+    def blocked(name, *a, **kw):
+        if name.split(".")[0] in ("jwt", "slack_sdk", "aiohttp"):
+            raise ModuleNotFoundError(name)
+        return real_import(name, *a, **kw)
+    for mod in [m for m in sys.modules if m.startswith("lomberk.ee.")]:
+        monkeypatch.delitem(sys.modules, mod)
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    importlib.import_module("lomberk.ee.panel")
+    importlib.import_module("lomberk.ee.export")

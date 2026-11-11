@@ -114,6 +114,9 @@ def check_files(directory: str) -> tuple[str, str]:
 
 
 def connect(owner_dsn: str):
+    if "${" in owner_dsn:  # python-dotenv expands ${VAR} in .env values whatever the quoting
+        raise SetupError("the connection string contains ${, which .env would read as a variable. "
+                         "Use the value itself, or set Lomberk up by hand with lomberk init.")
     try:
         return psycopg.connect(owner_dsn, autocommit=True, connect_timeout=10)
     except psycopg.Error as e:
@@ -146,8 +149,8 @@ def create_roles(conn, owner_dsn: str) -> tuple[str, str]:
 
 
 def env_quote(value: str) -> str:
-    """A double-quoted .env value: connection strings can hold single quotes (make_conninfo adds them around spaces)."""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """A single-quoted .env value; only \\ and ' need escaping. connect() refuses ${, which dotenv would expand."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def write_files(config_path: str, env_path: str, protect: list[str], control_dsn: str, agent_dsn: str) -> None:

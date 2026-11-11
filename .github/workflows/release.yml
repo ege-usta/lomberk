@@ -45,7 +45,7 @@ jobs:
           cd /tmp
           /tmp/smoke/bin/lomberk --help
           /tmp/smoke/bin/lomberk setup --help
-          /tmp/smoke/bin/python -c "import lomberk.api, lomberk.server, lomberk.capture.install"
+          /tmp/smoke/bin/python -c "import lomberk.api, lomberk.server, lomberk.capture.install, lomberk.ee.panel, lomberk.ee.export"  # Solo works without the pro extra
           # stdio server without a database: one line on stderr and exit 1, never a traceback
           out=$(LOMBERK_CONFIG= /tmp/smoke/bin/lomberk serve 2>&1 </dev/null) && exit 1
           echo "$out"; echo "$out" | grep -q "Startup Refusal" && ! echo "$out" | grep -q Traceback

@@ -7,8 +7,6 @@ import time
 import urllib.parse
 import urllib.request
 
-import jwt
-
 # Asymmetric only: "none" and HS* would let anyone who knows the public key sign.
 ALLOWED_ALGS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"]
 JWKS_MIN_REFRESH_SECONDS = 60  # unknown key IDs are attacker-chosen; don't let them hammer the IdP
@@ -54,6 +52,8 @@ class OidcVerifier:
         self._refresh()
 
     def _refresh(self) -> None:
+        import jwt  # here, not at module load: the panel imports this module and must work without the pro extra
+
         keyset = jwt.PyJWKSet.from_dict(_get_json(self.jwks_url))
         self._keys = {k.key_id: k for k in keyset.keys}
         self._fetched_at = time.monotonic()
@@ -79,6 +79,8 @@ class OidcVerifier:
 
     def verify_claims(self, token: str, nonce: str | None = None) -> tuple[str, dict]:
         """verify(), plus the token's claims (the panel ties its session to their exp and groups)."""
+        import jwt
+
         try:
             key = self._key(jwt.get_unverified_header(token).get("kid"))
             if key is None:
