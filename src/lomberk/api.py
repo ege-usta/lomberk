@@ -6,19 +6,21 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from starlette.routing import Route
 
 from lomberk.audit import audit
-from lomberk.config import load_config, pro_features, quorum_without_identity_source, weak_key_reason
-from lomberk.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, LomberkExecutor
+from lomberk.config import PRICING_URL, load_config, weak_key_reason
+from lomberk.executor import LomberkExecutor
 from lomberk.policy import PolicyEngine
 from lomberk.sentinel import AISentinel
 from lomberk.server import build_mcp, package_version
 from lomberk.sql.classify import classify_sql
+from lomberk.startup import check_config, check_db_roles, new_executor, resolve_plan
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +85,7 @@ async def lifespan(app: FastAPI):
     _ADMIN_KEY = admin_key
     _SESSION_SECRET = secrets.token_bytes(32)
     slack_enabled = os.environ.get("LOMBERK_SLACK_ENABLED", "").lower() == "true"
-    needs_pro = pro_features(config)
-    license_key = os.environ.get("LOMBERK_LICENSE_KEY")
-    _PLAN = "free"
-    if needs_pro or license_key:
-        from lomberk.ee.license import check_license
-        control_dsn = os.environ.get(config.database.admin_dsn_env)
-        store = LicenseActivationStore(control_dsn) if license_key and control_dsn else None
-        _PLAN = await asyncio.to_thread(check_license, license_key, needs_pro, store)
+    _PLAN = await asyncio.to_thread(resolve_plan, config)
     _PRO = _PLAN != "free"
     _SSO, _ALLOW_ADMIN_KEY = None, True
     if config.sso.issuer:
@@ -99,34 +94,15 @@ async def lifespan(app: FastAPI):
         _ALLOW_ADMIN_KEY = bool(config.sso.allow_admin_key)
     elif config.sso.allow_admin_key is False:
         raise ValueError("Startup Refusal: sso.allow_admin_key is false but no sso.issuer is configured.")
-    if quorum_without_identity_source(config):
-        raise ValueError("Startup Refusal: approvals.required > 1 needs an identity source (SSO issuer or Slack); "
-                         "admin-key and CLI approvals never count toward the quorum, so held checkpoints would be un-approvable.")
+    check_config(config)
 
     try:
         admin_dsn = os.environ.get(config.database.admin_dsn_env)
         if not admin_dsn:
             raise ValueError('Startup Refusal: Admin DSN missing')
 
-        import psycopg
-        with psycopg.connect(admin_dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)")
-                control_user, control_super = cur.fetchone()
-
-        with psycopg.connect(dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)")
-                runtime_user, runtime_super = cur.fetchone()
-
-        if control_user == runtime_user:
-            raise ValueError("Startup Refusal: Admin DSN and Agent DSN must resolve to distinct database roles.")
-        if control_super:
-            raise ValueError("Startup Refusal: Admin role must not be a superuser.")
-        if runtime_super:
-            raise ValueError("Startup Refusal: Agent role must not be a superuser.")
-
-        _executor_instance = LomberkExecutor(admin_dsn, dsn, max_rows_without_approval=config.limits.max_rows_without_approval, approval_timeout_minutes=config.agent.approval_timeout_minutes, protected_tables=config.protected_tables, statement_timeout_ms=config.limits.statement_timeout_ms, required_approvals=config.approvals.required, sensitive_columns=config.sensitive_columns, preview_writes=config.approvals.preview, undo_window_hours=UNDO_WINDOW_HOURS[_PLAN])
+        await asyncio.to_thread(check_db_roles, admin_dsn, dsn)
+        _executor_instance = new_executor(config, admin_dsn, dsn, _PLAN)
         _policy_engine_instance = PolicyEngine(config)
 
         # Production Slack Transport Wiring
@@ -416,6 +392,23 @@ def list_pending_checkpoints(
             return [{"id": r[0], "public_id": r[1], "sql": r[2], "agent": r[3], "created_at": r[4]} for r in rows]
 
 
+CHECKPOINT_STATUSES = Literal["pending", "approved", "executing", "applied", "rejected", "failed", "undone"]
+
+
+@app.get("/v1/checkpoints")
+def list_checkpoints(
+    status: CHECKPOINT_STATUSES | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    actor: str = Depends(verify_approver),
+    executor: LomberkExecutor = Depends(get_executor)
+):
+    """Recent checkpoints, newest first: find the cp_ id to undo (`?status=applied`)."""
+    return [{"public_id": c["public_id"], "created_at": c["created_at"], "status": c["status"],
+             "classification": c["classification"], "agent": c["agent_label"], "principal": c["principal"],
+             "sql": c["sql_text"], "rows_affected": c["rows_affected"], "approved_by": c["approved_by"]}
+            for c in executor.list_checkpoints(limit=limit, status=status)]
+
+
 @app.get("/v1/checkpoints/{public_id}/status")
 def check_checkpoint_status(
     public_id: str,
@@ -502,7 +495,7 @@ def undo_checkpoint(
 
 def _require_pro(feature: str) -> None:
     if not _PRO:
-        raise HTTPException(status_code=403, detail=f"{feature} is a Lomberk Pro feature: set LOMBERK_LICENSE_KEY.")
+        raise HTTPException(status_code=403, detail=f"{feature} needs a Lomberk Solo or Pro license: set LOMBERK_LICENSE_KEY. Plans: {PRICING_URL}")
 
 
 @app.get("/v1/audit/export")
@@ -544,8 +537,9 @@ class _PanelGate:
 
 _PRO_ONLY_PAGE = """<!doctype html><meta charset="utf-8"><title>Lomberk</title>
 <body style="font-family: system-ui, sans-serif; padding: 2rem; max-width: 40rem">
-<h1>Lomberk</h1><p>The web approval panel is a Lomberk Pro feature. Set <code>LOMBERK_LICENSE_KEY</code>
-and restart the gateway, or approve from the API or CLI.</p></body>"""
+<h1>Lomberk</h1><p>The web approval panel comes with Lomberk Solo and Pro. Set <code>LOMBERK_LICENSE_KEY</code>
+and restart the gateway, or approve from the API or CLI.</p>
+<p><a href="https://ege-usta.github.io/lomberk/#pricing">See the plans</a></p></body>"""
 
 app.mount("/panel", _PanelGate())
 

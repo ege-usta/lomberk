@@ -11,13 +11,19 @@ permissions:
 
 jobs:
   test:
-    name: Run Tests (PG ${{ matrix.pg }})
+    name: Run Tests (PG ${{ matrix.pg }}, Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         pg: ["14", "15", "16", "17", "18"]
+        python: ["3.14"]
+        include:  # every supported Python once, on the middle Postgres
+          - { pg: "16", python: "3.12" }
+          - { pg: "16", python: "3.13" }
+    env:
+      UV_PYTHON: ${{ matrix.python }}  # overrides .python-version, so the matrix Python is the one tested
 
     steps:
       - name: Check out repository
@@ -28,7 +34,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.14"
+          python-version: ${{ matrix.python }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -54,14 +60,14 @@ jobs:
             --strict-markers
 
       - name: Build container image
-        if: matrix.pg == '16'
+        if: matrix.pg == '16' && matrix.python == '3.14'
         run: docker build -t lomberk:ci .
 
       # Fail on any FIXABLE medium+ CVE or leaked secret in the shipped image. Unfixed Debian
       # CVEs are skipped: there is nothing to upgrade to yet, and the next rebuild picks them up.
       # Trivy runs from its image pinned by digest, not trivy-action (whose tags were hijacked in 2026).
       - name: Scan container image
-        if: matrix.pg == '16'
+        if: matrix.pg == '16' && matrix.python == '3.14'
         run: >
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
           aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
@@ -71,7 +77,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: pytest-results-pg${{ matrix.pg }}
+          name: pytest-results-pg${{ matrix.pg }}-py${{ matrix.python }}
           path: test-results/junit.xml
           retention-days: 7
 

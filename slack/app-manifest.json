@@ -1,7 +1,7 @@
 {
   "display_information": {
-    "name": "Lomberk Pilot",
-    "description": "Lomberk isolated test workspace bot",
+    "name": "Lomberk",
+    "description": "Approve or reject AI agents' held database writes",
     "background_color": "#0a0a0a"
   },
   "features": {

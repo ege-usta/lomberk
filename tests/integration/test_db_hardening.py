@@ -57,3 +57,17 @@ def test_control_role_cannot_run_register_table(dsn):
     with psycopg.connect(dsn) as conn:
         assert not _functions(conn, "p.proname = 'register_table' "
                               "AND has_function_privilege('lomberk_control', p.oid, 'EXECUTE')")
+
+
+def test_register_grants_only_the_tables_own_sequences(dsn):
+    # A schema-wide sequence grant would let the agent read the row volume of tables it was never given.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE SEQUENCE public.shared_ids")
+        conn.execute("CREATE TABLE public.seq_reg (id serial PRIMARY KEY, body text, n bigint GENERATED ALWAYS AS IDENTITY, "
+                     "ext bigint DEFAULT nextval('public.shared_ids'))")
+        conn.execute("CREATE TABLE public.seq_other (id serial PRIMARY KEY)")
+        conn.execute("SELECT lomberk.register_table('public', 'seq_reg', 'id', 'mcp_agent')")
+        granted = {r[0] for r in conn.execute(
+            "SELECT c.relname FROM pg_class c WHERE c.relkind = 'S' AND c.relnamespace = 'public'::regnamespace "
+            "AND CASE WHEN c.relkind = 'S' THEN has_sequence_privilege('mcp_agent', c.oid, 'USAGE') END")}
+    assert granted == {"seq_reg_id_seq", "seq_reg_n_seq", "shared_ids"}

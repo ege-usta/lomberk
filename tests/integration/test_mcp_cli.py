@@ -1,4 +1,5 @@
 import os
+import sys
 
 import psycopg
 import pytest
@@ -13,6 +14,8 @@ from lomberk.executor import LomberkExecutor
 from lomberk.models import StatementEvaluation
 from lomberk.policy import PolicyDecision
 from lomberk.sql.classify import ClassifiedStatement, StatementClass
+
+SRC = os.path.join(os.path.dirname(__file__), "..", "..", "src")
 
 
 @pytest.fixture(scope="module")
@@ -56,9 +59,9 @@ def setup_db(dsn, runtime_dsn):
 @pytest.mark.asyncio
 async def test_mcp_execute_unregistered_fails(dsn, runtime_dsn, setup_db):
     server_params = StdioServerParameters(
-        command="uv",
-        args=["run", "python", "src/lomberk/cli.py", "serve"],
-        env={"LOMBERK_AGENT_DSN": runtime_dsn, "LOMBERK_ADMIN_DSN": dsn.replace("test:test@", "lomberk_control:secret@")}
+        command=sys.executable,  # not `uv run`: it would re-sync the venv this test runs in
+        args=["-m", "lomberk.cli", "serve"],
+        env={"PYTHONPATH": SRC, "LOMBERK_AGENT_DSN": runtime_dsn, "LOMBERK_ADMIN_DSN": dsn.replace("test:test@", "lomberk_control:secret@")}
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -77,9 +80,9 @@ async def test_mcp_execute_unregistered_fails(dsn, runtime_dsn, setup_db):
 @pytest.mark.asyncio
 async def test_mcp_execute_require_approval(dsn, runtime_dsn, setup_db):
     server_params = StdioServerParameters(
-        command="uv",
-        args=["run", "python", "src/lomberk/cli.py", "serve"],
-        env={"LOMBERK_AGENT_DSN": runtime_dsn, "LOMBERK_ADMIN_DSN": dsn.replace("test:test@", "lomberk_control:secret@")}
+        command=sys.executable,  # not `uv run`: it would re-sync the venv this test runs in
+        args=["-m", "lomberk.cli", "serve"],
+        env={"PYTHONPATH": SRC, "LOMBERK_AGENT_DSN": runtime_dsn, "LOMBERK_ADMIN_DSN": dsn.replace("test:test@", "lomberk_control:secret@")}
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:

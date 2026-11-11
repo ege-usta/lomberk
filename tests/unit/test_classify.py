@@ -30,6 +30,7 @@ from lomberk.sql.classify import classify_sql
     # DDL_DANGEROUS
     ("DROP SCHEMA public;", StatementClass.DDL_DANGEROUS, []),
     ("DROP DATABASE mydb;", StatementClass.DDL_DANGEROUS, []),
+    ("DROP TABLESPACE ts;", StatementClass.DDL_DANGEROUS, []),
     ("DROP TABLE users CASCADE;", StatementClass.DDL_DANGEROUS, ["users"]),
 
     # BLOCKED (Roles, system, etc)

@@ -128,3 +128,24 @@ def test_audit_trail_records_who_did_what(dsns, monkeypatch, caplog):
         ("lomberk.held", "attacker"),
         ("lomberk.rejected", "api_admin"),
     ], trail
+
+
+def test_without_preview_approval_still_runs_only_the_rows_that_were_held(dsns, monkeypatch):
+    # approvals.preview off: no preview to show, but the hold still pins how many rows the person approved.
+    monkeypatch.setattr("lomberk.sentinel.AISentinel.evaluate_intent", lambda self, sql, tables: (True, ""))
+    admin, control, agent = dsns
+    with psycopg.connect(admin, autocommit=True) as conn:
+        conn.execute("CREATE TABLE public.orders (id INT PRIMARY KEY, state TEXT)")
+        conn.execute("INSERT INTO public.orders SELECT g, 'open' FROM generate_series(1, 10) g")
+        conn.execute("SELECT lomberk.register_table('public', 'orders', 'id', 'mcp_agent')")
+    ex = LomberkExecutor(control, agent, max_rows_without_approval=5, preview_writes=False)
+
+    res = run(ex, "UPDATE public.orders SET state = 'void' WHERE state = 'open'")
+    assert res.status == "approval_required", res.message
+    with psycopg.connect(admin, autocommit=True) as conn:  # the data moves before anyone approves
+        conn.execute("INSERT INTO public.orders SELECT g, 'open' FROM generate_series(11, 500) g")
+
+    late = ex.execute_pending(res.public_id)
+    assert late.status == "failed" and "not the 10 previewed" in late.message, late.message
+    with psycopg.connect(admin) as conn:
+        assert conn.execute("SELECT count(*) FROM public.orders WHERE state = 'void'").fetchone()[0] == 0

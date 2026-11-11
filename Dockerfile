@@ -4,11 +4,17 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.18 /uv /usr/local/bin/uv
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/venv
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --extra pro --no-install-project
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --extra pro --no-editable
 
 FROM python:3.14-slim
+LABEL org.opencontainers.image.title="Lomberk" \
+      org.opencontainers.image.description="Every agent write, reversible: an MCP gateway for PostgreSQL" \
+      org.opencontainers.image.source="https://github.com/ege-usta/lomberk" \
+      org.opencontainers.image.url="https://ege-usta.github.io/lomberk/" \
+      org.opencontainers.image.documentation="https://github.com/ege-usta/lomberk#readme" \
+      org.opencontainers.image.licenses="Apache-2.0 AND Elastic-2.0"
 # Pick up Debian security fixes released after the base image was built, and drop pip:
 # the gateway runs from /opt/venv and never installs packages, so pip is only attack surface.
 RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/* \

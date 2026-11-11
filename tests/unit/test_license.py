@@ -1,6 +1,7 @@
 import http.server
 import json
 import threading
+import urllib.error
 
 import pytest
 
@@ -19,7 +20,8 @@ def polar(monkeypatch):
         def do_POST(self):
             req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             fake.requests.append((self.path, req))
-            code, body = fake.activate if self.path == "/activate" else fake.reply
+            reply = fake.activate if self.path == "/activate" else fake.reply
+            code, body = (reply.pop(0) if len(reply) > 1 else reply[0]) if isinstance(reply, list) else reply  # a list: one reply per call
             if self.path == "/validate" and req.get("activation_id") and req["activation_id"] not in fake.activations:
                 code, body = 404, '{"detail": "not found"}'
             self.send_response(code)
@@ -38,6 +40,7 @@ def polar(monkeypatch):
     monkeypatch.setattr(lic, "POLAR_VALIDATE_URL", f"http://127.0.0.1:{srv.server_port}/validate")
     monkeypatch.setattr(lic, "POLAR_ACTIVATE_URL", f"http://127.0.0.1:{srv.server_port}/activate")
     monkeypatch.setattr(lic, "validate_key", validate_key)  # check_license talks to the fake, not the stub
+    monkeypatch.setattr(lic, "RETRY_DELAYS_SECONDS", (0, 0))
     yield fake
     srv.shutdown()
 
@@ -59,9 +62,14 @@ class Store:
     ((200, '{"status": "revoked"}'), "invalid"),
     ((404, '{"detail": "not found"}'), "invalid"),   # unknown, revoked or expired key
     ((422, '{"detail": []}'), "invalid"),
-    ((500, "oops"), "unreachable"),
+    ((500, "oops"), "unreachable"),  # Polar's outage, after the retries
+    ((503, "down"), "unreachable"),
     ((429, "slow down"), "unreachable"),
-    ((200, "not json"), "unreachable"),
+    ((200, "not json"), "invalid"),  # Polar answered, and it isn't a grant
+    ((200, '{"benefit_id": null}'), "invalid"),
+    ((401, "{}"), "invalid"),
+    ((403, "{}"), "invalid"),
+    ((302, ""), "invalid"),
 ])
 def test_validate_key_maps_polar_replies(polar, reply, expected):
     polar.reply = reply
@@ -69,7 +77,20 @@ def test_validate_key_maps_polar_replies(polar, reply, expected):
     assert polar.requests[-1] == ("/validate", {"key": "KEY-1", "organization_id": lic.POLAR_ORGANIZATION_ID})
 
 
+def test_a_passing_outage_is_retried(polar):
+    polar.reply = [(503, "down"), (502, "bad gateway"), (200, GRANTED)]
+    assert validate_key("KEY-1").status == "granted"
+    assert len(polar.requests) == 3
+
+
+def test_an_outage_gives_up_after_three_tries(polar):
+    polar.reply = (500, "oops")
+    assert validate_key("KEY-1").status == "unreachable"
+    assert len(polar.requests) == 3
+
+
 def test_validate_key_when_polar_is_down(monkeypatch):
+    monkeypatch.setattr(lic, "RETRY_DELAYS_SECONDS", (0, 0))
     monkeypatch.setattr(lic, "POLAR_VALIDATE_URL", "http://127.0.0.1:9/validate")  # nothing listens
     assert validate_key("KEY-1").status == "unreachable"
 
@@ -163,3 +184,54 @@ def test_activation_outage_keeps_the_plan(polar, monkeypatch):
     monkeypatch.setattr(lic, "POLAR_ACTIVATE_URL", "http://127.0.0.1:9/activate")
     assert lic.check_license("KEY-1", ["SSO"], store) == "pro"
     assert store.activation_id is None  # tried again at the next start
+
+
+def test_activation_is_not_resent_after_polar_may_have_acted(polar):
+    """A 503 or a timeout may come after Polar counted the activation; resending would use a second slot."""
+    polar.reply, polar.activate, store = LIMITED, [(503, "down"), (201, '{"id": "act-9"}')], Store()
+    assert lic.check_license("KEY-1", ["SSO"], store) == "pro"
+    assert store.activation_id is None  # the next start tries again
+    assert [p for p, _ in polar.requests].count("/activate") == 1
+
+
+def test_activation_is_resent_when_it_never_reached_polar(polar, monkeypatch):
+    real, calls = lic._post, []
+
+    def flaky(url, payload):
+        calls.append(url)
+        if url == lic.POLAR_ACTIVATE_URL and len([c for c in calls if c == url]) == 1:
+            raise urllib.error.URLError(ConnectionRefusedError())
+        return real(url, payload)
+    monkeypatch.setattr(lic, "_post", flaky)
+    polar.reply, polar.activate, store = LIMITED, (201, '{"id": "act-9"}'), Store()
+    assert lic.check_license("KEY-1", ["SSO"], store) == "pro"
+    assert store.activation_id == "act-9"
+
+
+def test_rate_limited_activation_is_retried(polar):
+    polar.reply, polar.activate, store = LIMITED, [(429, "slow down"), (201, '{"id": "act-9"}')], Store()
+    assert lic.check_license("KEY-1", ["SSO"], store) == "pro"
+    assert store.activation_id == "act-9"
+
+
+def test_a_malformed_activation_reply_refuses(polar):
+    polar.reply, polar.activate = LIMITED, (200, "not json")
+    with pytest.raises(lic.LicenseError, match="invalid, expired or cancelled"):
+        lic.check_license("KEY-1", ["SSO"], Store())
+
+
+def test_solo_is_the_benefit_and_covers_one_person(polar, monkeypatch):
+    polar.reply = (200, '{"status": "granted", "benefit_id": "ben-solo"}')
+    assert validate_key("KEY-1").status == "invalid"  # no Solo ids configured
+    monkeypatch.setattr(lic, "SOLO_BENEFIT_IDS", frozenset({"ben-solo"}))
+    assert validate_key("KEY-1").solo and not validate_key("KEY-1").enterprise
+    assert lic.check_license("KEY-1", []) == "solo"
+    # The team features need the team plan: a Solo key refuses startup instead of quietly turning them on.
+    for feature in ("SSO", "Slack approvals", "two-person approval"):
+        with pytest.raises(lic.LicenseError, match=f"{feature} needs the Pro plan.*Solo"):
+            lic.check_license("KEY-1", [feature])
+
+
+def test_solo_undo_window_and_paid_surfaces():
+    from lomberk.executor import UNDO_WINDOW_HOURS
+    assert UNDO_WINDOW_HOURS["solo"] == UNDO_WINDOW_HOURS["pro"] == 30 * 24

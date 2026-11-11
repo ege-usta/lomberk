@@ -166,7 +166,7 @@ figcaption { font-size: 14px; color: var(--muted); margin-top: 12px; }
 .limit-list strong { display: block; font-weight: 850; font-variation-settings: "wdth" 70; font-size: 26px; line-height: 1.05; margin-bottom: 8px; }
 
 /* pricing */
-.tiers { display: grid; grid-template-columns: 1fr 1.25fr 1fr; border-top: 1.5px solid var(--rule); }
+.tiers { display: grid; grid-template-columns: 1fr 1fr 1.25fr 1fr; border-top: 1.5px solid var(--rule); }
 .tier { padding: 30px 30px 30px 0; }
 .tier + .tier { border-left: 1.5px solid var(--rule); padding-left: 30px; }
 .tier h3 { font-size: 18px; font-weight: 600; margin: 0 0 10px; color: var(--muted); }
@@ -221,7 +221,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
         <a href="#how">How undo works</a>
         <a href="#pricing">Pricing</a>
         <a href="https://github.com/ege-usta/lomberk">GitHub</a>
-        <a class="btn" href="https://github.com/ege-usta/lomberk#1-start-the-stack">Start free</a>
+        <a class="btn" href="https://github.com/ege-usta/lomberk#quickstart-60-seconds">Start free</a>
       </div>
     </nav>
   </div>
@@ -230,7 +230,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
       <h1 class="display">Every agent write, reversible.</h1>
       <p class="sub">Agents never hold your database password. Destructive SQL is blocked, risky writes wait for a person, and every write can be undone.</p>
       <div class="ctas">
-        <a class="btn" href="https://github.com/ege-usta/lomberk#1-start-the-stack">Start free</a>
+        <a class="btn" href="https://github.com/ege-usta/lomberk#quickstart-60-seconds">Start free</a>
         <a href="#pricing">See pricing</a>
       </div>
     </div>
@@ -289,11 +289,13 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <section>
   <div class="wrap setup-grid">
     <div>
-      <h2 class="display">One command for your agent.</h2>
-      <p class="lede">Claude Code, Cursor, or your own agent over MCP. It gets a URL and a key, nothing else.</p>
-      <pre>claude mcp add --transport http lomberk \
-  https://your-gateway/mcp \
-  --header "Authorization: Bearer $AGENT_KEY"</pre>
+      <h2 class="display">One command to set it up.</h2>
+      <p class="lede">Give it your database owner's connection string once. It creates two least-privilege roles, installs Lomberk, makes the tables you pick undoable, checks the result and prints the line for Claude Code, Cursor, Claude Desktop, VS Code or Codex.</p>
+      <pre>uvx lomberk setup   # asks for it, hidden
+
+claude mcp add lomberk \
+  -e LOMBERK_CONFIG=$PWD/lomberk.yaml \
+  -- uvx lomberk serve</pre>
       <table class="perf">
         <tbody>
           <tr><td>A captured, undoable write</td><td><strong>18.3</strong> ms</td></tr>
@@ -326,9 +328,10 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <section id="pricing">
   <div class="wrap">
     <h2 class="display">Pricing.</h2>
-    <p class="lede">The whole safety path is free and open source. Pro adds what a team needs to share it.</p>
+    <p class="lede">The whole safety path is free and open source. Solo adds a month of undo and the panel for one developer; Pro adds what a team needs to share it.</p>
     <div class="tiers">
-      <div class="tier"><h3>Free</h3><div class="amount">$0</div><p>Apache-2.0 and self-hosted. Hard gate, holds, capture, ledger, approvals from the API or CLI. Undo reaches back 24 hours.</p><a class="tier-cta" href="https://github.com/ege-usta/lomberk#1-start-the-stack">Start free</a></div>
+      <div class="tier"><h3>Free</h3><div class="amount">$0</div><p>Apache-2.0 and self-hosted. Hard gate, holds, capture, ledger, approvals from the API or CLI. Undo reaches back 24 hours.</p><a class="tier-cta" href="https://github.com/ege-usta/lomberk#quickstart-60-seconds">Start free</a></div>
+      <div class="tier"><h3>Solo</h3><div class="amount">$49<small> / month</small></div><p>For one developer and one database. Undo reaches back 30 days. Web approval panel and audit export.</p><a class="tier-cta" href="https://github.com/ege-usta/lomberk#pricing">Details</a></div>
       <div class="tier pro"><h3>Pro</h3><div class="amount">$199<small> / month</small></div><p>Or $1,990 a year. Undo reaches back 30 days. Web approval panel, two-person rule, Slack approvals, approver SSO, audit export. One key covers up to 3 databases.</p><a class="btn tier-btn" href="https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU">Buy Pro</a></div>
       <div class="tier"><h3>Enterprise</h3><div class="amount"><small>Custom</small></div><p>Undo with no time limit, unlimited databases, an annual invoice, priority answers, and help with your security questionnaire.</p><a class="tier-cta" href="https://github.com/ege-usta/lomberk/discussions">Talk to us</a></div>
     </div>
@@ -339,7 +342,7 @@ footer nav { height: auto; gap: 24px; justify-content: flex-start; }
 <section class="close">
   <div class="wrap">
     <h2 class="display">Make your agent's next DELETE undoable.</h2>
-    <a class="btn" href="https://github.com/ege-usta/lomberk#1-start-the-stack">Start free</a>
+    <a class="btn" href="https://github.com/ege-usta/lomberk#quickstart-60-seconds">Start free</a>
     <footer>
       <span>Lomberk. Open core: Apache-2.0, with <code>ee/</code> under the <a href="https://github.com/ege-usta/lomberk/blob/main/src/lomberk/ee/LICENSE">Elastic License 2.0</a>.</span>
       <nav aria-label="Footer"><a href="https://github.com/ege-usta/lomberk">GitHub</a><a href="https://github.com/ege-usta/lomberk/blob/main/SECURITY.md">Security model</a></nav>

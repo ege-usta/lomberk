@@ -51,7 +51,7 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
                or t in ("GrantStmt", "RevokeStmt", "VariableSetStmt", "AlterSystemStmt") for t in types):
             stmt_class = StatementClass.BLOCKED
 
-        elif any(t in ("DropdbStmt", "DropdbStmt") for t in types):
+        elif any(t in ("DropdbStmt", "DropTableSpaceStmt") for t in types):
             stmt_class = StatementClass.DDL_DANGEROUS
 
         elif "DropStmt" in types:
@@ -129,7 +129,8 @@ SENSITIVE_KEYWORDS = ("password", "passwd", "pwd", "token", "secret", "ssn", "ha
 
 
 # JSON operators whose right side names a key or path: settings->>'api_key', settings ? 'token'.
-JSON_KEY_OPERATORS = {"->", "->>", "#>", "#>>", "?", "?|", "?&", "@>", "<@", "#-"}
+# `@?` and `@@` take a jsonpath. Text pattern matching (LIKE, ~) is not here: a word in a value is data.
+JSON_KEY_OPERATORS = {"->", "->>", "#>", "#>>", "?", "?|", "?&", "@>", "<@", "#-", "@?", "@@"}
 
 
 def is_secret(name, extra=()) -> bool:
@@ -140,6 +141,18 @@ def is_secret(name, extra=()) -> bool:
     return any(k in low for k in SENSITIVE_KEYWORDS) or low in {e.lower() for e in extra}
 
 
+# JSON (\u0061) and jsonpath (\u0061, \u{61}, \x61) decode escapes inside a key, so
+# '$."\u0061pi_key"' names api_key. Decode them before looking for a secret name.
+_ESCAPE = re.compile(r"\\u\{([0-9a-fA-F]{1,6})\}|\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})")
+
+
+def _unescape(text: str) -> str:
+    def char(m):
+        code = int(next(g for g in m.groups() if g), 16)
+        return chr(code) if code < 0x110000 else ""
+    return _ESCAPE.sub(char, text)
+
+
 def _secret_literal(node, extra) -> bool:
     """A string constant (possibly cast) naming a secret key, e.g. 'api_key' or '{auth,token}'."""
     while isinstance(node, dict) and node.get("@") == "TypeCast":
@@ -147,7 +160,8 @@ def _secret_literal(node, extra) -> bool:
     if not (isinstance(node, dict) and node.get("@") == "A_Const"):
         return False
     val = node.get("val") or {}
-    return val.get("@") == "String" and any(is_secret(t, extra) for t in re.split(r"[^\w]+", val.get("sval", "")) if t)
+    text = _unescape(val.get("sval", ""))
+    return val.get("@") == "String" and any(is_secret(t, extra) for t in re.split(r"[^\w]+", text) if t)
 
 
 # Operators that pick a value out of JSON by key or path. Their key must be written out (a

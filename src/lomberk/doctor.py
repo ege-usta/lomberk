@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from lomberk.config import (
     CONFIG_ENV,
+    PRICING_URL,
     LomberkConfig,
     config_error_message,
     config_path,
@@ -14,6 +15,8 @@ from lomberk.config import (
     pro_features,
     weak_key_reason,
 )
+from lomberk.executor import UNDO_WINDOW_HOURS
+from lomberk.startup import PRO_EXTRAS_HINT, missing_extras
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 CONNECT_TIMEOUT_SECONDS = 5
@@ -39,6 +42,10 @@ def run_checks(path: str | None = None) -> list[tuple[str, str, str]]:
                 "Fix the key named above. Unknown keys are refused on purpose, so a typo can't turn protection off.")
             return out
         add(OK, f"{path} is valid")
+        if not config.protected_tables:
+            add(WARN, "protected_tables is empty, so no table makes every write wait for a human "
+                      f"(only writes over {config.limits.max_rows_without_approval} rows do)",
+                "List the tables an agent must never change alone, e.g. protected_tables: [public.customers]")
     else:
         config = LomberkConfig()
         add(WARN, f"no {path} in this directory, so defaults apply (no protected tables)",
@@ -60,8 +67,9 @@ def _env_checks(config, add):
         dsns.append(value)
     agent_key, admin_key = os.environ.get("LOMBERK_API_KEY"), os.environ.get("LOMBERK_ADMIN_KEY")
     for env, value in (("LOMBERK_API_KEY", agent_key), ("LOMBERK_ADMIN_KEY", admin_key)):
-        if not value:
-            add(FAIL, f"{env} is not set", "Generate one with: openssl rand -hex 32")
+        if not value:  # `lomberk serve` (stdio) authenticates nobody: the client starts it
+            add(WARN, f"{env} is not set: fine for `lomberk serve` (MCP over stdio); only `lomberk api` (HTTP) needs it",
+                "For the HTTP gateway, generate one with: openssl rand -hex 32")
         elif reason := weak_key_reason(value):
             if os.environ.get("LOMBERK_ALLOW_WEAK_KEYS", "").lower() == "true":
                 add(WARN, f"{env} {reason}; accepted only because LOMBERK_ALLOW_WEAK_KEYS=true",
@@ -98,7 +106,8 @@ def _db_checks(config, control: str, agent: str, add) -> None:
 
     with psycopg.connect(control, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn:
         has_schema, has_approvals = conn.execute(
-            "SELECT to_regclass('lomberk.checkpoints') IS NOT NULL, to_regclass('lomberk.approvals') IS NOT NULL").fetchone()
+            "SELECT to_regclass('lomberk.checkpoints') IS NOT NULL, EXISTS (SELECT 1 FROM pg_attribute WHERE "
+            "attrelid = to_regclass('lomberk.checkpoints') AND attname = 'required_approvals' AND NOT attisdropped)").fetchone()
         if not has_schema:
             add(FAIL, "Lomberk is not installed in this database",
                 "Run: lomberk init --control-role <control> --agent-role <agent>  (with LOMBERK_INSTALL_DSN set to an owner)")
@@ -108,6 +117,8 @@ def _db_checks(config, control: str, agent: str, add) -> None:
             return
         registered = {f"{s}.{t}" for s, t in conn.execute("SELECT schema_name, table_name FROM lomberk.registered_tables")}
         _secret_column_checks(config, conn, roles["agent"][0], add)
+        _sequence_checks(conn, roles["agent"][0], add)
+        _rls_checks(conn, roles["agent"][0], add)
         checked, broken, _ = conn.execute("SELECT * FROM lomberk.verify_ledger()").fetchone()
 
     if registered:
@@ -123,6 +134,47 @@ def _db_checks(config, control: str, agent: str, add) -> None:
         add(FAIL, f"the ledger is broken at checkpoint {broken}", "Someone edited history in the database. Investigate before trusting it.")
     else:
         add(OK, f"ledger intact ({checked} checkpoints)")
+
+
+# Sequences the agent may use that no registered table draws from: older versions granted every
+# sequence in the schema, which lets the agent read how fast unrelated tables grow.
+EXTRA_SEQUENCES = """
+    SELECT s.oid::regclass::text FROM pg_class s
+    WHERE s.relkind = 'S' AND s.relnamespace <> 'lomberk'::regnamespace
+      AND CASE WHEN s.relkind = 'S' THEN has_sequence_privilege(%s, s.oid, 'USAGE') END
+      AND NOT EXISTS (  -- owned by a registered table's column (serial, identity) ...
+        SELECT 1 FROM pg_depend d JOIN lomberk.registered_tables r ON r.table_oid = d.refobjid
+        WHERE d.classid = 'pg_class'::regclass AND d.objid = s.oid AND d.deptype IN ('a', 'i'))
+      AND NOT EXISTS (  -- ... or named in one of its column defaults
+        SELECT 1 FROM pg_depend d JOIN pg_attrdef a ON a.oid = d.objid
+        JOIN lomberk.registered_tables r ON r.table_oid = a.adrelid
+        WHERE d.classid = 'pg_attrdef'::regclass AND d.refobjid = s.oid)
+    ORDER BY 1"""
+
+
+def _sequence_checks(conn, agent_role: str, add) -> None:
+    extra = [r[0] for r in conn.execute(EXTRA_SEQUENCES, (agent_role,))]
+    if extra:
+        add(WARN, f"{agent_role} may use {len(extra)} sequence(s) no registered table draws from: "
+            f"{', '.join(extra[:LIST_LIMIT])}{' …' if len(extra) > LIST_LIMIT else ''}",
+            f"If nothing the agent writes needs them (a trigger calling nextval does), revoke them: "
+            f"REVOKE USAGE, SELECT ON SEQUENCE {extra[0]} FROM {agent_role};")
+
+
+# Registered tables with row level security on and no permissive policy that lets the agent see rows.
+RLS_WITHOUT_POLICY = """
+    SELECT r.table_oid::regclass::text FROM lomberk.registered_tables r JOIN pg_class c ON c.oid = r.table_oid
+    WHERE c.relrowsecurity AND NOT (SELECT rolbypassrls FROM pg_roles WHERE rolname = %(agent)s)
+      AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polpermissive
+                      AND (0::oid = ANY(p.polroles) OR to_regrole(%(agent)s) = ANY(p.polroles)))
+    ORDER BY 1"""
+
+
+def _rls_checks(conn, agent_role: str, add) -> None:
+    for table in [r[0] for r in conn.execute(RLS_WITHOUT_POLICY, {"agent": agent_role})]:
+        add(WARN, f"row level security is on for {table} and no policy lets {agent_role} see its rows, "
+                  "so its reads come back empty and its writes change nothing",
+            f"CREATE POLICY lomberk_agent_all ON {table} TO {agent_role} USING (true) WITH CHECK (true);")
 
 
 # Words that often mean a secret but are too short to match inside other names (passenger, spinner).
@@ -172,6 +224,11 @@ def _pro_checks(config, add) -> None:
             if not os.environ.get(env):
                 add(FAIL, f"Slack is enabled but {env} is not set", "Copy it from your Slack app settings (see README, Slack).")
     if not features and not key:
+        add(OK, f"Free plan: undo reaches back {UNDO_WINDOW_HOURS['free']} hours",
+            f"Longer undo, the approval panel and Slack come with a paid plan: {PRICING_URL}")
+        return
+    if missing := missing_extras(config):
+        add(FAIL, f"{', '.join(missing)} configured, but the Pro libraries aren't installed", PRO_EXTRAS_HINT)
         return
     try:
         from lomberk.ee.license import BUY_URL, _need, validate_key
@@ -181,10 +238,15 @@ def _pro_checks(config, add) -> None:
     if not key:
         add(FAIL, f"{_need(features)} a Pro license key", f"Set LOMBERK_LICENSE_KEY. Buy one at {BUY_URL}")
         return
-    result = validate_key(key).status
-    if result == "granted":
-        add(OK, "Lomberk license is valid")
-    elif result == "unreachable":
+    result = validate_key(key)
+    if result.status == "granted":
+        plan = "enterprise" if result.enterprise else "solo" if result.solo else "pro"
+        if plan == "solo" and features:
+            add(FAIL, f"{_need(features)} the Pro plan, and this key is for Solo", f"Upgrade at {PRICING_URL}")
+        hours = UNDO_WINDOW_HOURS[plan]
+        add(OK, f"Lomberk license is valid: {plan.capitalize()} plan, undo reaches back "
+                f"{'without limit' if hours is None else f'{hours // 24} days'}")
+    elif result.status == "unreachable":
         add(WARN, "couldn't reach api.polar.sh to check the license", "The gateway still starts. Check outbound HTTPS if you expected it to work.")
     else:
         level = FAIL if features else WARN

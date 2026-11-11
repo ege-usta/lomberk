@@ -13,11 +13,10 @@ permissions:
   contents: read
 
 jobs:
-  pypi:
+  build:
+    name: Test, build and smoke-test the wheel
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,12 +25,51 @@ jobs:
         with:
           version: "0.11.18"
           enable-cache: false   # never build a release from a cache a PR could have written
-      - name: Tag must match the package version
-        run: test "v$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" = "$GITHUB_REF_NAME"
+      # Every version check runs before anything is published, so a mismatch stops the whole release.
+      - name: Tag must match the package version and server.json
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          test "$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" = "$v"
+          test "$(jq -r .version server.json)" = "$v" && test "$(jq -r '.packages[0].version' server.json)" = "$v"
+      - run: uv sync --frozen --all-groups
+      - name: Tests
+        env:
+          PYTHONPATH: src
+          LOMBERK_TEST_PG_IMAGE: postgres:16-alpine
+        run: uv run --no-sync pytest tests/ -q --strict-markers
       - run: uv build
+      - name: The wheel installs and runs without the Pro extras
+        run: |
+          python3 -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          cd /tmp
+          /tmp/smoke/bin/lomberk --help
+          /tmp/smoke/bin/lomberk setup --help
+          /tmp/smoke/bin/python -c "import lomberk.api, lomberk.server, lomberk.capture.install, lomberk.ee.panel, lomberk.ee.export"  # Solo works without the pro extra
+          # stdio server without a database: one line on stderr and exit 1, never a traceback
+          out=$(LOMBERK_CONFIG= /tmp/smoke/bin/lomberk serve 2>&1 </dev/null) && exit 1
+          echo "$out"; echo "$out" | grep -q "Startup Refusal" && ! echo "$out" | grep -q Traceback
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  pypi:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
   image:
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -61,10 +99,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: server.json must match the tag
-        run: |
-          v="${GITHUB_REF_NAME#v}"
-          test "$(jq -r .version server.json)" = "$v" && test "$(jq -r '.packages[0].version' server.json)" = "$v"
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Download and verify mcp-publisher
         run: |
@@ -80,7 +114,14 @@ jobs:
             "$archive"
           tar xzf "$archive" mcp-publisher
       - run: ./mcp-publisher login github-oidc
-      - run: ./mcp-publisher publish
+      # The registry checks the package on PyPI, which can take a minute to show a new release.
+      - name: Publish (retries while PyPI catches up)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            echo "attempt $attempt failed; retrying in 30 s"; sleep 30
+          done
+          exit 1
 
   github-release:
     needs: [pypi, image, mcp-registry]

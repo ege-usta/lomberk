@@ -126,7 +126,7 @@ def test_panel_needs_a_license(gateway, monkeypatch):
     monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("invalid"))
     with start("") as c:
         assert c.get("/panel/").status_code == 403
-        assert "Pro feature" in c.get("/panel/api/session").text
+        assert "Solo and Pro" in (t := c.get("/panel/api/session").text) and "#pricing" in t
         assert c.get("/v1/audit/export", headers={"X-API-Key": "admin-k"}).status_code == 403
 
 

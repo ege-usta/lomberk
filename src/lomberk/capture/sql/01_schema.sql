@@ -110,6 +110,11 @@ BEGIN
     END IF;
 END $$;
 
+-- MIGRATION: the two-person quorum is stored on each held write, so an approver's
+-- local config can't lower it. Rows from before this column count as 1.
+ALTER TABLE lomberk.checkpoints ADD COLUMN IF NOT EXISTS required_approvals INTEGER NOT NULL DEFAULT 1
+    CHECK (required_approvals >= 1);
+
 -- Slack approval outbox: one row per pending checkpoint posted to Slack.
 -- The (team, channel, ts) binding is the ONLY thing that authorizes a button click.
 CREATE TABLE IF NOT EXISTS lomberk.slack_messages (

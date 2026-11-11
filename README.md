@@ -1,10 +1,46 @@
 # Lomberk
 <!-- mcp-name: io.github.ege-usta/lomberk -->
 
+[![CI](https://github.com/ege-usta/lomberk/actions/workflows/ci.yml/badge.svg)](https://github.com/ege-usta/lomberk/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/lomberk)](https://pypi.org/project/lomberk/)
+[![Python](https://img.shields.io/pypi/pyversions/lomberk)](https://pypi.org/project/lomberk/)
+[![PostgreSQL 14-18](https://img.shields.io/badge/PostgreSQL-14%E2%80%9318-336791)](#overhead)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20%2B%20ELv2-blue)](#license)
+
 **Every agent write, reversible.**
 Lomberk is an MCP gateway for PostgreSQL. AI agents send SQL through it instead of holding database credentials. It blocks destructive commands, holds large or sensitive writes for a human, records every changed row, and can undo any applied write, including foreign-key cascades.
 
 **Just want a seatbelt for Claude Code?** [Lomberk Seatbelt](https://github.com/ege-usta/lomberk/tree/main/seatbelt) is a free plugin that makes your agent ask before `DROP`, `TRUNCATE`, `DELETE` without `WHERE`, `prisma migrate reset`, `dropdb` and friends. Install it in two commands.
+
+## Quickstart (60 seconds)
+You need [uv](https://docs.astral.sh/uv/) and the owner's connection string of a PostgreSQL 14+ database (a role that can create roles: `postgres` on Supabase, Neon and RDS).
+```bash
+uvx lomberk setup     # asks for the owner connection string; what you type stays out of your shell history
+```
+In a script, set `LOMBERK_INSTALL_DSN` instead and add `--yes`.
+Setup creates two least-privilege roles with generated passwords, installs Lomberk, lists your tables and makes the ones you pick undoable, then writes `lomberk.yaml` and a private `.env` (mode 600) and runs `lomberk doctor` on them. It never changes a role or file that already exists. The owner connection string is used once and never saved. At the end it prints the line for your MCP client, for example:
+```bash
+claude mcp add lomberk -e LOMBERK_CONFIG=/path/to/lomberk.yaml -- uvx lomberk serve
+```
+Cursor, Claude Desktop, VS Code and Codex get their config snippet too. Then ask your agent to change something:
+```bash
+lomberk log                 # what your agents changed, newest first
+lomberk undo cp_…           # put it back, cascades included
+lomberk approve cp_…        # let a held write run (or: lomberk reject cp_…)
+lomberk doctor              # check the setup any time
+```
+Supabase, Neon, RDS, Railway: [docs/hosted-postgres.md](https://github.com/ege-usta/lomberk/blob/main/docs/hosted-postgres.md). On Supabase, use the **session pooler** connection string (IPv4); setup derives the `lomberk_agent.<project-ref>` login names from it.
+
+### What the agent gets
+| Tool | |
+|---|---|
+| `execute_sql` | One statement through the hard gate, the policy and capture. Replies with a checkpoint (`cp_…`), `APPROVAL REQUIRED`, or why it was denied |
+| `describe_tables` | The tables it can use, their columns (secret ones hidden) and which writes wait for a human |
+| `wait_for_approval` | Waits for a person to approve or reject a held write, reporting progress, then says whether it ran |
+| `checkpoint_status` | What happened to one of its writes: waiting, applied, rejected or undone |
+| `list_my_changes` | Its own recent writes with their tokens, so it can tell you what to undo |
+
+The agent can't approve or undo anything. That takes the admin key, the CLI or (Pro) Slack, SSO or the panel.
 
 ## 9-second database deletion demo
 
@@ -14,6 +50,7 @@ In April 2026 an autonomous coding agent deleted a production database in 9 seco
 
 ### 1. Start the stack
 ```bash
+git clone https://github.com/ege-usta/lomberk && cd lomberk
 docker compose up -d --build
 curl localhost:8000/readyz          # {"status":"ready"}
 ```
@@ -39,6 +76,7 @@ Any MCP client that speaks Streamable HTTP works the same way.
 ```bash
 H="X-API-Key: demo-admin-key"
 curl -H "$H" localhost:8000/v1/checkpoints/pending
+curl -H "$H" "localhost:8000/v1/checkpoints?status=applied"   # recent writes, to find the cp_ to undo
 curl -H "$H" -X POST localhost:8000/v1/checkpoints/cp_…/approve    # or /reject
 curl -H "$H" -X POST localhost:8000/v1/checkpoints/cp_…/undo       # users AND cascaded payments come back
 ```
@@ -53,7 +91,46 @@ would change: 2 row(s) in public.users (1), public.payments (1) (dry run when he
 ```
 The same preview is in the web panel and the API; Slack gets the counts only. Secret columns are masked, and columns hidden from the agent role never appear. A held write that would fail (a duplicate key, a missing parent) is refused at once instead of waiting for a person. The preview is a snapshot of the moment it was held. If a table's own triggers do something a rollback can't take back, set `approvals.preview: false`.
 
-### Or approve in Slack (Pro)
+## Configuration (`lomberk.yaml`)
+```yaml
+limits:
+  max_rows_without_approval: 10   # larger writes are rolled back and held
+  statement_timeout_ms: 15000
+protected_tables:                 # any write, or FK cascade, reaching these is held
+  - public.users
+sensitive_columns:                # like `password`: never shown to the agent, hidden by the DB on register
+  - pass
+  - settings                      # a JSON column that holds secrets
+agent:
+  approval_timeout_minutes: 30
+```
+Unknown keys fail startup, so a typo can never silently turn protection off. The gateway reads `./lomberk.yaml`; when it starts somewhere else (MCP clients usually launch `lomberk serve` from another directory), set `LOMBERK_CONFIG` to the file's absolute path. If that file is missing, startup is refused; a missing `./lomberk.yaml` only prints a warning and runs with defaults (no protected tables).
+
+Environment: `LOMBERK_CONFIG` (path to `lomberk.yaml`), `LOMBERK_ADMIN_DSN` (control role), `LOMBERK_AGENT_DSN` (agent role), `LOMBERK_API_KEY` (agent), `LOMBERK_ADMIN_KEY` (approvers), `LOMBERK_AUDIT_LOG` (JSONL path), `LOMBERK_LICENSE_KEY` (Pro), `LOMBERK_METRICS_KEY` (turns on `/metrics`). Keys must be 32+ random characters (`openssl rand -hex 32`); the gateway refuses weak or demo keys unless `LOMBERK_ALLOW_WEAK_KEYS=true` (laptop demos only).
+
+## Installing on your own database
+```bash
+pip install lomberk          # Slack and SSO: pip install "lomberk[pro]"; or: docker build -t lomberk .
+export LOMBERK_INSTALL_DSN=postgresql://owner@db/app       # used only for install
+# first, as that owner: CREATE ROLE lomberk_control LOGIN PASSWORD '...'; CREATE ROLE lomberk_agent LOGIN PASSWORD '...';
+lomberk init --control-role lomberk_control --agent-role lomberk_agent
+lomberk register public.orders --agent-role lomberk_agent  # repeat per table (and FK children)
+lomberk verify-ledger                                       # tamper-evidence check
+```
+What an agent can't do, with the exact refusal for 20 real attacks: [docs/attack-gallery.md](https://github.com/ege-usta/lomberk/blob/main/docs/attack-gallery.md).
+
+Step-by-step for **Supabase, Neon, Amazon RDS and Railway** (roles, connection strings, RLS, `updated_at` triggers): [docs/hosted-postgres.md](https://github.com/ege-usta/lomberk/blob/main/docs/hosted-postgres.md).
+
+Common questions before adopting Lomberk: [docs/faq.md](https://github.com/ege-usta/lomberk/blob/main/docs/faq.md).
+
+Local, single-user development without the service: `lomberk serve` (stdio MCP). Do not use this mode with agents that have shell access. See [SECURITY.md](https://github.com/ege-usta/lomberk/blob/main/SECURITY.md).
+
+## Team features (Solo and Pro)
+The web panel and audit export come with Solo and Pro; Slack approvals, approver SSO and the two-person rule are Pro.
+
+Slack approvals and approver SSO need extra libraries: `pip install "lomberk[pro]"`, or `uvx --from "lomberk[pro]" lomberk serve`. The Docker image has them. Without them the gateway refuses to start and says what to install.
+
+### Approve in Slack (Pro)
 Create the app from [`slack/app-manifest.json`](https://github.com/ege-usta/lomberk/blob/main/slack/app-manifest.json) (bot scope `chat:write` only, Socket Mode, so no public URL is needed), invite the bot to your approvals channel, then:
 ```yaml
 slack:
@@ -103,44 +180,10 @@ curl -H "X-API-Key: $ADMIN_KEY" "localhost:8000/v1/audit/export?format=csv&since
 ```
 Each checkpoint comes with its SQL, agent, status, rows, who approved it and its ledger hash. The panel has the same export as buttons.
 
-### Pro license
-Slack approvals, SSO, the two-person rule, the web panel and audit export need `LOMBERK_LICENSE_KEY`. The key also sets how far back undo reaches: 24 hours without one, 30 days with Pro, no limit with Enterprise. Age counts from when the write ran (for a held write, its last approval). An older checkpoint answers `expired` (HTTP 403) and stays as it is.
+### License key
+The web panel and audit export need `LOMBERK_LICENSE_KEY` with a Solo or Pro key; Slack approvals, SSO and the two-person rule need Pro. A Solo key with Pro features configured refuses to start and says which feature needs Pro. The key also sets how far back undo reaches: 24 hours without one, 30 days with Solo or Pro, no limit with Enterprise. Age counts from when the write ran (for a held write, its last approval). An older checkpoint answers `expired` (HTTP 403) and stays as it is.
 
-Buy a key on the [pricing page](#pricing): it arrives by email right away and renews with your subscription. The gateway checks the key with Polar (`api.polar.sh`) once at startup. That call sends the key and, for a Pro key, a random label for this database (`lomberk.license_activation`), so one key covers up to 3 databases. Free one up in Polar's customer portal. `lomberk undo` asks Polar only when a checkpoint is older than 24 hours. If Polar can't be reached, Pro stays on. If the key is invalid, cancelled or already used on 3 databases, the gateway refuses to start with Pro features configured and tells you why.
-
-## Configuration (`lomberk.yaml`)
-```yaml
-limits:
-  max_rows_without_approval: 10   # larger writes are rolled back and held
-  statement_timeout_ms: 15000
-protected_tables:                 # any write, or FK cascade, reaching these is held
-  - public.users
-sensitive_columns:                # like `password`: never shown to the agent, hidden by the DB on register
-  - pass
-  - settings                      # a JSON column that holds secrets
-agent:
-  approval_timeout_minutes: 30
-```
-Unknown keys fail startup, so a typo can never silently turn protection off. The gateway reads `./lomberk.yaml`; when it starts somewhere else (MCP clients usually launch `lomberk serve` from another directory), set `LOMBERK_CONFIG` to the file's absolute path. If that file is missing, startup is refused; a missing `./lomberk.yaml` only prints a warning and runs with defaults (no protected tables).
-
-Environment: `LOMBERK_CONFIG` (path to `lomberk.yaml`), `LOMBERK_ADMIN_DSN` (control role), `LOMBERK_AGENT_DSN` (agent role), `LOMBERK_API_KEY` (agent), `LOMBERK_ADMIN_KEY` (approvers), `LOMBERK_AUDIT_LOG` (JSONL path), `LOMBERK_LICENSE_KEY` (Pro), `LOMBERK_METRICS_KEY` (turns on `/metrics`). Keys must be 32+ random characters (`openssl rand -hex 32`); the gateway refuses weak or demo keys unless `LOMBERK_ALLOW_WEAK_KEYS=true` (laptop demos only).
-
-## Installing on your own database
-```bash
-pip install "lomberk @ git+https://github.com/ege-usta/lomberk"   # or: docker build -t lomberk .
-export LOMBERK_INSTALL_DSN=postgresql://owner@db/app       # used only for install
-# first, as that owner: CREATE ROLE lomberk_control LOGIN PASSWORD '...'; CREATE ROLE lomberk_agent LOGIN PASSWORD '...';
-lomberk init --control-role lomberk_control --agent-role lomberk_agent
-lomberk register public.orders --agent-role lomberk_agent  # repeat per table (and FK children)
-lomberk verify-ledger                                       # tamper-evidence check
-```
-What an agent can't do, with the exact refusal for 20 real attacks: [docs/attack-gallery.md](https://github.com/ege-usta/lomberk/blob/main/docs/attack-gallery.md).
-
-Step-by-step for **Supabase, Neon and Amazon RDS** (roles, connection strings, RLS, `updated_at` triggers): [docs/hosted-postgres.md](https://github.com/ege-usta/lomberk/blob/main/docs/hosted-postgres.md).
-
-Common questions before adopting Lomberk: [docs/faq.md](https://github.com/ege-usta/lomberk/blob/main/docs/faq.md).
-
-Local, single-user development without the service: `lomberk serve` (stdio MCP). Do not use this mode with agents that have shell access. See [SECURITY.md](https://github.com/ege-usta/lomberk/blob/main/SECURITY.md).
+Buy a key on the [pricing page](https://ege-usta.github.io/lomberk/#pricing): it arrives by email right away and renews with your subscription. The gateway checks the key with Polar (`api.polar.sh`) once at startup. That call sends the key and, for a Pro key, a random label for this database (`lomberk.license_activation`), so one Pro key covers up to 3 databases. Free one up in Polar's customer portal. `lomberk undo` asks Polar only when a checkpoint is older than 24 hours. If Polar is down (no answer, or a 5xx or 429 reply after three tries), Pro stays on; while Polar doesn't answer at all, startup can take up to about a minute. A database's first activation is never sent twice: after a timeout or a 5xx it isn't retried (Polar may already have used a slot), and the next start tries again. Any other reply that isn't a valid grant counts as an invalid key. If the key is invalid, cancelled or already used on 3 databases, the gateway refuses to start with Pro features configured and tells you why. The key is checked at startup, so a cancelled subscription turns Pro off at the next restart.
 
 ## How it works
 1. **AST hard gate**: PostgreSQL's own parser (`pglast`) allows one `SELECT/INSERT/UPDATE/DELETE` (or a plain `EXPLAIN`), schema-qualified writes with `WHERE`, and ~190 pure built-in functions: window functions, JSON, full-text search, `gen_random_uuid()` and the rest of what agents write every day.
@@ -176,15 +219,17 @@ Agent turns take seconds, so this is negligible in practice. Most of the cost is
 Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against every one in CI.
 
 ## Pricing
-| | Free | Pro | Enterprise |
-|---|---|---|---|
-| Price | $0 | **$199/month** or $1,990/year | [talk to us](https://github.com/ege-usta/lomberk/discussions) |
-| Hard gate, holds, capture, ledger, remote MCP, API/CLI approvals | ✓ | ✓ | ✓ |
-| Undo reaches back | 24 hours | 30 days | no limit |
-| Web panel, Slack approvals, approver SSO, two-person rule, audit export | | ✓ | ✓ |
-| Databases per license key | | up to 3 | unlimited |
-| Billing | | card, self-serve | annual invoice |
-| Help | GitHub issues | GitHub issues | priority answers; help with your security questionnaire |
+| | Free | Solo | Pro | Enterprise |
+|---|---|---|---|---|
+| For | trying it, side projects | one developer | a team | many databases |
+| Price | $0 | $49/month (checkout opening soon) | **$199/month** or $1,990/year | [talk to us](https://github.com/ege-usta/lomberk/discussions) |
+| Hard gate, holds, capture, ledger, remote MCP, API/CLI approvals, `lomberk log` | ✓ | ✓ | ✓ | ✓ |
+| Undo reaches back | 24 hours | 30 days | 30 days | no limit |
+| Web panel, audit export | | ✓ | ✓ | ✓ |
+| Slack approvals, approver SSO, two-person rule | | | ✓ | ✓ |
+| Databases per license key | | 1 | up to 3 | unlimited |
+| Billing | | card, self-serve | card, self-serve | annual invoice |
+| Help | GitHub issues | GitHub issues | GitHub issues | priority answers; help with your security questionnaire |
 
 **[Buy Pro](https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU)**: the key arrives by email right away. For Enterprise, open a [discussion](https://github.com/ege-usta/lomberk/discussions) with how many databases and approvers you have, and we'll reply with a quote. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
 
@@ -196,7 +241,9 @@ uv sync --all-groups
 PYTHONPATH=src uv run pytest tests/    # needs Docker (testcontainers)
 ```
 
+Changes: [CHANGELOG.md](https://github.com/ege-usta/lomberk/blob/main/CHANGELOG.md). Contributing: [CONTRIBUTING.md](https://github.com/ege-usta/lomberk/blob/main/CONTRIBUTING.md).
+
 ## License
 Open core. Everything outside `src/lomberk/ee/` is Apache-2.0: the hard gate, policy, capture, undo, ledger, remote MCP, and API/CLI approvals. You can run the whole safety path for free.
 
-`src/lomberk/ee/` (Slack approvals, approver SSO, the web panel, audit export and the license check) is source-available under the [Elastic License 2.0](https://github.com/ege-usta/lomberk/blob/main/src/lomberk/ee/LICENSE) (ELv2), the same license Elasticsearch uses. You can read, run and modify it. The features need a Pro or Enterprise key, and ELv2 forbids removing or bypassing the key check or offering the software as a hosted service. The two-person rule is core code, but turning it on needs a key.
+`src/lomberk/ee/` (Slack approvals, approver SSO, the web panel, audit export and the license check) is source-available under the [Elastic License 2.0](https://github.com/ege-usta/lomberk/blob/main/src/lomberk/ee/LICENSE) (ELv2), the same license Elasticsearch uses. You can read, run and modify it. The features need a Solo, Pro or Enterprise key, and ELv2 forbids removing or bypassing the key check or offering the software as a hosted service. The two-person rule is core code, but turning it on needs a key.

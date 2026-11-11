@@ -24,7 +24,7 @@ class LicenseActivationStore:
                 return conn.execute("SELECT label, activation_id FROM lomberk.license_activation").fetchone()
         except psycopg.errors.UndefinedTable as e:
             raise ValueError("Startup Refusal: the Lomberk schema is older than this gateway. "
-                             "Run `lomberk install` again to upgrade it.") from e
+                             "Run `lomberk init` again to upgrade it.") from e
 
     def save(self, activation_id: str) -> None:
         with psycopg.connect(self.dsn) as conn:
@@ -44,9 +44,14 @@ class ExecutionResult(BaseModel):
 def _agent_message(e: Exception) -> str:
     """The part of an error the agent may see. Never PostgreSQL's DETAIL: for NOT NULL and
     CHECK violations it prints the whole failing row, secret columns included."""
+    if isinstance(e, psycopg.OperationalError) and not e.sqlstate:
+        # Client-side connection failure: its text names the host, port, database and user.
+        # The operator gets it in the log; the agent gets a generic message.
+        logger.warning("Database connection failed: %s", e)
+        return "Lomberk could not reach the database. Nothing was changed; the operator can run `lomberk doctor`."
     if isinstance(e, psycopg.errors.InsufficientPrivilege):
-        return (f"{e.diag.message_primary}. Some columns are hidden from agents; "
-                "name the columns you need instead of *.")
+        return (f"{e.diag.message_primary}. Agents can read only tables registered with Lomberk, and some of their "
+                "columns are hidden: call describe_tables to see what you can use, and name columns instead of *.")
     if isinstance(e, psycopg.Error):
         return e.diag.message_primary or str(e).split("\n")[0]
     return str(e)
@@ -83,7 +88,7 @@ class HoldForApproval(Exception):
 
 
 # How far back each plan can undo, in hours. None = no limit.
-UNDO_WINDOW_HOURS = {"free": 24, "pro": 30 * 24, "enterprise": None}
+UNDO_WINDOW_HOURS = {"free": 24, "solo": 30 * 24, "pro": 30 * 24, "enterprise": None}
 
 
 def undo_window_message(hours: int) -> str:
@@ -209,7 +214,7 @@ class LomberkExecutor:
             return None
         return None
 
-    def list_checkpoints(self, since=None, limit: int | None = None) -> list[dict]:
+    def list_checkpoints(self, since=None, limit: int | None = None, status: str | None = None) -> list[dict]:
         """Newest first, with who approved each one. limit None = all (for exports)."""
         with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -218,16 +223,49 @@ class LomberkExecutor:
                 "coalesce(array_agg(a.actor ORDER BY a.approved_at) FILTER (WHERE a.actor IS NOT NULL), '{}') AS approved_by, "
                 "(SELECT p.preview FROM lomberk.previews p WHERE p.public_id = c.public_id) AS preview "
                 "FROM lomberk.checkpoints c LEFT JOIN lomberk.approvals a USING (public_id) "
-                "WHERE %(since)s::timestamptz IS NULL OR c.created_at >= %(since)s "
+                "WHERE (%(since)s::timestamptz IS NULL OR c.created_at >= %(since)s) "
+                "AND (%(status)s::text IS NULL OR c.status = %(status)s) "
                 "GROUP BY c.id ORDER BY c.id DESC LIMIT %(limit)s",
-                {"since": since, "limit": limit})
+                {"since": since, "limit": limit, "status": status})
+            return cur.fetchall()
+
+    def agent_checkpoints(self, principal: str, public_id: str | None = None, limit: int = 20) -> list[dict]:
+        """One principal's own checkpoints, newest first: all an agent may see of the ledger."""
+        with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT c.public_id, c.created_at, c.status, c.classification, c.rows_affected, c.sql_text, "
+                "c.required_approvals, (SELECT count(*) FROM lomberk.approvals a WHERE a.public_id = c.public_id) AS approvals, "
+                # Past the approval timeout a pending write can no longer be approved, so say so instead of "waiting".
+                "(c.status = 'pending' AND %s::int IS NOT NULL AND c.created_at < now() - make_interval(mins => %s::int)) "
+                "AS expired FROM lomberk.checkpoints c WHERE c.principal = %s AND (%s::text IS NULL OR c.public_id = %s) "
+                "ORDER BY c.id DESC LIMIT %s",
+                (self.approval_timeout_minutes, self.approval_timeout_minutes, principal, public_id, public_id, limit))
+            return cur.fetchall()
+
+    def describe_tables(self) -> list[dict]:
+        """Registered tables with the columns the agent role may read (name and type)."""
+        with psycopg.connect(self.runtime_dsn) as conn:
+            agent = conn.execute("SELECT current_user").fetchone()[0]
+        with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT r.schema_name || '.' || r.table_name AS name, r.pk_column AS pk, "
+                "array_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod) ORDER BY a.attnum) "
+                "  FILTER (WHERE has_column_privilege(%(agent)s, a.attrelid, a.attnum, 'SELECT')) AS columns, "
+                "count(*) FILTER (WHERE NOT has_column_privilege(%(agent)s, a.attrelid, a.attnum, 'SELECT')) AS hidden "
+                "FROM lomberk.registered_tables r JOIN pg_attribute a ON a.attrelid = r.table_oid "
+                "AND a.attnum > 0 AND NOT a.attisdropped GROUP BY 1, 2 ORDER BY 1", {"agent": agent})
             return cur.fetchall()
 
     def reject(self, public_id: str, actor: str) -> bool:
-        """Reject a pending checkpoint. Returns False if it is not pending."""
+        """Reject a pending checkpoint, or close one a crash left approved but never run.
+        Returns False for any other state."""
         try:
             with psycopg.connect(self.dsn, autocommit=True) as conn:
-                conn.execute("SELECT lomberk.reject_checkpoint(%s)", (public_id,))
+                if conn.execute("SELECT lomberk.check_checkpoint_status(%s)", (public_id,)).fetchone()[0] == "approved":
+                    # A write still running holds the row lock; this waits, then finds it applied and refuses.
+                    conn.execute("SELECT lomberk.fail_checkpoint(%s)", (public_id,))
+                else:
+                    conn.execute("SELECT lomberk.reject_checkpoint(%s)", (public_id,))
         except psycopg.errors.RaiseException:
             return False
         audit("rejected", actor=actor, public_id=public_id)
@@ -332,8 +370,8 @@ class LomberkExecutor:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM lomberk.begin_checkpoint(%s, %s, %s, %s, %s)",
-                    (sql, stmt_class, agent_label, principal, operation_id)
+                    "SELECT * FROM lomberk.begin_checkpoint(%s, %s, %s, %s, %s, %s)",
+                    (sql, stmt_class, agent_label, principal, operation_id, self.required_approvals)
                 )
                 row = cur.fetchone()
                 public_id = row[1]
@@ -432,6 +470,11 @@ class LomberkExecutor:
             return ExecutionResult(status="applied", message=message, data=fetched_data)
 
         return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, principal, operation_id)
+
+    def _held_rows(self, cur, exec_token) -> dict:
+        cur.execute("SELECT lomberk.preview_changes(%s, 0)", (exec_token,))
+        p = cur.fetchone()[0]
+        return {"rows": p["rows"], "tables": p["tables"], "sample": [], "truncated": p["rows"] > 0, "digest": p["digest"]}
 
     def _preview(self, cur, exec_token) -> dict:
         """What the in-flight write changed, masked like agent results. Updates list only the
@@ -651,7 +694,9 @@ class LomberkExecutor:
                                 hold_reason = f"Rows changed ({changed}) exceeds limit ({limit})."
                         if hold_reason:
                             # Leaving the with-block via exception rolls the write back.
-                            preview = self._preview(cur, exec_token) if self.preview_writes else None
+                            # Without approvals.preview the person sees no rows, but the count and
+                            # digest are still kept so approval runs only what was held.
+                            preview = self._preview(cur, exec_token) if self.preview_writes else self._held_rows(cur, exec_token)
                             raise HoldForApproval(hold_reason, preview, policy=hold_reason.startswith("Policy requires"))
                         cur.execute("SELECT lomberk.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
                         execution_completed = True
@@ -659,7 +704,7 @@ class LomberkExecutor:
             try:
                 # One transaction: an approver never sees the held write without its preview.
                 with psycopg.connect(self.dsn) as rq_conn, rq_conn.transaction(), rq_conn.cursor() as rq_cur:
-                    rq_cur.execute("SELECT lomberk.requeue_checkpoint(%s)", (public_id,))
+                    rq_cur.execute("SELECT lomberk.requeue_checkpoint(%s, %s)", (public_id, self.required_approvals))
                     if e.preview is not None:
                         rq_cur.execute("INSERT INTO lomberk.previews (public_id, preview) VALUES (%s, %s) "
                                        "ON CONFLICT (public_id) DO UPDATE SET preview = EXCLUDED.preview, created_at = now()",
@@ -671,6 +716,10 @@ class LomberkExecutor:
             return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="approval_required", message=message)
         except Exception as e:
             error_msg = _agent_message(e)
+            # The server answered the COMMIT with an error (deferred constraint, serialization):
+            # it was rolled back for certain. Only a lost connection leaves the outcome unknown.
+            if execution_completed and isinstance(e, psycopg.Error) and e.sqlstate:
+                execution_completed = False
 
         if error_msg:
             if execution_completed:
@@ -719,7 +768,7 @@ class LomberkExecutor:
         except psycopg.OperationalError as e:
             if operation_id:
                 return ExecutionResult(operation_id=operation_id, status="unknown", message="Network lost during checkpoint creation. Retry with same operation_id.")
-            return ExecutionResult(operation_id=operation_id, status="failed", message=f"Pre-execution connection error: {e}")
+            return ExecutionResult(operation_id=operation_id, status="failed", message=_agent_message(e))
     def execute_pending(self, public_id: str, actor: str = "unknown_approver"):
         import psycopg
         try:
@@ -752,12 +801,15 @@ class LomberkExecutor:
 
                     cur.execute("SELECT lomberk.record_approval(%s, %s)", (public_id, actor))
                     approvals = cur.fetchone()[0]
-                    if self.required_approvals > 1 and approvals < self.required_approvals:
-                        audit("approval_recorded", actor=actor, public_id=public_id, approvals=approvals, required=self.required_approvals)
+                    # The quorum the write was held under wins over this approver's local config.
+                    cur.execute("SELECT required_approvals FROM lomberk.checkpoints WHERE id = %s", (cp_id,))
+                    required = max(cur.fetchone()[0], self.required_approvals)
+                    if required > 1 and approvals < required:
+                        audit("approval_recorded", actor=actor, public_id=public_id, approvals=approvals, required=required)
                         note = ("" if actor.startswith(("oidc:", "slack:")) else
                                 " Admin-key and CLI approvals are recorded but don't count toward the two-person rule; approve with SSO or Slack.")
                         return ExecutionResult(operation_id=None, status="awaiting_approval", public_id=public_id,
-                                               message=f"{approvals} of {self.required_approvals} approvals.{note}")
+                                               message=f"{approvals} of {required} approvals.{note}")
 
                     cur.execute("SELECT lomberk.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                     exec_token = cur.fetchone()[0]

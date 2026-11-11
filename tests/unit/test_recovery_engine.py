@@ -130,3 +130,19 @@ def test_recovery_status_polling_after_known_id():
     assert last_status_timeout < 5.0
     assert res.status == "applied"
     assert res.resume_id == "known_id_123"
+
+
+def test_approved_but_not_yet_applied_is_not_a_final_outcome():
+    # "approved" = a person said yes and the write has not run yet; a crash can leave it there.
+    statuses = iter(["approved", "approved", "applied"])
+
+    calls = {"n": 0}
+
+    def submit_once(t):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"status": "approved", "public_id": "cp_1", "operation_id": "op"}
+        raise AssertionError("resumes by polling, not by resubmitting")
+
+    res = execute_with_recovery("op", submit_once, lambda i, t: next(statuses), timeout_seconds=2.0, base_delay=0.01)
+    assert res.status == "applied"

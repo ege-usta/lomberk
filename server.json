@@ -25,22 +25,22 @@
       ],
       "environmentVariables": [
         {
-          "name": "LOMBERK_AGENT_DSN",
-          "description": "Connection string for the low-privilege role the agent's SQL runs as.",
+          "name": "LOMBERK_CONFIG",
+          "description": "Absolute path to the lomberk.yaml that `lomberk setup` wrote. The connection strings and keys are read from the .env beside it.",
           "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "LOMBERK_AGENT_DSN",
+          "description": "Connection string for the low-privilege role the agent's SQL runs as. Only needed when the .env beside lomberk.yaml doesn't set it.",
+          "isRequired": false,
           "isSecret": true
         },
         {
           "name": "LOMBERK_ADMIN_DSN",
-          "description": "Connection string for the control role that owns the lomberk schema (checkpoints, undo, ledger).",
-          "isRequired": true,
-          "isSecret": true
-        },
-        {
-          "name": "LOMBERK_CONFIG",
-          "description": "Absolute path to lomberk.yaml (protected tables, limits). Without it, ./lomberk.yaml or defaults.",
+          "description": "Connection string for the control role that owns the lomberk schema (checkpoints, undo, ledger). Only needed when the .env beside lomberk.yaml doesn't set it.",
           "isRequired": false,
-          "isSecret": false
+          "isSecret": true
         }
       ]
     }

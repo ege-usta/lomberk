@@ -141,6 +141,9 @@ def config_error_message(e: Exception) -> str:
     return str(e).splitlines()[0]
 
 
+PRICING_URL = "https://ege-usta.github.io/lomberk/#pricing"  # Solo and Pro, with what each one adds
+
+
 def pro_features(config: LomberkConfig) -> list[str]:
     """The configured features that need a Lomberk Pro license."""
     slack = os.environ.get("LOMBERK_SLACK_ENABLED", "").lower() == "true"

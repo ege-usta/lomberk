@@ -1,0 +1,32 @@
+name: Bug report
+description: Something Lomberk did that it shouldn't, or didn't do that it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "**Security problem?** Don't file it here; see SECURITY.md. Never paste connection strings, keys or license keys."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The SQL the agent sent and the reply it got help most.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `lomberk doctor`
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: lomberk 0.2.0, PostgreSQL 16 on Supabase, Claude Code
+    validations:
+      required: true
