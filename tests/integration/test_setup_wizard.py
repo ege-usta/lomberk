@@ -30,8 +30,9 @@ def owner():
 
 def run_setup(monkeypatch, tmp_path, args):
     monkeypatch.chdir(tmp_path)
-    for k in ENV_KEYS:
-        monkeypatch.delenv(k, raising=False)
+    for k in ENV_KEYS:  # setenv first so monkeypatch restores what setup writes into os.environ
+        monkeypatch.setenv(k, "")
+        monkeypatch.delenv(k)
     return CliRunner().invoke(app, ["setup", *args])
 
 
