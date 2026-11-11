@@ -86,3 +86,50 @@ def test_setup_bad_dsn_is_one_line(monkeypatch, tmp_path):
     r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", "postgresql://nobody:x@127.0.0.1:1/db", "--yes"])
     assert r.exit_code == 1 and "Traceback" not in r.output and "could not connect" in r.output.lower()
     assert not (tmp_path / ".env").exists()
+
+
+def test_setup_checks_the_folder_before_touching_the_database(owner, monkeypatch, tmp_path):
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", owner, "--dir", str(tmp_path / "missing"), "--yes"])
+    assert r.exit_code == 1 and "is not a directory" in r.output
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=0o500)
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", owner, "--dir", str(locked), "--yes"])
+    assert r.exit_code == 1 and "can't write to" in r.output
+    with psycopg.connect(owner) as conn:  # nothing was created, so a retry starts clean
+        assert not conn.execute("SELECT 1 FROM pg_roles WHERE rolname LIKE 'lomberk%'").fetchone()
+
+
+def test_setup_shows_the_passwords_once_if_env_cant_be_written(owner, monkeypatch, tmp_path):
+    from lomberk import setup as wizard
+
+    def fail(*a):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(wizard, "write_files", fail)
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", owner, "--tables", "public.orders", "--yes"])
+    assert r.exit_code == 1 and "Traceback" not in r.output and "shown once" in r.output
+    dsn = r.output.split("LOMBERK_AGENT_DSN=", 1)[1].splitlines()[0]
+    with psycopg.connect(dotenv.dotenv_values(stream=__import__("io").StringIO(f"X={dsn}"))["X"]) as conn:
+        assert conn.execute("SELECT current_user").fetchone()[0] == "lomberk_agent"
+
+
+def test_env_values_survive_quotes_and_spaces(monkeypatch, tmp_path):
+    from lomberk import setup as wizard
+    for k in ENV_KEYS:  # write_files exports what it wrote; keep that out of the other tests
+        monkeypatch.setenv(k, "")
+    tricky = "host=db user=lomberk_agent password=a\"b\\c options='-c search_path=x'"
+    wizard.write_files(str(tmp_path / "lomberk.yaml"), str(tmp_path / ".env"), [], tricky, tricky)
+    assert dotenv.dotenv_values(tmp_path / ".env")["LOMBERK_AGENT_DSN"] == tricky
+
+
+def test_client_snippets_quote_the_path(monkeypatch):
+    import json
+    import shlex
+
+    from lomberk import setup as wizard
+    monkeypatch.setattr(wizard, "client_command", lambda: ["uvx", "lomberk", "serve"])
+    path = '/Users/me/My "DB" Files/lomberk.yaml'
+    out = wizard.client_instructions(path)
+    claude = next(line for line in out.splitlines() if "claude mcp add" in line)
+    assert shlex.split(claude)[5] == f"LOMBERK_CONFIG={path}"
+    cursor = out.splitlines()[out.splitlines().index(next(x for x in out.splitlines() if x.startswith("Cursor"))) + 1]
+    assert json.loads(cursor)["mcpServers"]["lomberk"]["env"]["LOMBERK_CONFIG"] == path

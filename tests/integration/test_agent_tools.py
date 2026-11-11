@@ -96,3 +96,19 @@ def test_an_agent_sees_only_its_own_checkpoints(db):
     token, status, changes, waited = asyncio.run(run())
     assert status == waited == f"No checkpoint {token} was made by this agent."
     assert changes == "You haven't made any writes through Lomberk yet."
+
+
+def test_a_write_past_the_approval_timeout_reads_as_expired(db):
+    mcp, executor = server(db)
+    executor.approval_timeout_minutes = 0  # the ledger is append-only, so age the write by shrinking the timeout
+
+    async def run():
+        async with Client(mcp) as c:
+            held = await call(c, "execute_sql", sql="UPDATE public.orders SET total = 7 WHERE id = 3")
+            token = re.search(r"cp_[a-z0-9]+", held).group(0)
+            await asyncio.sleep(0.01)
+            return (await call(c, "checkpoint_status", token=token),
+                    await call(c, "wait_for_approval", token=token, timeout_seconds=5))
+    status, waited = asyncio.run(run())
+    assert "expired" in status and "waiting" not in status
+    assert waited == status  # returns at once, never suggests `lomberk approve` for a write that can't be approved

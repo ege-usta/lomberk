@@ -58,6 +58,8 @@ def describe_checkpoint(cp: dict) -> str:
     """One checkpoint as the agent should read it: what happened and what it can do next."""
     head = f"{cp['public_id']} ({cp['created_at']:%Y-%m-%d %H:%M %z}, {cp['classification']}): "
     status = cp["status"]
+    if status == "pending" and cp.get("expired"):
+        return head + "expired: no human approved it in time. Don't resubmit it unchanged; ask the user what they want."
     if status == "pending":
         got, need = cp["approvals"], cp["required_approvals"] or 1
         return head + (f"waiting for a human ({got} of {need} approvals)." if need > 1 else "waiting for a human to approve.")
@@ -165,7 +167,7 @@ def build_mcp(get_deps: Callable[[], tuple[LomberkExecutor, PolicyEngine]], prin
             if not found:
                 return f"No checkpoint {token} was made by this agent."
             cp = found[0]
-            if cp["status"] not in WAITING:
+            if cp["status"] not in WAITING or cp.get("expired"):
                 return describe_checkpoint(cp)
             left = deadline - time.monotonic()
             if left <= 0:

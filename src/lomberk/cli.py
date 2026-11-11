@@ -258,7 +258,16 @@ def setup(
     if not registered:
         console.print("[yellow]No table is undoable yet; add one later with lomberk register.[/yellow]")
 
-    wizard.write_files(config_file, env_file, protected, control_dsn, agent_dsn)
+    try:
+        wizard.write_files(config_file, env_file, protected, control_dsn, agent_dsn)
+    except OSError as e:
+        # The roles exist now and their passwords live nowhere else, so show them this once rather than lose them.
+        console.print(f"[red]Setup stopped: could not write {escape(env_file)}: {escape(e.strerror or str(e))}.[/red]\n"
+                      "The roles and the lomberk schema are in place. Save these two connection strings now (shown once) "
+                      "as LOMBERK_ADMIN_DSN and LOMBERK_AGENT_DSN, then run lomberk doctor:", highlight=False)
+        console.print(f"LOMBERK_ADMIN_DSN={wizard.env_quote(control_dsn)}\nLOMBERK_AGENT_DSN={wizard.env_quote(agent_dsn)}",
+                      highlight=False, markup=False)
+        raise typer.Exit(1) from None
     console.print(f"Wrote {config_file} and {env_file} (private, mode 600). Keep .env out of git.")
 
     results = run_checks(config_file)

@@ -4,9 +4,11 @@ It creates the two roles with generated passwords, installs the schema, register
 tables, and writes lomberk.yaml and a private .env. It never changes a role or file that
 already exists, so running it twice can't rotate a password something else still uses.
 """
+import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 from dataclasses import dataclass
 
@@ -82,21 +84,27 @@ def client_command() -> list[str]:
 def client_instructions(config_path: str) -> str:
     """What to paste into each MCP client. Only the config path goes there; the secrets stay in .env beside it."""
     cmd = client_command()
-    args = ", ".join(f'"{a}"' for a in cmd[1:])
+    command, args, env = json.dumps(cmd[0]), json.dumps(cmd[1:]), json.dumps({"LOMBERK_CONFIG": config_path})
+    entry = f'{{"command": {command}, "args": {args}, "env": {env}}}'
     return f"""Claude Code:
-  claude mcp add lomberk -e LOMBERK_CONFIG={config_path} -- {" ".join(cmd)}
+  claude mcp add lomberk -e {shlex.quote("LOMBERK_CONFIG=" + config_path)} -- {shlex.join(cmd)}
 Cursor (.cursor/mcp.json) or Claude Desktop (claude_desktop_config.json):
-  {{"mcpServers": {{"lomberk": {{"command": "{cmd[0]}", "args": [{args}], "env": {{"LOMBERK_CONFIG": "{config_path}"}}}}}}}}
+  {{"mcpServers": {{"lomberk": {entry}}}}}
 VS Code (.vscode/mcp.json):
-  {{"servers": {{"lomberk": {{"command": "{cmd[0]}", "args": [{args}], "env": {{"LOMBERK_CONFIG": "{config_path}"}}}}}}}}
+  {{"servers": {{"lomberk": {entry}}}}}
 Codex (~/.codex/config.toml):
   [mcp_servers.lomberk]
-  command = "{cmd[0]}"
-  args = [{args}]
-  env = {{ LOMBERK_CONFIG = "{config_path}" }}"""
+  command = {command}
+  args = {args}
+  env = {{ LOMBERK_CONFIG = {json.dumps(config_path)} }}"""
 
 
 def check_files(directory: str) -> tuple[str, str]:
+    """Checked before any database change: once the roles exist, a file that can't be written loses their passwords."""
+    if not os.path.isdir(directory):
+        raise SetupError(f"{directory} is not a directory. Create it first, or pass --dir.")
+    if not os.access(directory, os.W_OK | os.X_OK):
+        raise SetupError(f"can't write to {directory}. Pass --dir with a folder you can write to.")
     config, env = os.path.join(directory, "lomberk.yaml"), os.path.join(directory, ".env")
     for path in (config, env):
         if os.path.exists(path):
@@ -137,6 +145,11 @@ def create_roles(conn, owner_dsn: str) -> tuple[str, str]:
     return dsns[0], dsns[1]
 
 
+def env_quote(value: str) -> str:
+    """A double-quoted .env value: connection strings can hold single quotes (make_conninfo adds them around spaces)."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def write_files(config_path: str, env_path: str, protect: list[str], control_dsn: str, agent_dsn: str) -> None:
     config = {"protected_tables": protect, "limits": {"max_rows_without_approval": 100}}
     with open(config_path, "w") as f:
@@ -149,6 +162,6 @@ def write_files(config_path: str, env_path: str, protect: list[str], control_dsn
     fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # private from the first byte
     with os.fdopen(fd, "w") as f:
         f.write("# Written by `lomberk setup`. Secrets: keep this file out of git.\n")
-        f.writelines(f"{k}='{v}'\n" for k, v in values.items())
+        f.writelines(f"{k}={env_quote(v)}\n" for k, v in values.items())
     for k, v in values.items():
         os.environ[k] = v  # so doctor checks what was just written
