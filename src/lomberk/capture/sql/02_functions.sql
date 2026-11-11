@@ -343,6 +343,7 @@ CREATE OR REPLACE FUNCTION lomberk.register_table(
 DECLARE
     v_table_oid OID;
     v_member OID;
+    v_seq REGCLASS;
     v_pk TEXT;
     v_all TEXT;
     v_visible TEXT;
@@ -407,7 +408,21 @@ BEGIN
     FOR v_member IN SELECT relid FROM pg_partition_tree(v_table_oid) WHERE relid <> v_table_oid LOOP
         EXECUTE format('REVOKE ALL ON %s FROM %I', v_member::regclass, p_agent_role);
     END LOOP;
-    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', p_schema, p_agent_role);
+    -- Only this table's sequences (serial/identity, and any a column default calls), so the agent can
+    -- INSERT but can't read the row volume of tables it was never given.
+    FOR v_seq IN
+        SELECT d.objid::regclass FROM pg_depend d
+          JOIN pg_class c ON c.oid = d.objid AND c.relkind = 'S'  -- not the TOAST table, which depends on it too
+         WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass
+           AND d.refobjid = v_table_oid AND d.deptype IN ('a', 'i')
+        UNION
+        SELECT d.refobjid::regclass FROM pg_attrdef ad
+          JOIN pg_depend d ON d.classid = 'pg_attrdef'::regclass AND d.objid = ad.oid AND d.refclassid = 'pg_class'::regclass
+          JOIN pg_class c ON c.oid = d.refobjid AND c.relkind = 'S'
+         WHERE ad.adrelid = v_table_oid
+    LOOP
+        EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %s TO %I', v_seq, p_agent_role);
+    END LOOP;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 

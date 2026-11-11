@@ -24,7 +24,7 @@ class LicenseActivationStore:
                 return conn.execute("SELECT label, activation_id FROM lomberk.license_activation").fetchone()
         except psycopg.errors.UndefinedTable as e:
             raise ValueError("Startup Refusal: the Lomberk schema is older than this gateway. "
-                             "Run `lomberk install` again to upgrade it.") from e
+                             "Run `lomberk init` again to upgrade it.") from e
 
     def save(self, activation_id: str) -> None:
         with psycopg.connect(self.dsn) as conn:

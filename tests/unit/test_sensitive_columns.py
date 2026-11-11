@@ -65,6 +65,8 @@ LEAKS = [
     "SELECT id AS x FROM public.users u ORDER BY x, u",
     "SELECT count(*) AS n FROM public.users u GROUP BY u",
     "SELECT settings['api_key':'z'] FROM public.users",  # slice bound
+    "SELECT id FROM public.users WHERE settings @? '$.api_key'",  # jsonpath operators name a key path
+    "SELECT id FROM public.users WHERE settings @@ '$.auth.token == \"x\"'",
 ]
 
 ALLOWED = [

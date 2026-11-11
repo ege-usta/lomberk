@@ -62,7 +62,7 @@ def build_mcp(get_deps: Callable[[], tuple[LomberkExecutor, PolicyEngine]], prin
         sql: str = Field(description="One PostgreSQL statement. Writes must be schema-qualified and have a WHERE clause."),
         operation_id: str | None = Field(default=None, description="Optional idempotency key (client-generated UUID). Retries with the same operation_id are safely idempotent."),
     ) -> str:
-        """Executes a SQL statement with Lomberk protection. Large or sensitive writes are held for human approval; every applied write can be undone."""
+        """Executes a SQL statement with Lomberk protection. Destructive SQL is refused, large or sensitive writes are held for human approval, and applied writes to registered tables can be undone within the plan's undo window."""
         executor, policy_engine = get_deps()
         return run_agent_sql(executor, policy_engine, sql, operation_id, principal)
 

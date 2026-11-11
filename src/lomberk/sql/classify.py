@@ -51,7 +51,7 @@ def classify_sql(sql: str) -> list[ClassifiedStatement]:
                or t in ("GrantStmt", "RevokeStmt", "VariableSetStmt", "AlterSystemStmt") for t in types):
             stmt_class = StatementClass.BLOCKED
 
-        elif any(t in ("DropdbStmt", "DropdbStmt") for t in types):
+        elif any(t in ("DropdbStmt", "DropTableSpaceStmt") for t in types):
             stmt_class = StatementClass.DDL_DANGEROUS
 
         elif "DropStmt" in types:
@@ -129,7 +129,8 @@ SENSITIVE_KEYWORDS = ("password", "passwd", "pwd", "token", "secret", "ssn", "ha
 
 
 # JSON operators whose right side names a key or path: settings->>'api_key', settings ? 'token'.
-JSON_KEY_OPERATORS = {"->", "->>", "#>", "#>>", "?", "?|", "?&", "@>", "<@", "#-"}
+# `@?` and `@@` take a jsonpath. Text pattern matching (LIKE, ~) is not here: a word in a value is data.
+JSON_KEY_OPERATORS = {"->", "->>", "#>", "#>>", "?", "?|", "?&", "@>", "<@", "#-", "@?", "@@"}
 
 
 def is_secret(name, extra=()) -> bool:
