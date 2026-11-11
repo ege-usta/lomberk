@@ -332,8 +332,8 @@ class LomberkExecutor:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM lomberk.begin_checkpoint(%s, %s, %s, %s, %s)",
-                    (sql, stmt_class, agent_label, principal, operation_id)
+                    "SELECT * FROM lomberk.begin_checkpoint(%s, %s, %s, %s, %s, %s)",
+                    (sql, stmt_class, agent_label, principal, operation_id, self.required_approvals)
                 )
                 row = cur.fetchone()
                 public_id = row[1]
@@ -659,7 +659,7 @@ class LomberkExecutor:
             try:
                 # One transaction: an approver never sees the held write without its preview.
                 with psycopg.connect(self.dsn) as rq_conn, rq_conn.transaction(), rq_conn.cursor() as rq_cur:
-                    rq_cur.execute("SELECT lomberk.requeue_checkpoint(%s)", (public_id,))
+                    rq_cur.execute("SELECT lomberk.requeue_checkpoint(%s, %s)", (public_id, self.required_approvals))
                     if e.preview is not None:
                         rq_cur.execute("INSERT INTO lomberk.previews (public_id, preview) VALUES (%s, %s) "
                                        "ON CONFLICT (public_id) DO UPDATE SET preview = EXCLUDED.preview, created_at = now()",
@@ -752,12 +752,15 @@ class LomberkExecutor:
 
                     cur.execute("SELECT lomberk.record_approval(%s, %s)", (public_id, actor))
                     approvals = cur.fetchone()[0]
-                    if self.required_approvals > 1 and approvals < self.required_approvals:
-                        audit("approval_recorded", actor=actor, public_id=public_id, approvals=approvals, required=self.required_approvals)
+                    # The quorum the write was held under wins over this approver's local config.
+                    cur.execute("SELECT required_approvals FROM lomberk.checkpoints WHERE id = %s", (cp_id,))
+                    required = max(cur.fetchone()[0], self.required_approvals)
+                    if required > 1 and approvals < required:
+                        audit("approval_recorded", actor=actor, public_id=public_id, approvals=approvals, required=required)
                         note = ("" if actor.startswith(("oidc:", "slack:")) else
                                 " Admin-key and CLI approvals are recorded but don't count toward the two-person rule; approve with SSO or Slack.")
                         return ExecutionResult(operation_id=None, status="awaiting_approval", public_id=public_id,
-                                               message=f"{approvals} of {self.required_approvals} approvals.{note}")
+                                               message=f"{approvals} of {required} approvals.{note}")
 
                     cur.execute("SELECT lomberk.approve_checkpoint(%s, 'ALLOW')", (public_id,))
                     exec_token = cur.fetchone()[0]

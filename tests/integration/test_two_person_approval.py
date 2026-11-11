@@ -151,3 +151,37 @@ def test_gateway_refuses_to_start_without_a_valid_license(dsn, monkeypatch, tmp_
     monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("invalid"))
     with pytest.raises(lic.LicenseError, match="two-person approval"), TestClient(app):
         pass
+
+
+def _gateway_hold(dsn, required=2):
+    control, runtime = _roles(dsn)
+    gw = LomberkExecutor(control, runtime, required_approvals=required)
+    return gw.create_pending_checkpoint("UPDATE public.acct SET val = val + 1 WHERE id = 1", "DML_WRITE", "REQUIRE_APPROVAL", "agent")
+
+
+def test_quorum_is_stored_on_the_held_write_not_taken_from_the_approver(dsn):
+    # The gateway held it under a two-person rule; a CLI run without lomberk.yaml defaults to 1.
+    pid, before = _gateway_hold(dsn), _val(dsn)
+    cli = _executor(dsn, 1)
+    assert cli.execute_pending(pid, actor="oidc:alice@co.com").status == "awaiting_approval"
+    assert _val(dsn) == before and cli.check_status(pid) == "pending"
+    assert cli.execute_pending(pid, actor="oidc:bob@co.com").status == "applied"
+    assert _val(dsn) == before + 1
+
+
+def test_control_role_cannot_approve_below_quorum_directly(dsn):
+    pid, before = _gateway_hold(dsn), _val(dsn)
+    control, _ = _roles(dsn)
+    with psycopg.connect(control, autocommit=True) as conn:
+        conn.execute("SELECT lomberk.record_approval(%s, 'oidc:alice@co.com')", (pid,))
+        with pytest.raises(psycopg.errors.RaiseException, match="quorum"):
+            conn.execute("SELECT lomberk.approve_checkpoint(%s, 'ALLOW')", (pid,))
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("SELECT lomberk.begin_checkpoint('x', 'DML_WRITE', 'a', 'p', NULL, 0)")
+    assert _val(dsn) == before
+
+
+def test_required_approvals_can_only_go_up(dsn):
+    pid = _gateway_hold(dsn)
+    with psycopg.connect(dsn, autocommit=True) as conn, pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+        conn.execute("UPDATE lomberk.checkpoints SET required_approvals = 1 WHERE public_id = %s", (pid,))

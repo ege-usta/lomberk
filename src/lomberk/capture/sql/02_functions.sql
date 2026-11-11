@@ -4,6 +4,7 @@ CREATE OR REPLACE FUNCTION lomberk.begin_checkpoint(
     p_agent_label TEXT,
     p_principal TEXT,
     p_operation_id TEXT DEFAULT NULL,
+    p_required_approvals INTEGER DEFAULT 1,
     OUT o_cp_id BIGINT,
     OUT o_public_id TEXT
 ) AS $$
@@ -14,9 +15,10 @@ BEGIN
     v_public_id := 'cp_' || replace(gen_random_uuid()::text, '-', '');
     
     INSERT INTO lomberk.checkpoints (
-        public_id, sql_text, classification, agent_label, principal, status, decision, operation_id
+        public_id, sql_text, classification, agent_label, principal, status, decision, operation_id, required_approvals
     ) VALUES (
-        v_public_id, p_sql_text, p_classification, p_agent_label, p_principal, 'pending', 'REQUIRE_APPROVAL', p_operation_id
+        v_public_id, p_sql_text, p_classification, p_agent_label, p_principal, 'pending', 'REQUIRE_APPROVAL', p_operation_id,
+        p_required_approvals
     ) RETURNING id INTO v_id;
     
     o_cp_id := v_id;
@@ -30,17 +32,23 @@ CREATE OR REPLACE FUNCTION lomberk.approve_checkpoint(
 ) RETURNS UUID AS $$
 DECLARE
     v_token UUID;
+    v_required INTEGER;
 BEGIN
     v_token := gen_random_uuid();
-    
-    UPDATE lomberk.checkpoints 
-    SET status = 'approved', decision = p_decision, capability_token = v_token
-    WHERE public_id = p_public_id AND status = 'pending';
-    
+
+    SELECT required_approvals INTO v_required FROM lomberk.checkpoints
+    WHERE public_id = p_public_id AND status = 'pending' FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Checkpoint % not found or not in pending state.', p_public_id;
     END IF;
-    
+    IF v_required > 1 AND lomberk.approval_quorum(p_public_id) < v_required THEN
+        RAISE EXCEPTION 'Checkpoint % needs % approvals (two-person quorum not met).', p_public_id, v_required;
+    END IF;
+
+    UPDATE lomberk.checkpoints
+    SET status = 'approved', decision = p_decision, capability_token = v_token
+    WHERE public_id = p_public_id AND status = 'pending';
+
     RETURN v_token;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
@@ -277,6 +285,15 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
 
+-- The two-person quorum so far: the most distinct people who approved within ONE
+-- verified identity system (oidc: or slack:).
+CREATE OR REPLACE FUNCTION lomberk.approval_quorum(p_public_id TEXT) RETURNS INTEGER AS $$
+    SELECT coalesce(max(n), 0)::INTEGER FROM (
+        SELECT count(*) AS n FROM lomberk.approvals
+        WHERE public_id = p_public_id AND split_part(actor, ':', 1) IN ('oidc', 'slack')
+        GROUP BY split_part(actor, ':', 1)) per_system;
+$$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = lomberk, pg_temp;
+
 -- Records one approval of a pending checkpoint and returns the two-person quorum: the
 -- most distinct people who approved within ONE verified identity system (oidc: or
 -- slack:). The shared admin key and CLI users prove no identity, and one person may
@@ -285,18 +302,13 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 CREATE OR REPLACE FUNCTION lomberk.record_approval(p_public_id TEXT, p_actor TEXT) RETURNS INTEGER AS $$
 DECLARE
     v_status TEXT;
-    v_count INTEGER;
 BEGIN
     SELECT status INTO v_status FROM lomberk.checkpoints WHERE public_id = p_public_id FOR UPDATE;
     IF NOT FOUND OR v_status <> 'pending' THEN
         RAISE EXCEPTION 'Checkpoint % not found or not in pending state.', p_public_id;
     END IF;
     INSERT INTO lomberk.approvals (public_id, actor) VALUES (p_public_id, p_actor) ON CONFLICT DO NOTHING;
-    SELECT coalesce(max(n), 0) INTO v_count FROM (
-        SELECT count(*) AS n FROM lomberk.approvals
-        WHERE public_id = p_public_id AND split_part(actor, ':', 1) IN ('oidc', 'slack')
-        GROUP BY split_part(actor, ':', 1)) per_system;
-    RETURN v_count;
+    RETURN lomberk.approval_quorum(p_public_id);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 
@@ -924,11 +936,13 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = lomberk, pg_temp;
 -- Row-limit hold: an auto-approved write that touched too many rows is rolled
 -- back by the executor and sent back to the human approval queue.
 CREATE OR REPLACE FUNCTION lomberk.requeue_checkpoint(
-    p_public_id TEXT
+    p_public_id TEXT,
+    p_required_approvals INTEGER DEFAULT 1
 ) RETURNS VOID AS $$
 BEGIN
     UPDATE lomberk.checkpoints
-    SET status = 'pending', decision = 'REQUIRE_APPROVAL', capability_token = NULL, exec_txid = NULL
+    SET status = 'pending', decision = 'REQUIRE_APPROVAL', capability_token = NULL, exec_txid = NULL,
+        required_approvals = greatest(required_approvals, p_required_approvals)
     WHERE public_id = p_public_id AND status = 'approved';
 
     IF NOT FOUND THEN
@@ -986,6 +1000,9 @@ BEGIN
        (OLD.public_id, OLD.created_at, OLD.principal, OLD.agent_label, OLD.classification, OLD.sql_text,
         OLD.operation_id, OLD.prev_hash, OLD.hash, OLD.chain_seq) THEN
         RAISE EXCEPTION 'Lomberk ledger is append-only: recorded checkpoint fields cannot be changed.';
+    END IF;
+    IF NEW.required_approvals < OLD.required_approvals THEN
+        RAISE EXCEPTION 'Lomberk ledger is append-only: a checkpoint''s required approvals cannot be lowered.';
     END IF;
     RETURN NEW;
 END;

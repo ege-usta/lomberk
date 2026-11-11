@@ -28,6 +28,8 @@ def install_lomberk(admin_dsn: str, control_role: str, agent_role: str):
 
             # Legacy cleanup: drop old function signatures to prevent upgrade collisions
             cur.execute("DROP FUNCTION IF EXISTS lomberk.begin_checkpoint(TEXT, TEXT, TEXT);")
+            cur.execute("DROP FUNCTION IF EXISTS lomberk.begin_checkpoint(TEXT, TEXT, TEXT, TEXT, TEXT);")
+            cur.execute("DROP FUNCTION IF EXISTS lomberk.requeue_checkpoint(TEXT);")
             cur.execute("DROP FUNCTION IF EXISTS lomberk.approve_checkpoint(BIGINT, TEXT);")
             cur.execute("DROP FUNCTION IF EXISTS lomberk.claim_checkpoint(BIGINT);")
             cur.execute("DROP FUNCTION IF EXISTS lomberk.claim_checkpoint(UUID);")
