@@ -6,8 +6,9 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from starlette.routing import Route
@@ -389,6 +390,23 @@ def list_pending_checkpoints(
             cur.execute("SELECT id, public_id, sql_text, agent_label, created_at FROM lomberk.list_pending_checkpoints()")
             rows = cur.fetchall()
             return [{"id": r[0], "public_id": r[1], "sql": r[2], "agent": r[3], "created_at": r[4]} for r in rows]
+
+
+CHECKPOINT_STATUSES = Literal["pending", "approved", "executing", "applied", "rejected", "failed", "undone"]
+
+
+@app.get("/v1/checkpoints")
+def list_checkpoints(
+    status: CHECKPOINT_STATUSES | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    actor: str = Depends(verify_approver),
+    executor: LomberkExecutor = Depends(get_executor)
+):
+    """Recent checkpoints, newest first: find the cp_ id to undo (`?status=applied`)."""
+    return [{"public_id": c["public_id"], "created_at": c["created_at"], "status": c["status"],
+             "classification": c["classification"], "agent": c["agent_label"], "principal": c["principal"],
+             "sql": c["sql_text"], "rows_affected": c["rows_affected"], "approved_by": c["approved_by"]}
+            for c in executor.list_checkpoints(limit=limit, status=status)]
 
 
 @app.get("/v1/checkpoints/{public_id}/status")

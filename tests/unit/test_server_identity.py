@@ -12,4 +12,4 @@ def test_mcp_and_rest_report_the_installed_version():
     mcp = build_mcp(lambda: (None, None))
     assert mcp.version == version("lomberk") and mcp.title == "Lomberk"
     tools = asyncio.run(mcp.list_tools())
-    assert [t.name for t in tools] == ["execute_sql"]
+    assert [t.name for t in tools] == ["execute_sql", "describe_tables", "checkpoint_status", "list_my_changes", "wait_for_approval"]

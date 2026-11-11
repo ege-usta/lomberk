@@ -93,7 +93,7 @@ def test_registered_secret_columns_are_hidden_by_the_database(db):
         assert c.execute("SELECT has_column_privilege('mcp_agent', 'public.people', 'password_hash', 'SELECT'), "
                          "has_column_privilege('mcp_agent', 'public.people', 'name', 'SELECT')").fetchone() == (False, True)
     res = run(ex, "SELECT * FROM public.people")
-    assert res.status == "failed" and "permission denied" in res.message and "name the columns" in res.message
+    assert res.status == "failed" and "permission denied" in res.message and "describe_tables" in res.message and "name columns" in res.message
     assert run(ex, "SELECT id, name FROM public.people WHERE id = 1").data == [{"id": 1, "name": "a"}]
     assert run(ex, "UPDATE public.people SET age = 31 WHERE id = 1").status == "applied"
 

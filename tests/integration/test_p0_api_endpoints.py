@@ -123,3 +123,26 @@ def test_api_approve_outcome_unknown(client, control_dsn, runtime_dsn, monkeypat
     print(api_res.text)
     assert api_res.status_code == 502
     assert api_res.json()["status"] == "unknown"
+
+
+def test_api_lists_checkpoints_to_find_one_to_undo(client, control_dsn, runtime_dsn, monkeypatch):
+    from typer.testing import CliRunner
+
+    from lomberk.cli import app as cli_app
+    executor = LomberkExecutor(control_dsn, runtime_dsn)
+    held = executor.create_pending_checkpoint("UPDATE public.test_api SET val = '[red]x[/red]' WHERE id = 10", "WRITE_DML",
+                                             "REQUIRE_APPROVAL", "agent_x")
+    assert client.get("/v1/checkpoints").status_code == 401
+    assert client.get("/v1/checkpoints?status=nonsense", headers={"X-API-Key": "test-admin-key"}).status_code == 422
+    applied = client.get("/v1/checkpoints?status=applied", headers={"X-API-Key": "test-admin-key"}).json()
+    assert applied and {c["status"] for c in applied} == {"applied"}
+    assert {"public_id", "sql", "rows_affected", "approved_by"} <= set(applied[0])
+    newest = client.get("/v1/checkpoints?limit=1", headers={"X-API-Key": "test-admin-key"}).json()
+    assert [c["public_id"] for c in newest] == [held]
+
+    monkeypatch.setenv("LOMBERK_ADMIN_DSN", control_dsn)
+    monkeypatch.setenv("LOMBERK_AGENT_DSN", runtime_dsn)
+    r = CliRunner().invoke(cli_app, ["log", "--status", "pending"])
+    assert r.exit_code == 0, r.output
+    assert held in r.output and "[red]x[/red]" in r.output and "lomberk undo" in r.output  # agent SQL printed as-is
+    assert "No undone checkpoints." in CliRunner().invoke(cli_app, ["log", "--status", "undone"]).output

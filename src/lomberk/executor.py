@@ -50,8 +50,8 @@ def _agent_message(e: Exception) -> str:
         logger.warning("Database connection failed: %s", e)
         return "Lomberk could not reach the database. Nothing was changed; the operator can run `lomberk doctor`."
     if isinstance(e, psycopg.errors.InsufficientPrivilege):
-        return (f"{e.diag.message_primary}. Some columns are hidden from agents; "
-                "name the columns you need instead of *.")
+        return (f"{e.diag.message_primary}. Agents can read only tables registered with Lomberk, and some of their "
+                "columns are hidden: call describe_tables to see what you can use, and name columns instead of *.")
     if isinstance(e, psycopg.Error):
         return e.diag.message_primary or str(e).split("\n")[0]
     return str(e)
@@ -214,7 +214,7 @@ class LomberkExecutor:
             return None
         return None
 
-    def list_checkpoints(self, since=None, limit: int | None = None) -> list[dict]:
+    def list_checkpoints(self, since=None, limit: int | None = None, status: str | None = None) -> list[dict]:
         """Newest first, with who approved each one. limit None = all (for exports)."""
         with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -223,9 +223,34 @@ class LomberkExecutor:
                 "coalesce(array_agg(a.actor ORDER BY a.approved_at) FILTER (WHERE a.actor IS NOT NULL), '{}') AS approved_by, "
                 "(SELECT p.preview FROM lomberk.previews p WHERE p.public_id = c.public_id) AS preview "
                 "FROM lomberk.checkpoints c LEFT JOIN lomberk.approvals a USING (public_id) "
-                "WHERE %(since)s::timestamptz IS NULL OR c.created_at >= %(since)s "
+                "WHERE (%(since)s::timestamptz IS NULL OR c.created_at >= %(since)s) "
+                "AND (%(status)s::text IS NULL OR c.status = %(status)s) "
                 "GROUP BY c.id ORDER BY c.id DESC LIMIT %(limit)s",
-                {"since": since, "limit": limit})
+                {"since": since, "limit": limit, "status": status})
+            return cur.fetchall()
+
+    def agent_checkpoints(self, principal: str, public_id: str | None = None, limit: int = 20) -> list[dict]:
+        """One principal's own checkpoints, newest first: all an agent may see of the ledger."""
+        with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT c.public_id, c.created_at, c.status, c.classification, c.rows_affected, c.sql_text, "
+                "c.required_approvals, (SELECT count(*) FROM lomberk.approvals a WHERE a.public_id = c.public_id) AS approvals "
+                "FROM lomberk.checkpoints c WHERE c.principal = %s AND (%s::text IS NULL OR c.public_id = %s) "
+                "ORDER BY c.id DESC LIMIT %s", (principal, public_id, public_id, limit))
+            return cur.fetchall()
+
+    def describe_tables(self) -> list[dict]:
+        """Registered tables with the columns the agent role may read (name and type)."""
+        with psycopg.connect(self.runtime_dsn) as conn:
+            agent = conn.execute("SELECT current_user").fetchone()[0]
+        with psycopg.connect(self.dsn) as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT r.schema_name || '.' || r.table_name AS name, r.pk_column AS pk, "
+                "array_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod) ORDER BY a.attnum) "
+                "  FILTER (WHERE has_column_privilege(%(agent)s, a.attrelid, a.attnum, 'SELECT')) AS columns, "
+                "count(*) FILTER (WHERE NOT has_column_privilege(%(agent)s, a.attrelid, a.attnum, 'SELECT')) AS hidden "
+                "FROM lomberk.registered_tables r JOIN pg_attribute a ON a.attrelid = r.table_oid "
+                "AND a.attnum > 0 AND NOT a.attisdropped GROUP BY 1, 2 ORDER BY 1", {"agent": agent})
             return cur.fetchall()
 
     def reject(self, public_id: str, actor: str) -> bool:

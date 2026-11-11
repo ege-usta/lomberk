@@ -7,6 +7,7 @@ import typer
 import yaml
 from psycopg import sql
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from lomberk.capture.install import install_lomberk
@@ -144,7 +145,6 @@ def setup(
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask; use the options as given."),
 ):
     """Set Lomberk up on a database in one go: roles, install, tables, lomberk.yaml, .env, then doctor."""
-    from rich.markup import escape
 
     from lomberk import setup as wizard
     from lomberk.doctor import FAIL, OK, run_checks
@@ -291,6 +291,24 @@ def show(token: str):
 
 
 @app.command()
+def log(status: str = typer.Option(None, help="Only this status: applied, pending, rejected, undone, failed."),
+        limit: int = typer.Option(20, min=1, help="How many to show, newest first.")):
+    """List recent checkpoints, newest first: find the cp_ id to show, approve or undo."""
+    control, runtime = get_dsns()
+    rows = LomberkExecutor(control, runtime).list_checkpoints(limit=limit, status=status)
+    if not rows:
+        console.print("No checkpoints yet." if not status else f"No {status} checkpoints.")
+        return
+    for c in rows:  # agent data: never parsed as markup
+        sql_line = " ".join(c["sql_text"].split())
+        console.print(f"{c['public_id']}  {c['created_at']:%Y-%m-%d %H:%M}  {c['status']:<8}  {c['rows_affected'] or 0} row(s)  "
+                      f"{c['agent_label'] or ''}", markup=False, highlight=False)
+        console.print("    " + sql_line[:160] + ("…" if len(sql_line) > 160 else ""), markup=False, highlight=False,
+                      soft_wrap=True)
+    console.print("Details: lomberk show <checkpoint>   Undo: lomberk undo <checkpoint>")
+
+
+@app.command()
 def reject(token: str):
     """Reject a pending SQL statement, or close one left approved but never run (after a crash)."""
     control, runtime = get_dsns()
@@ -359,7 +377,6 @@ def verify_ledger():
 @app.command()
 def doctor(config: str = typer.Option(None, help="Config file to check (default: $LOMBERK_CONFIG, else ./lomberk.yaml).")):
     """Check this deployment (config, keys, database roles, install, license) and say how to fix problems."""
-    from rich.markup import escape
 
     from lomberk.doctor import FAIL, OK, run_checks
     results = run_checks(config or config_path())
