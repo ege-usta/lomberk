@@ -11,7 +11,14 @@ def resolve_plan(config: LomberkConfig) -> str:
     license_key = os.environ.get("LOMBERK_LICENSE_KEY")
     if not (needs_pro or license_key):
         return "free"
-    from lomberk.ee.license import check_license
+    try:
+        from lomberk.ee.license import check_license
+    except ImportError:  # a core-only install: nothing paid to turn on
+        if needs_pro:
+            raise ValueError(f"Startup Refusal: {', '.join(needs_pro)} need a Lomberk Pro license and the Pro package "
+                             "(lomberk.ee), which this install doesn't have. Install the full lomberk package "
+                             "or remove them from the config.") from None
+        return "free"
     control_dsn = os.environ.get(config.database.admin_dsn_env)
     store = LicenseActivationStore(control_dsn) if license_key and control_dsn else None
     return check_license(license_key, needs_pro, store)
