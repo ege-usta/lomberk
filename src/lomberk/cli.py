@@ -284,7 +284,7 @@ def setup(
         console.print("[red]Setup finished, but lomberk doctor found problems (above).[/red]")
         raise typer.Exit(1)
     console.print("[green]Ready.[/green] Connect your agent:")
-    console.print(escape(wizard.client_instructions(os.environ["LOMBERK_CONFIG"])), highlight=False, markup=False)
+    console.print(wizard.client_instructions(os.environ["LOMBERK_CONFIG"]), highlight=False, markup=False)
     console.print("Approve held writes with: lomberk approve <token>   Undo with: lomberk undo <checkpoint>")
 
 

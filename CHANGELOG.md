@@ -10,7 +10,7 @@ First release on PyPI and the MCP Registry.
 - `lomberk setup`: one owner connection string in, a working deployment out. It creates two least-privilege roles with generated passwords, installs the schema, registers the tables you pick, writes `lomberk.yaml` and a private `.env`, runs `lomberk doctor` and prints the config line for Claude Code, Cursor, Claude Desktop, VS Code and Codex. It never changes a role or file that already exists.
 - Agent tools: `describe_tables`, `wait_for_approval` (waits inside the tool call and reports progress), `checkpoint_status` and `list_my_changes`. An agent sees only its own checkpoints.
 - `lomberk log` and `GET /v1/checkpoints?status=applied`, to find the checkpoint to undo on the free plan.
-- Solo plan: one database, 30-day undo window, web panel and audit export.
+- Solo plan ($49/month): one database, 30-day undo window, web panel and audit export.
 - `lomberk doctor` tells stdio and HTTP mode apart, shows the plan, and warns about Row Level Security without a policy for the agent and about sequences no registered table uses.
 - Supabase session pooler, Railway and `lomberk setup` in [docs/hosted-postgres.md](docs/hosted-postgres.md).
 

@@ -61,6 +61,7 @@ def test_setup_end_to_end(owner, monkeypatch, tmp_path):
     assert "password" in r.output  # hidden from the agent by the database
     assert "row level security" in r.output.lower() and "public.notes" in r.output
     assert "claude mcp add lomberk" in r.output and str(tmp_path / "lomberk.yaml") in r.output
+    assert "\n  [mcp_servers.lomberk]\n" in r.output  # pasteable TOML: no rich escape backslash
     assert env["LOMBERK_AGENT_DSN"] not in r.output  # secrets stay in .env, not in scrollback
 
 

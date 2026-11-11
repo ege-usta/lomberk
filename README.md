@@ -222,7 +222,7 @@ Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against 
 | | Free | Solo | Pro | Enterprise |
 |---|---|---|---|---|
 | For | trying it, side projects | one developer | a team | many databases |
-| Price | $0 | coming soon | **$199/month** or $1,990/year | [talk to us](https://github.com/ege-usta/lomberk/discussions) |
+| Price | $0 | $49/month (checkout opening soon) | **$199/month** or $1,990/year | [talk to us](https://github.com/ege-usta/lomberk/discussions) |
 | Hard gate, holds, capture, ledger, remote MCP, API/CLI approvals, `lomberk log` | ✓ | ✓ | ✓ | ✓ |
 | Undo reaches back | 24 hours | 30 days | 30 days | no limit |
 | Web panel, audit export | | ✓ | ✓ | ✓ |
