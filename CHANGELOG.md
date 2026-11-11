@@ -2,7 +2,7 @@
 
 All notable changes to Lomberk. Versions follow [Semantic Versioning](https://semver.org/); before 1.0, a minor version may change behavior.
 
-## [0.2.0] — unreleased
+## [0.2.0] — 2026-11-11
 
 First release on PyPI and the MCP Registry.
 
