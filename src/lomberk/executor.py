@@ -433,6 +433,11 @@ class LomberkExecutor:
 
         return self._execute_internal(eval_result.statement.sql, eval_result.statement.stmt_class.value, eval_result.decision.value, agent_label, principal, operation_id)
 
+    def _held_rows(self, cur, exec_token) -> dict:
+        cur.execute("SELECT lomberk.preview_changes(%s, 0)", (exec_token,))
+        p = cur.fetchone()[0]
+        return {"rows": p["rows"], "tables": p["tables"], "sample": [], "truncated": p["rows"] > 0, "digest": p["digest"]}
+
     def _preview(self, cur, exec_token) -> dict:
         """What the in-flight write changed, masked like agent results. Updates list only the
         columns that changed; inserts and deletes list the row."""
@@ -651,7 +656,9 @@ class LomberkExecutor:
                                 hold_reason = f"Rows changed ({changed}) exceeds limit ({limit})."
                         if hold_reason:
                             # Leaving the with-block via exception rolls the write back.
-                            preview = self._preview(cur, exec_token) if self.preview_writes else None
+                            # Without approvals.preview the person sees no rows, but the count and
+                            # digest are still kept so approval runs only what was held.
+                            preview = self._preview(cur, exec_token) if self.preview_writes else self._held_rows(cur, exec_token)
                             raise HoldForApproval(hold_reason, preview, policy=hold_reason.startswith("Policy requires"))
                         cur.execute("SELECT lomberk.finish_checkpoint(%s, %s)", (exec_token, rows_affected))
                         execution_completed = True
