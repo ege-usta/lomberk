@@ -224,10 +224,15 @@ class LomberkExecutor:
             return cur.fetchall()
 
     def reject(self, public_id: str, actor: str) -> bool:
-        """Reject a pending checkpoint. Returns False if it is not pending."""
+        """Reject a pending checkpoint, or close one a crash left approved but never run.
+        Returns False for any other state."""
         try:
             with psycopg.connect(self.dsn, autocommit=True) as conn:
-                conn.execute("SELECT lomberk.reject_checkpoint(%s)", (public_id,))
+                if conn.execute("SELECT lomberk.check_checkpoint_status(%s)", (public_id,)).fetchone()[0] == "approved":
+                    # A write still running holds the row lock; this waits, then finds it applied and refuses.
+                    conn.execute("SELECT lomberk.fail_checkpoint(%s)", (public_id,))
+                else:
+                    conn.execute("SELECT lomberk.reject_checkpoint(%s)", (public_id,))
         except psycopg.errors.RaiseException:
             return False
         audit("rejected", actor=actor, public_id=public_id)
@@ -678,6 +683,10 @@ class LomberkExecutor:
             return ExecutionResult(checkpoint_id=cp_id, public_id=public_id, status="approval_required", message=message)
         except Exception as e:
             error_msg = _agent_message(e)
+            # The server answered the COMMIT with an error (deferred constraint, serialization):
+            # it was rolled back for certain. Only a lost connection leaves the outcome unknown.
+            if execution_completed and isinstance(e, psycopg.Error) and e.sqlstate:
+                execution_completed = False
 
         if error_msg:
             if execution_completed:

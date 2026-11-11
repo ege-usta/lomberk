@@ -174,7 +174,7 @@ def show(token: str):
 
 @app.command()
 def reject(token: str):
-    """Reject a pending SQL statement."""
+    """Reject a pending SQL statement, or close one left approved but never run (after a crash)."""
     control, runtime = get_dsns()
     if not LomberkExecutor(control, runtime).reject(token, actor=cli_actor()):
         console.print(f"[red]Token {token} not found or not pending.[/red]")

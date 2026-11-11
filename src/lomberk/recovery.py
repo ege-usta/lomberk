@@ -95,7 +95,8 @@ def execute_with_recovery(
                 status = status_fn(resume_id, remaining_time)
                 last_known_state = status
 
-            is_terminal = status in ["applied", "undone", "already_undone", "failed", "denied", "approval_required", "approved"]
+            # "approved" is not final: a person said yes and the write has not run (or a crash left it there).
+            is_terminal = status in ["applied", "undone", "already_undone", "failed", "denied", "approval_required"]
 
             late = clock() > deadline
             if is_terminal:
