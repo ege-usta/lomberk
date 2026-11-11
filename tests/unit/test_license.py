@@ -218,3 +218,20 @@ def test_a_malformed_activation_reply_refuses(polar):
     polar.reply, polar.activate = LIMITED, (200, "not json")
     with pytest.raises(lic.LicenseError, match="invalid, expired or cancelled"):
         lic.check_license("KEY-1", ["SSO"], Store())
+
+
+def test_solo_is_the_benefit_and_covers_one_person(polar, monkeypatch):
+    polar.reply = (200, '{"status": "granted", "benefit_id": "ben-solo"}')
+    assert validate_key("KEY-1").status == "invalid"  # no Solo ids configured
+    monkeypatch.setattr(lic, "SOLO_BENEFIT_IDS", frozenset({"ben-solo"}))
+    assert validate_key("KEY-1").solo and not validate_key("KEY-1").enterprise
+    assert lic.check_license("KEY-1", []) == "solo"
+    # The team features need the team plan: a Solo key refuses startup instead of quietly turning them on.
+    for feature in ("SSO", "Slack approvals", "two-person approval"):
+        with pytest.raises(lic.LicenseError, match=f"{feature} needs the Pro plan.*Solo"):
+            lic.check_license("KEY-1", [feature])
+
+
+def test_solo_undo_window_and_paid_surfaces():
+    from lomberk.executor import UNDO_WINDOW_HOURS
+    assert UNDO_WINDOW_HOURS["solo"] == UNDO_WINDOW_HOURS["pro"] == 30 * 24

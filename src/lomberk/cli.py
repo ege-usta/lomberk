@@ -35,6 +35,25 @@ def load_config() -> LomberkConfig:
         raise typer.Exit(1) from None
 
 
+def one_line(e: Exception) -> str:
+    """The useful line of a database or startup error: psycopg puts the cause last, after "connection failed:"."""
+    lines = [ln.strip() for ln in str(e).strip().splitlines() if ln.strip()]
+    if isinstance(e, psycopg.OperationalError) and lines:
+        return f"could not connect: {lines[-1]}"
+    return lines[0] if lines else type(e).__name__
+
+
+class _OneLineStartupError:
+    """Uvicorn logs a failed startup as a full traceback; show its last line, the reason, instead."""
+
+    def filter(self, record) -> bool:
+        msg = record.getMessage()
+        if msg.startswith("Traceback"):
+            last = msg.strip().splitlines()[-1]
+            record.msg, record.args = last.split(": ", 1)[-1], ()
+        return True
+
+
 def cli_actor() -> str:
     import getpass
     return f"cli:{getpass.getuser()}"
@@ -98,7 +117,11 @@ def init(
         console.print("[red]Error: pass --install-dsn or set LOMBERK_INSTALL_DSN (an owner/superuser connection, not the control or agent role).[/red]")
         raise typer.Exit(1)
     console.print("Installing Lomberk schema and triggers...")
-    install_lomberk(install_dsn, control_role=control_role, agent_role=agent_role)
+    try:
+        install_lomberk(install_dsn, control_role=control_role, agent_role=agent_role)
+    except (psycopg.Error, ValueError) as e:
+        console.print(f"[red]Install failed: {escape(one_line(e))}[/red]")
+        raise typer.Exit(1) from None
     console.print("[green]Lomberk installed successfully![/green]")
 
 @app.command()
@@ -125,7 +148,7 @@ def register(
         with psycopg.connect(install_dsn, autocommit=True) as conn:
             hidden, unprotected = register_table(conn, table, agent_role, pk, allow_triggers, extra)
     except psycopg.Error as e:
-        console.print(f"[red]Failed to register {table}: {str(e).splitlines()[0]}[/red]")
+        console.print(f"[red]Failed to register {table}: {escape(one_line(e))}[/red]")
         raise typer.Exit(1) from None
     console.print(f"[green]{table} is now protected.[/green]")
     if hidden:
@@ -395,7 +418,10 @@ def doctor(config: str = typer.Option(None, help="Config file to check (default:
 @app.command()
 def api(port: int = 8000, host: str = typer.Option("127.0.0.1", help="Bind address. Put a TLS reverse proxy in front before exposing beyond localhost.")):
     """Start the HTTP gateway: REST at /v1 and remote MCP at /mcp, for agents that can't run `lomberk serve`."""
+    import logging
+
     import uvicorn
+    logging.getLogger("uvicorn.error").addFilter(_OneLineStartupError())
     console.print(f"[green]Starting Lomberk API on {host}:{port}...[/green]")
     console.print(f"[dim]- Agent HTTP endpoint: POST http://{host}:{port}/v1/execute[/dim]")
     uvicorn.run("lomberk.api:app", host=host, port=port)

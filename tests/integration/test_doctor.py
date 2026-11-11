@@ -25,6 +25,11 @@ def db():
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("CREATE TABLE public.orders (id INT PRIMARY KEY)")
             conn.execute("SELECT lomberk.register_table('public', 'orders', 'id', 'mcp_agent')")
+            for t in ("notes", "memos"):  # row level security: notes has no policy for the agent, memos has one
+                conn.execute(f"CREATE TABLE public.{t} (id INT PRIMARY KEY)")
+                conn.execute(f"ALTER TABLE public.{t} ENABLE ROW LEVEL SECURITY")
+                conn.execute(f"SELECT lomberk.register_table('public', '{t}', 'id', 'mcp_agent')")
+            conn.execute("CREATE POLICY agent_all ON public.memos TO mcp_agent USING (true) WITH CHECK (true)")
         host = url.split("@", 1)[1]
         yield f"postgresql://lomberk_control:secret@{host}", f"postgresql://mcp_agent:secret@{host}"
 
@@ -133,3 +138,30 @@ def test_sequences_no_registered_table_draws_from(db, monkeypatch, tmp_path):
     finally:
         with psycopg.connect(install, autocommit=True) as conn:
             conn.execute("REVOKE USAGE, SELECT ON SEQUENCE public.invoices_id_seq FROM mcp_agent")
+
+
+def test_stdio_needs_only_the_connection_strings(db, monkeypatch, tmp_path):
+    control, agent = db
+    r = doctor(monkeypatch, tmp_path, {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent})
+    assert r.exit_code == 0, r.output
+    assert "LOMBERK_API_KEY is not set" in r.output and "only `lomberk api`" in r.output
+    assert "Free plan" in r.output and "24 hours" in r.output
+    assert "protected_tables is empty" in r.output
+
+
+def test_row_level_security_without_a_policy_for_the_agent(db, monkeypatch, tmp_path):
+    control, agent = db
+    r = doctor(monkeypatch, tmp_path, {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent, **KEYS})
+    assert r.exit_code == 0, r.output
+    assert "row level security" in r.output and "public.notes" in r.output and "CREATE POLICY" in r.output
+    assert "public.memos" not in r.output.split("row level security", 1)[1].splitlines()[0]
+
+
+def test_solo_key_with_team_features(db, monkeypatch, tmp_path):
+    control, agent = db
+    env = {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent, **KEYS, "LOMBERK_LICENSE_KEY": "solo-key"}
+    monkeypatch.setattr(lic, "validate_key", lambda key, activation_id=None: lic.Validation("granted", solo=True))
+    r = doctor(monkeypatch, tmp_path, env)
+    assert r.exit_code == 0 and "Solo plan, undo reaches back 30 days" in r.output, r.output
+    r = doctor(monkeypatch, tmp_path, env, "approvals:\n  required: 2\n")
+    assert r.exit_code == 1 and "needs the Pro plan, and this key is for Solo" in r.output and "#pricing" in r.output

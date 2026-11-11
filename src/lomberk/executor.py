@@ -88,7 +88,7 @@ class HoldForApproval(Exception):
 
 
 # How far back each plan can undo, in hours. None = no limit.
-UNDO_WINDOW_HOURS = {"free": 24, "pro": 30 * 24, "enterprise": None}
+UNDO_WINDOW_HOURS = {"free": 24, "solo": 30 * 24, "pro": 30 * 24, "enterprise": None}
 
 
 def undo_window_message(hours: int) -> str:

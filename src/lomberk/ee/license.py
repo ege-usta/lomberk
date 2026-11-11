@@ -24,11 +24,14 @@ RETRY_DELAYS_SECONDS = (1, 3)
 # The Polar organization sells other products too, so a granted key counts only when it carries
 # one of these benefits. Pro: the "Lomberk Pro license key" benefit on both Pro products.
 PRO_BENEFIT_IDS: frozenset[str] = frozenset({"16736449-428d-4f23-858f-47a76dd26524"})
+# Solo: one person, one database (Polar's activation limit). 30-day undo, the panel and audit export,
+# but not the team features (SSO, Slack, two-person rule). Empty until that product exists in Polar.
+SOLO_BENEFIT_IDS: frozenset[str] = frozenset()
 # Enterprise: no undo window limit, no database limit. Empty until that product exists in Polar.
 ENTERPRISE_BENEFIT_IDS: frozenset[str] = frozenset()
 
 
-def _need(features: list[str]) -> str:
+def _need(features: list[str]) -> str:  # "SSO needs" / "SSO, Slack approvals need"
     return f"{', '.join(features)} {'needs' if len(features) == 1 else 'need'}"
 
 
@@ -40,6 +43,7 @@ class Validation(NamedTuple):
     status: str  # "granted", "invalid" or "unreachable"
     enterprise: bool = False  # the key carries an Enterprise benefit
     needs_activation: bool = False  # the key has a database limit and this database holds no activation yet
+    solo: bool = False  # the key carries the Solo benefit: no team features
 
 
 def _post(url: str, payload: dict) -> tuple[int, dict | None]:
@@ -99,10 +103,11 @@ def validate_key(key: str, activation_id: str | None = None) -> Validation:
     benefit = (body or {}).get("benefit_id")
     # 404: unknown, revoked, disabled or expired key. Any other non-200, or a 200 that isn't a grant for one
     # of our benefits (also a key for another product of the same Polar organization), is invalid too.
-    if code != 200 or not body or body.get("status") != "granted" or benefit not in PRO_BENEFIT_IDS | ENTERPRISE_BENEFIT_IDS:
+    if code != 200 or not body or body.get("status") != "granted" or benefit not in PRO_BENEFIT_IDS | ENTERPRISE_BENEFIT_IDS | SOLO_BENEFIT_IDS:
         return Validation("invalid")
     return Validation("granted", enterprise=benefit in ENTERPRISE_BENEFIT_IDS,
-                      needs_activation=bool(body.get("limit_activations")) and not activation_id)
+                      needs_activation=bool(body.get("limit_activations")) and not activation_id,
+                      solo=benefit in SOLO_BENEFIT_IDS)
 
 
 def activate_key(key: str, label: str) -> str:
@@ -127,7 +132,7 @@ class ActivationStore(Protocol):
 
 
 def check_license(key: str | None, features: list[str], store: ActivationStore | None = None) -> str:
-    """Startup gate for paid features: the plan, "free", "pro" or "enterprise".
+    """Startup gate for paid features: the plan, "free", "solo", "pro" or "enterprise".
     Raises LicenseError to refuse startup.
 
     ponytail: when Polar can't be reached (outage, air-gapped network) the paid plan stays on
@@ -147,7 +152,10 @@ def check_license(key: str | None, features: list[str], store: ActivationStore |
     if result.status != "granted":
         return _refuse(features, "the Lomberk license key is invalid, expired or cancelled",
                        "LOMBERK_LICENSE_KEY is invalid, expired or cancelled")
-    tier = "enterprise" if result.enterprise else "pro"
+    tier = "enterprise" if result.enterprise else "solo" if result.solo else "pro"
+    if tier == "solo" and features:  # a valid key, for a plan without them: refuse, never turn them on quietly
+        raise LicenseError(f"Startup Refusal: {_need(features)} the Pro plan; this Solo key covers one person "
+                           f"(undo for 30 days, the panel, audit export). Upgrade at {BUY_URL} or remove them from the config.")
     if result.needs_activation and store:
         activation = activate_key(key, label)
         if activation == "limit":

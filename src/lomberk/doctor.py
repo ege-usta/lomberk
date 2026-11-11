@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from lomberk.config import (
     CONFIG_ENV,
+    PRICING_URL,
     LomberkConfig,
     config_error_message,
     config_path,
@@ -14,6 +15,7 @@ from lomberk.config import (
     pro_features,
     weak_key_reason,
 )
+from lomberk.executor import UNDO_WINDOW_HOURS
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 CONNECT_TIMEOUT_SECONDS = 5
@@ -39,6 +41,10 @@ def run_checks(path: str | None = None) -> list[tuple[str, str, str]]:
                 "Fix the key named above. Unknown keys are refused on purpose, so a typo can't turn protection off.")
             return out
         add(OK, f"{path} is valid")
+        if not config.protected_tables:
+            add(WARN, "protected_tables is empty, so no table makes every write wait for a human "
+                      f"(only writes over {config.limits.max_rows_without_approval} rows do)",
+                "List the tables an agent must never change alone, e.g. protected_tables: [public.customers]")
     else:
         config = LomberkConfig()
         add(WARN, f"no {path} in this directory, so defaults apply (no protected tables)",
@@ -60,8 +66,9 @@ def _env_checks(config, add):
         dsns.append(value)
     agent_key, admin_key = os.environ.get("LOMBERK_API_KEY"), os.environ.get("LOMBERK_ADMIN_KEY")
     for env, value in (("LOMBERK_API_KEY", agent_key), ("LOMBERK_ADMIN_KEY", admin_key)):
-        if not value:
-            add(FAIL, f"{env} is not set", "Generate one with: openssl rand -hex 32")
+        if not value:  # `lomberk serve` (stdio) authenticates nobody: the client starts it
+            add(WARN, f"{env} is not set: fine for `lomberk serve` (MCP over stdio); only `lomberk api` (HTTP) needs it",
+                "For the HTTP gateway, generate one with: openssl rand -hex 32")
         elif reason := weak_key_reason(value):
             if os.environ.get("LOMBERK_ALLOW_WEAK_KEYS", "").lower() == "true":
                 add(WARN, f"{env} {reason}; accepted only because LOMBERK_ALLOW_WEAK_KEYS=true",
@@ -110,6 +117,7 @@ def _db_checks(config, control: str, agent: str, add) -> None:
         registered = {f"{s}.{t}" for s, t in conn.execute("SELECT schema_name, table_name FROM lomberk.registered_tables")}
         _secret_column_checks(config, conn, roles["agent"][0], add)
         _sequence_checks(conn, roles["agent"][0], add)
+        _rls_checks(conn, roles["agent"][0], add)
         checked, broken, _ = conn.execute("SELECT * FROM lomberk.verify_ledger()").fetchone()
 
     if registered:
@@ -150,6 +158,22 @@ def _sequence_checks(conn, agent_role: str, add) -> None:
             f"{', '.join(extra[:LIST_LIMIT])}{' …' if len(extra) > LIST_LIMIT else ''}",
             f"If nothing the agent writes needs them (a trigger calling nextval does), revoke them: "
             f"REVOKE USAGE, SELECT ON SEQUENCE {extra[0]} FROM {agent_role};")
+
+
+# Registered tables with row level security on and no permissive policy that lets the agent see rows.
+RLS_WITHOUT_POLICY = """
+    SELECT r.table_oid::regclass::text FROM lomberk.registered_tables r JOIN pg_class c ON c.oid = r.table_oid
+    WHERE c.relrowsecurity AND NOT (SELECT rolbypassrls FROM pg_roles WHERE rolname = %(agent)s)
+      AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polpermissive
+                      AND (0::oid = ANY(p.polroles) OR to_regrole(%(agent)s) = ANY(p.polroles)))
+    ORDER BY 1"""
+
+
+def _rls_checks(conn, agent_role: str, add) -> None:
+    for table in [r[0] for r in conn.execute(RLS_WITHOUT_POLICY, {"agent": agent_role})]:
+        add(WARN, f"row level security is on for {table} and no policy lets {agent_role} see its rows, "
+                  "so its reads come back empty and its writes change nothing",
+            f"CREATE POLICY lomberk_agent_all ON {table} TO {agent_role} USING (true) WITH CHECK (true);")
 
 
 # Words that often mean a secret but are too short to match inside other names (passenger, spinner).
@@ -199,6 +223,8 @@ def _pro_checks(config, add) -> None:
             if not os.environ.get(env):
                 add(FAIL, f"Slack is enabled but {env} is not set", "Copy it from your Slack app settings (see README, Slack).")
     if not features and not key:
+        add(OK, f"Free plan: undo reaches back {UNDO_WINDOW_HOURS['free']} hours",
+            f"Longer undo, the approval panel and Slack come with a paid plan: {PRICING_URL}")
         return
     try:
         from lomberk.ee.license import BUY_URL, _need, validate_key
@@ -208,10 +234,15 @@ def _pro_checks(config, add) -> None:
     if not key:
         add(FAIL, f"{_need(features)} a Pro license key", f"Set LOMBERK_LICENSE_KEY. Buy one at {BUY_URL}")
         return
-    result = validate_key(key).status
-    if result == "granted":
-        add(OK, "Lomberk license is valid")
-    elif result == "unreachable":
+    result = validate_key(key)
+    if result.status == "granted":
+        plan = "enterprise" if result.enterprise else "solo" if result.solo else "pro"
+        if plan == "solo" and features:
+            add(FAIL, f"{_need(features)} the Pro plan, and this key is for Solo", f"Upgrade at {PRICING_URL}")
+        hours = UNDO_WINDOW_HOURS[plan]
+        add(OK, f"Lomberk license is valid: {plan.capitalize()} plan, undo reaches back "
+                f"{'without limit' if hours is None else f'{hours // 24} days'}")
+    elif result.status == "unreachable":
         add(WARN, "couldn't reach api.polar.sh to check the license", "The gateway still starts. Check outbound HTTPS if you expected it to work.")
     else:
         level = FAIL if features else WARN

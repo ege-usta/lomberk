@@ -54,7 +54,7 @@ def exists(db, n: int) -> bool:
 
 
 def test_plans():
-    assert UNDO_WINDOW_HOURS == {"free": 24, "pro": 720, "enterprise": None}
+    assert UNDO_WINDOW_HOURS == {"free": 24, "solo": 720, "pro": 720, "enterprise": None}
     assert _UNDO_HTTP_STATUS["expired"] == 403
 
 

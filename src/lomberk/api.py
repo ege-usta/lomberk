@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from starlette.routing import Route
 
 from lomberk.audit import audit
-from lomberk.config import load_config, weak_key_reason
+from lomberk.config import PRICING_URL, load_config, weak_key_reason
 from lomberk.executor import LomberkExecutor
 from lomberk.policy import PolicyEngine
 from lomberk.sentinel import AISentinel
@@ -495,7 +495,7 @@ def undo_checkpoint(
 
 def _require_pro(feature: str) -> None:
     if not _PRO:
-        raise HTTPException(status_code=403, detail=f"{feature} is a Lomberk Pro feature: set LOMBERK_LICENSE_KEY.")
+        raise HTTPException(status_code=403, detail=f"{feature} needs a Lomberk Solo or Pro license: set LOMBERK_LICENSE_KEY. Plans: {PRICING_URL}")
 
 
 @app.get("/v1/audit/export")
@@ -537,8 +537,9 @@ class _PanelGate:
 
 _PRO_ONLY_PAGE = """<!doctype html><meta charset="utf-8"><title>Lomberk</title>
 <body style="font-family: system-ui, sans-serif; padding: 2rem; max-width: 40rem">
-<h1>Lomberk</h1><p>The web approval panel is a Lomberk Pro feature. Set <code>LOMBERK_LICENSE_KEY</code>
-and restart the gateway, or approve from the API or CLI.</p></body>"""
+<h1>Lomberk</h1><p>The web approval panel comes with Lomberk Solo and Pro. Set <code>LOMBERK_LICENSE_KEY</code>
+and restart the gateway, or approve from the API or CLI.</p>
+<p><a href="https://ege-usta.github.io/lomberk/#pricing">See the plans</a></p></body>"""
 
 app.mount("/panel", _PanelGate())
 
