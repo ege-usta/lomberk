@@ -376,10 +376,9 @@ def undo(token: str):
 @app.command()
 def serve():
     """Start the MCP server (stdio transport)."""
-    # The MCP server runs via asyncio in server.py
-    # We will just exec into it to replace the current process
-    server_path = os.path.join(os.path.dirname(__file__), "server.py")
-    os.execvp(sys.executable, [sys.executable, server_path])
+    from lomberk.server import main  # in this process: os.exec* doesn't replace the process on Windows
+
+    main()
 
 
 @app.command()

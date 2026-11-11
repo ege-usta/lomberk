@@ -16,6 +16,7 @@ from lomberk.config import (
     weak_key_reason,
 )
 from lomberk.executor import UNDO_WINDOW_HOURS
+from lomberk.startup import PRO_EXTRAS_HINT, missing_extras
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 CONNECT_TIMEOUT_SECONDS = 5
@@ -225,6 +226,9 @@ def _pro_checks(config, add) -> None:
     if not features and not key:
         add(OK, f"Free plan: undo reaches back {UNDO_WINDOW_HOURS['free']} hours",
             f"Longer undo, the approval panel and Slack come with a paid plan: {PRICING_URL}")
+        return
+    if missing := missing_extras(config):
+        add(FAIL, f"{', '.join(missing)} configured, but the Pro libraries aren't installed", PRO_EXTRAS_HINT)
         return
     try:
         from lomberk.ee.license import BUY_URL, _need, validate_key

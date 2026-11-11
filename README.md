@@ -109,7 +109,7 @@ Environment: `LOMBERK_CONFIG` (path to `lomberk.yaml`), `LOMBERK_ADMIN_DSN` (con
 
 ## Installing on your own database
 ```bash
-pip install "lomberk @ git+https://github.com/ege-usta/lomberk"   # or: docker build -t lomberk .
+pip install lomberk          # Slack and SSO: pip install "lomberk[pro]"; or: docker build -t lomberk .
 export LOMBERK_INSTALL_DSN=postgresql://owner@db/app       # used only for install
 # first, as that owner: CREATE ROLE lomberk_control LOGIN PASSWORD '...'; CREATE ROLE lomberk_agent LOGIN PASSWORD '...';
 lomberk init --control-role lomberk_control --agent-role lomberk_agent
@@ -126,6 +126,8 @@ Local, single-user development without the service: `lomberk serve` (stdio MCP).
 
 ## Team features (Solo and Pro)
 The web panel and audit export come with Solo and Pro; Slack approvals, approver SSO and the two-person rule are Pro.
+
+Slack approvals and approver SSO need extra libraries: `pip install "lomberk[pro]"`, or `uvx --from "lomberk[pro]" lomberk serve`. The Docker image has them. Without them the gateway refuses to start and says what to install.
 
 ### Approve in Slack (Pro)
 Create the app from [`slack/app-manifest.json`](https://github.com/ege-usta/lomberk/blob/main/slack/app-manifest.json) (bot scope `chat:write` only, Socket Mode, so no public URL is needed), invite the bot to your approvals channel, then:
@@ -237,6 +239,8 @@ Lomberk is self-hosted and your data never reaches us. There is no phone support
 uv sync --all-groups
 PYTHONPATH=src uv run pytest tests/    # needs Docker (testcontainers)
 ```
+
+Changes: [CHANGELOG.md](https://github.com/ege-usta/lomberk/blob/main/CHANGELOG.md). Contributing: [CONTRIBUTING.md](https://github.com/ege-usta/lomberk/blob/main/CONTRIBUTING.md).
 
 ## License
 Open core. Everything outside `src/lomberk/ee/` is Apache-2.0: the hard gate, policy, capture, undo, ledger, remote MCP, and API/CLI approvals. You can run the whole safety path for free.

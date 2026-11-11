@@ -1,13 +1,27 @@
 """Startup checks shared by the HTTP gateway (api.py) and the stdio MCP server (server.py)."""
+import importlib.util
 import os
 
 from lomberk.config import LomberkConfig, pro_features, quorum_without_identity_source
 from lomberk.executor import UNDO_WINDOW_HOURS, LicenseActivationStore, LomberkExecutor
 
+# The Pro features' libraries ship in the `lomberk[pro]` extra, so a free install stays small.
+PRO_EXTRAS = {"SSO": ("jwt",), "Slack approvals": ("slack_sdk", "aiohttp")}
+PRO_EXTRAS_HINT = "pip install 'lomberk[pro]' (or uvx --from 'lomberk[pro]' lomberk ...)"
+
+
+def missing_extras(config: LomberkConfig) -> list[str]:
+    """The configured Pro features whose libraries aren't installed."""
+    return [f for f in pro_features(config)
+            if any(importlib.util.find_spec(m) is None for m in PRO_EXTRAS.get(f, ()))]
+
 
 def resolve_plan(config: LomberkConfig) -> str:
-    """'free', 'pro' or 'enterprise'. Raises LicenseError if Pro features are configured without a valid key."""
+    """'free', 'solo', 'pro' or 'enterprise'. Raises LicenseError if Pro features are configured without a valid key."""
     needs_pro = pro_features(config)
+    if missing := missing_extras(config):
+        raise ValueError(f"Startup Refusal: {', '.join(missing)} {'needs' if len(missing) == 1 else 'need'} "
+                         f"the Pro libraries, which this install doesn't have: {PRO_EXTRAS_HINT}")
     license_key = os.environ.get("LOMBERK_LICENSE_KEY")
     if not (needs_pro or license_key):
         return "free"
