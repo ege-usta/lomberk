@@ -44,6 +44,11 @@ class ExecutionResult(BaseModel):
 def _agent_message(e: Exception) -> str:
     """The part of an error the agent may see. Never PostgreSQL's DETAIL: for NOT NULL and
     CHECK violations it prints the whole failing row, secret columns included."""
+    if isinstance(e, psycopg.OperationalError) and not e.sqlstate:
+        # Client-side connection failure: its text names the host, port, database and user.
+        # The operator gets it in the log; the agent gets a generic message.
+        logger.warning("Database connection failed: %s", e)
+        return "Lomberk could not reach the database. Nothing was changed; the operator can run `lomberk doctor`."
     if isinstance(e, psycopg.errors.InsufficientPrivilege):
         return (f"{e.diag.message_primary}. Some columns are hidden from agents; "
                 "name the columns you need instead of *.")
@@ -735,7 +740,7 @@ class LomberkExecutor:
         except psycopg.OperationalError as e:
             if operation_id:
                 return ExecutionResult(operation_id=operation_id, status="unknown", message="Network lost during checkpoint creation. Retry with same operation_id.")
-            return ExecutionResult(operation_id=operation_id, status="failed", message=f"Pre-execution connection error: {e}")
+            return ExecutionResult(operation_id=operation_id, status="failed", message=_agent_message(e))
     def execute_pending(self, public_id: str, actor: str = "unknown_approver"):
         import psycopg
         try:

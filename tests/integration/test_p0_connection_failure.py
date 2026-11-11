@@ -57,7 +57,7 @@ def test_p0_connection_open_failure(dsn, control_dsn, runtime_dsn, setup_db, mon
 
     res = executor.execute(eval_result, agent_label="test")
     assert res.status == "failed"
-    assert "Connection refused" in res.message or "could not connect" in res.message
+    assert "could not reach the database" in res.message and "127.0.0.1" not in res.message
 
     # Ledger must say failed
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:

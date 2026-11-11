@@ -8,7 +8,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from lomberk.config import load_config
-from lomberk.executor import ExecutionResult, LomberkExecutor
+from lomberk.executor import ExecutionResult, LomberkExecutor, _agent_message
 from lomberk.policy import PolicyEngine
 from lomberk.sentinel import AISentinel
 from lomberk.sql.classify import classify_sql
@@ -43,7 +43,7 @@ def run_agent_sql(executor: LomberkExecutor, policy_engine: PolicyEngine, sql: s
             results.append(format_result(res))
         return "\n".join(results)
     except Exception as e:
-        return f"Error executing SQL: {e}"
+        return f"Error executing SQL: {_agent_message(e)}"
 
 
 def package_version() -> str:
