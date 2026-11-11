@@ -32,6 +32,10 @@ Keep `LOMBERK_INSTALL_DSN` out of the gateway. It is only needed for `init` and 
 
 Then run `lomberk doctor`. It flags anything that is set up in an unsafe way.
 
+`register` lets the agent use only the sequences the table draws from (its `serial` or identity column, or a column default that calls `nextval`). If a trigger or function fills ids from another sequence, grant that one by hand: `GRANT USAGE ON SEQUENCE public.x_id_seq TO lomberk_agent;`
+
+**Upgrading from an earlier version:** earlier versions granted every sequence in the schema. `lomberk doctor` lists the extra ones and the `REVOKE` for each. To clear them all at once, run `REVOKE USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public FROM lomberk_agent;`, then `lomberk register` each table again.
+
 ## Supabase
 - **Owner role:** `postgres`. Tables you created in the dashboard or with migrations belong to it.
 - **Connection:** the *direct connection* or the *session pooler* (port 5432), from Project Settings → Database. Don't use the transaction pooler (port 6543) for Lomberk.
@@ -62,6 +66,7 @@ Then run `lomberk doctor`. It flags anything that is set up in an unsafe way.
 | `Installation cannot be performed by the runtime or control role itself` | `LOMBERK_INSTALL_DSN` must be the owner role, not `lomberk_control` or `lomberk_agent`. |
 | `Role lomberk_agent must not be a superuser` | Create the role without `SUPERUSER` (step 1). |
 | `... has its own triggers, so this write can't be undone` | See `--allow-triggers` above, or approve those writes by hand. |
+| `permission denied for sequence ...` on INSERT | A trigger or function draws ids from a sequence the table doesn't own; grant it (see step 2). |
 | `... cascades into X which is not registered` | Register the FK child table X too. |
 | `Undo can switch off triggers on ... only if the role that installed Lomberk owns the table` | Run `register` as the table's owner, or leave out `--allow-triggers`. |
 

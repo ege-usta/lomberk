@@ -98,7 +98,8 @@ def _db_checks(config, control: str, agent: str, add) -> None:
 
     with psycopg.connect(control, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn:
         has_schema, has_approvals = conn.execute(
-            "SELECT to_regclass('lomberk.checkpoints') IS NOT NULL, to_regclass('lomberk.approvals') IS NOT NULL").fetchone()
+            "SELECT to_regclass('lomberk.checkpoints') IS NOT NULL, EXISTS (SELECT 1 FROM pg_attribute WHERE "
+            "attrelid = to_regclass('lomberk.checkpoints') AND attname = 'required_approvals' AND NOT attisdropped)").fetchone()
         if not has_schema:
             add(FAIL, "Lomberk is not installed in this database",
                 "Run: lomberk init --control-role <control> --agent-role <agent>  (with LOMBERK_INSTALL_DSN set to an owner)")
@@ -108,6 +109,7 @@ def _db_checks(config, control: str, agent: str, add) -> None:
             return
         registered = {f"{s}.{t}" for s, t in conn.execute("SELECT schema_name, table_name FROM lomberk.registered_tables")}
         _secret_column_checks(config, conn, roles["agent"][0], add)
+        _sequence_checks(conn, roles["agent"][0], add)
         checked, broken, _ = conn.execute("SELECT * FROM lomberk.verify_ledger()").fetchone()
 
     if registered:
@@ -123,6 +125,31 @@ def _db_checks(config, control: str, agent: str, add) -> None:
         add(FAIL, f"the ledger is broken at checkpoint {broken}", "Someone edited history in the database. Investigate before trusting it.")
     else:
         add(OK, f"ledger intact ({checked} checkpoints)")
+
+
+# Sequences the agent may use that no registered table draws from: older versions granted every
+# sequence in the schema, which lets the agent read how fast unrelated tables grow.
+EXTRA_SEQUENCES = """
+    SELECT s.oid::regclass::text FROM pg_class s
+    WHERE s.relkind = 'S' AND s.relnamespace <> 'lomberk'::regnamespace
+      AND CASE WHEN s.relkind = 'S' THEN has_sequence_privilege(%s, s.oid, 'USAGE') END
+      AND NOT EXISTS (  -- owned by a registered table's column (serial, identity) ...
+        SELECT 1 FROM pg_depend d JOIN lomberk.registered_tables r ON r.table_oid = d.refobjid
+        WHERE d.classid = 'pg_class'::regclass AND d.objid = s.oid AND d.deptype IN ('a', 'i'))
+      AND NOT EXISTS (  -- ... or named in one of its column defaults
+        SELECT 1 FROM pg_depend d JOIN pg_attrdef a ON a.oid = d.objid
+        JOIN lomberk.registered_tables r ON r.table_oid = a.adrelid
+        WHERE d.classid = 'pg_attrdef'::regclass AND d.refobjid = s.oid)
+    ORDER BY 1"""
+
+
+def _sequence_checks(conn, agent_role: str, add) -> None:
+    extra = [r[0] for r in conn.execute(EXTRA_SEQUENCES, (agent_role,))]
+    if extra:
+        add(WARN, f"{agent_role} may use {len(extra)} sequence(s) no registered table draws from: "
+            f"{', '.join(extra[:LIST_LIMIT])}{' …' if len(extra) > LIST_LIMIT else ''}",
+            f"If nothing the agent writes needs them (a trigger calling nextval does), revoke them: "
+            f"REVOKE USAGE, SELECT ON SEQUENCE {extra[0]} FROM {agent_role};")
 
 
 # Words that often mean a secret but are too short to match inside other names (passenger, spinner).

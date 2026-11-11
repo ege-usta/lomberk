@@ -1,6 +1,7 @@
 import http.server
 import json
 import threading
+import urllib.error
 
 import pytest
 
@@ -185,8 +186,30 @@ def test_activation_outage_keeps_the_plan(polar, monkeypatch):
     assert store.activation_id is None  # tried again at the next start
 
 
-def test_a_passing_activation_outage_is_retried_and_recorded(polar):
+def test_activation_is_not_resent_after_polar_may_have_acted(polar):
+    """A 503 or a timeout may come after Polar counted the activation; resending would use a second slot."""
     polar.reply, polar.activate, store = LIMITED, [(503, "down"), (201, '{"id": "act-9"}')], Store()
+    assert lic.check_license("KEY-1", ["SSO"], store) == "pro"
+    assert store.activation_id is None  # the next start tries again
+    assert [p for p, _ in polar.requests].count("/activate") == 1
+
+
+def test_activation_is_resent_when_it_never_reached_polar(polar, monkeypatch):
+    real, calls = lic._post, []
+
+    def flaky(url, payload):
+        calls.append(url)
+        if url == lic.POLAR_ACTIVATE_URL and len([c for c in calls if c == url]) == 1:
+            raise urllib.error.URLError(ConnectionRefusedError())
+        return real(url, payload)
+    monkeypatch.setattr(lic, "_post", flaky)
+    polar.reply, polar.activate, store = LIMITED, (201, '{"id": "act-9"}'), Store()
+    assert lic.check_license("KEY-1", ["SSO"], store) == "pro"
+    assert store.activation_id == "act-9"
+
+
+def test_rate_limited_activation_is_retried(polar):
+    polar.reply, polar.activate, store = LIMITED, [(429, "slow down"), (201, '{"id": "act-9"}')], Store()
     assert lic.check_license("KEY-1", ["SSO"], store) == "pro"
     assert store.activation_id == "act-9"
 

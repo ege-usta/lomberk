@@ -6,6 +6,7 @@ safety path (gate, holds, capture, undo, ledger) never needs a key.
 """
 import json
 import logging
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -58,16 +59,27 @@ def _post(url: str, payload: dict) -> tuple[int, dict | None]:
     return code, body if isinstance(body, dict) else None
 
 
-def _ask(url: str, payload: dict) -> tuple[int, dict | None] | None:
+def _never_sent(e: OSError) -> bool:
+    """The request never reached Polar (refused connection, unknown host), so sending it again is safe."""
+    reason = e.reason if isinstance(e, urllib.error.URLError) else e
+    return isinstance(reason, (ConnectionRefusedError, socket.gaierror))
+
+
+def _ask(url: str, payload: dict, idempotent: bool = True) -> tuple[int, dict | None] | None:
     """_post with retries. None means Polar is down: no answer, a 5xx or 429, on every try.
-    Any other answer is Polar speaking, and the caller decides on it (fail closed)."""
+    Any other answer is Polar speaking, and the caller decides on it (fail closed).
+    A request that isn't idempotent is sent again only when the last one never reached Polar:
+    after a timeout or a 5xx, Polar may have acted on it already."""
     for delay in (*RETRY_DELAYS_SECONDS, None):
         try:
             code, body = _post(url, payload)
             if code < 500 and code != 429:
                 return code, body
-        except (urllib.error.URLError, TimeoutError, OSError):
-            pass
+            if not idempotent and code != 429:
+                return None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if not idempotent and not _never_sent(e):
+                return None
         if delay is None:
             return None
         time.sleep(delay)
@@ -95,7 +107,9 @@ def validate_key(key: str, activation_id: str | None = None) -> Validation:
 
 def activate_key(key: str, label: str) -> str:
     """Counts this database against the key's limit: an activation id, "limit", "invalid" or "unreachable"."""
-    reply = _ask(POLAR_ACTIVATE_URL, {"key": key, "organization_id": POLAR_ORGANIZATION_ID, "label": label})
+    # Each accepted activation takes one of the key's database slots, so a retry that Polar
+    # had already acted on would use up a slot for nothing.
+    reply = _ask(POLAR_ACTIVATE_URL, {"key": key, "organization_id": POLAR_ORGANIZATION_ID, "label": label}, idempotent=False)
     if reply is None:
         return "unreachable"
     code, body = reply

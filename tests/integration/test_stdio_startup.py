@@ -63,3 +63,21 @@ def test_main_exits_cleanly_on_refusal(pg, env, capsys):
     with pytest.raises(SystemExit) as e:
         server.main()
     assert e.value.code == 1 and "Startup Refusal" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("state", ["not_installed", "older_schema"])
+def test_a_schema_older_than_the_gateway_is_refused(pg, env, state):
+    """New code against an old schema would break every hold; refuse at startup and say how to upgrade."""
+    su, control, agent = pg
+    db = f"stale_{state}"
+    with psycopg.connect(su, autocommit=True) as conn:
+        conn.execute(f"CREATE DATABASE {db}")
+    stale = su.rsplit("/", 1)[0] + f"/{db}"
+    if state == "older_schema":
+        install_lomberk(stale, control_role="lomberk_control", agent_role="mcp_agent")
+        with psycopg.connect(stale, autocommit=True) as conn:
+            conn.execute("ALTER TABLE lomberk.checkpoints DROP COLUMN required_approvals CASCADE")
+    host_db = lambda dsn: dsn.rsplit("/", 1)[0] + f"/{db}"
+    env(host_db(agent), host_db(control))
+    with pytest.raises(ValueError, match=r"Startup Refusal: .*lomberk init"):
+        server.build_executor()

@@ -31,14 +31,21 @@ def check_config(config: LomberkConfig) -> None:
 
 
 def check_db_roles(admin_dsn: str, dsn: str) -> None:
-    """The agent and control DSNs must be two distinct, non-superuser roles."""
+    """The agent and control DSNs must be two distinct, non-superuser roles, on a current lomberk schema."""
     import psycopg
     with psycopg.connect(admin_dsn) as conn:
         control_user, control_super = conn.execute(
             "SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)").fetchone()
+        # The newest column the code relies on: an install from before it can't hold or approve writes.
+        schema_current = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('lomberk.checkpoints') "
+            "AND attname = 'required_approvals' AND NOT attisdropped)").fetchone()[0]
     with psycopg.connect(dsn) as conn:
         runtime_user, runtime_super = conn.execute(
             "SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)").fetchone()
+    if not schema_current:
+        raise ValueError("Startup Refusal: the lomberk schema in this database is missing or older than this gateway. "
+                         "Run `lomberk init` again as the database owner (it upgrades in place, keeping checkpoints).")
     if control_user == runtime_user:
         raise ValueError("Startup Refusal: Admin DSN and Agent DSN must resolve to distinct database roles.")
     if control_super:

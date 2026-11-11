@@ -66,6 +66,15 @@ LEAKS = [
     "SELECT count(*) AS n FROM public.users u GROUP BY u",
     "SELECT settings['api_key':'z'] FROM public.users",  # slice bound
     "SELECT id FROM public.users WHERE settings @? '$.api_key'",  # jsonpath operators name a key path
+    # JSON and jsonpath decode escapes, so a key spelled with them is the same key.
+    """SELECT id FROM public.users WHERE settings @? '$."\\u0061pi_key"'""",
+    """SELECT id FROM public.users WHERE settings @? '$."api_\\u006bey" ? (@ starts with "sk_live_a")'""",
+    """SELECT id FROM public.users WHERE settings @@ '$."p\\u0061ssword" starts with "a"'""",
+    """SELECT id FROM public.users WHERE settings @? '$."\\u{61}pi_key"'""",
+    """SELECT id FROM public.users WHERE settings @? '$."\\x61pi_key"'""",
+    """SELECT id FROM public.users WHERE settings @> '{"\\u0061pi_key":"x"}'""",
+    "SELECT id FROM public.users WHERE settings->>U&'\\0061pi_key' = 'x'",
+    "SELECT id FROM public.users WHERE strpos(settings::text, E'\\x61pi_key') > 0",
     "SELECT id FROM public.users WHERE settings @@ '$.auth.token == \"x\"'",
 ]
 

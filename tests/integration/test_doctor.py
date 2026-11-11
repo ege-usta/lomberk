@@ -111,3 +111,25 @@ def test_secret_columns_the_database_still_shows(db, monkeypatch, tmp_path):
                      "ARRAY['password_hash', 'card_pin', 'prefs'])")
     out = " ".join(doctor(monkeypatch, tmp_path, env, "sensitive_columns: [card_pin, prefs]\n").output.split())
     assert "no secret-looking column is readable" in out, out
+
+
+def test_sequences_no_registered_table_draws_from(db, monkeypatch, tmp_path):
+    control, agent = db
+    install = control.replace("lomberk_control:secret", "test:test")
+    with psycopg.connect(install, autocommit=True) as conn:
+        conn.execute("CREATE TABLE public.tickets (id SERIAL PRIMARY KEY, title TEXT)")
+        conn.execute("SELECT lomberk.register_table('public', 'tickets', 'id', 'mcp_agent')")
+        conn.execute("CREATE TABLE public.invoices (id BIGSERIAL PRIMARY KEY)")  # not registered
+    env = {"LOMBERK_ADMIN_DSN": control, "LOMBERK_AGENT_DSN": agent, **KEYS}
+    out = " ".join(doctor(monkeypatch, tmp_path, env).output.split())
+    assert "sequence(s)" not in out, out  # the registered table's own sequence is expected
+    with psycopg.connect(install, autocommit=True) as conn:  # what older versions granted
+        conn.execute("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO mcp_agent")
+    try:
+        out = " ".join(doctor(monkeypatch, tmp_path, env).output.split())
+        assert "may use 1 sequence(s) no registered table draws from: invoices_id_seq" in out, out
+        assert "REVOKE USAGE, SELECT ON SEQUENCE invoices_id_seq FROM mcp_agent" in out
+        assert "public.tickets_id_seq" not in out and "tickets_id_seq," not in out
+    finally:
+        with psycopg.connect(install, autocommit=True) as conn:
+            conn.execute("REVOKE USAGE, SELECT ON SEQUENCE public.invoices_id_seq FROM mcp_agent")
