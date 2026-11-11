@@ -1,0 +1,87 @@
+"""`lomberk setup`: one owner connection string in, a working, doctor-clean deployment out."""
+import os
+import stat
+
+import dotenv
+import psycopg
+import pytest
+import yaml
+from testcontainers.community.postgres import PostgresContainer
+from typer.testing import CliRunner
+
+from lomberk.cli import app
+
+ENV_KEYS = ("LOMBERK_ADMIN_DSN", "LOMBERK_AGENT_DSN", "LOMBERK_API_KEY", "LOMBERK_ADMIN_KEY", "LOMBERK_CONFIG",
+            "LOMBERK_INSTALL_DSN", "LOMBERK_ALLOW_WEAK_KEYS")
+
+
+@pytest.fixture
+def owner():
+    with PostgresContainer(os.environ.get("LOMBERK_TEST_PG_IMAGE", "postgres:16-alpine")) as pg:
+        url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute("CREATE TABLE public.orders (id INT PRIMARY KEY, total INT)")
+            conn.execute("CREATE TABLE public.customers (id INT PRIMARY KEY, name TEXT, password TEXT)")
+            conn.execute("CREATE TABLE public.events (payload TEXT)")  # no primary key: can't be undone
+            conn.execute("CREATE TABLE public.notes (id INT PRIMARY KEY, body TEXT)")
+            conn.execute("ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY")
+        yield url
+
+
+def run_setup(monkeypatch, tmp_path, args):
+    monkeypatch.chdir(tmp_path)
+    for k in ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    return CliRunner().invoke(app, ["setup", *args])
+
+
+def test_setup_end_to_end(owner, monkeypatch, tmp_path):
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", owner, "--tables", "public.orders,public.customers,public.notes",
+                                          "--protect", "public.customers", "--yes"])
+    assert r.exit_code == 0, r.output
+
+    env = dotenv.dotenv_values(tmp_path / ".env")
+    assert stat.S_IMODE(os.stat(tmp_path / ".env").st_mode) == 0o600
+    assert len(env["LOMBERK_API_KEY"]) >= 32 and env["LOMBERK_API_KEY"] != env["LOMBERK_ADMIN_KEY"]
+    assert env["LOMBERK_CONFIG"] == str(tmp_path / "lomberk.yaml")
+    config = yaml.safe_load((tmp_path / "lomberk.yaml").read_text())
+    assert config["protected_tables"] == ["public.customers"]
+
+    with psycopg.connect(env["LOMBERK_AGENT_DSN"]) as conn:
+        user, = conn.execute("SELECT current_user").fetchone()
+        assert user == "lomberk_agent"
+        assert not conn.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()[0]
+    with psycopg.connect(owner) as conn:
+        registered = {r[0] for r in conn.execute("SELECT table_name FROM lomberk.registered_tables")}
+        assert registered == {"orders", "customers", "notes"}
+
+    # The wizard ran doctor on what it wrote, and points the agent's client at it.
+    assert "Ready" in r.output
+    assert "password" in r.output  # hidden from the agent by the database
+    assert "row level security" in r.output.lower() and "public.notes" in r.output
+    assert "claude mcp add lomberk" in r.output and str(tmp_path / "lomberk.yaml") in r.output
+    assert env["LOMBERK_AGENT_DSN"] not in r.output  # secrets stay in .env, not in scrollback
+
+
+def test_setup_lists_tables_and_skips_ones_without_a_key(owner, monkeypatch, tmp_path):
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", owner, "--tables", "public.orders,public.events", "--yes"])
+    assert r.exit_code == 0, r.output
+    assert "public.events" in r.output and "no primary key" in r.output
+    with psycopg.connect(owner) as conn:
+        assert {r[0] for r in conn.execute("SELECT table_name FROM lomberk.registered_tables")} == {"orders"}
+
+
+def test_setup_never_overwrites_or_rotates(owner, monkeypatch, tmp_path):
+    assert run_setup(monkeypatch, tmp_path, ["--owner-dsn", owner, "--tables", "public.orders", "--yes"]).exit_code == 0
+    before = (tmp_path / ".env").read_text()
+    r = run_setup(monkeypatch, tmp_path / "..", ["--owner-dsn", owner, "--tables", "public.orders", "--yes"])
+    assert r.exit_code == 1 and "lomberk_control already exists" in r.output
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", owner, "--tables", "public.orders", "--yes"])
+    assert r.exit_code == 1 and "Setup never overwrites" in r.output
+    assert (tmp_path / ".env").read_text() == before
+
+
+def test_setup_bad_dsn_is_one_line(monkeypatch, tmp_path):
+    r = run_setup(monkeypatch, tmp_path, ["--owner-dsn", "postgresql://nobody:x@127.0.0.1:1/db", "--yes"])
+    assert r.exit_code == 1 and "Traceback" not in r.output and "could not connect" in r.output.lower()
+    assert not (tmp_path / ".env").exists()
