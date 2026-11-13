@@ -25,8 +25,8 @@ RETRY_DELAYS_SECONDS = (1, 3)
 # one of these benefits. Pro: the "Lomberk Pro license key" benefit on both Pro products.
 PRO_BENEFIT_IDS: frozenset[str] = frozenset({"16736449-428d-4f23-858f-47a76dd26524"})
 # Solo: one person, one database (Polar's activation limit). 30-day undo, the panel and audit export,
-# but not the team features (SSO, Slack, two-person rule). Empty until that product exists in Polar.
-SOLO_BENEFIT_IDS: frozenset[str] = frozenset()
+# but not the team features (SSO, Slack, two-person rule). The "Lomberk Solo license key" benefit.
+SOLO_BENEFIT_IDS: frozenset[str] = frozenset({"fecead6c-663d-41eb-a80d-8aec54d81b2f"})
 # Enterprise: no undo window limit, no database limit. Empty until that product exists in Polar.
 ENTERPRISE_BENEFIT_IDS: frozenset[str] = frozenset()
 

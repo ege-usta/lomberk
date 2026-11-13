@@ -1,6 +1,6 @@
 [project]
 name = "lomberk"
-version = "0.2.0"
+version = "0.2.1"
 description = "Every agent write, reversible: an MCP gateway for PostgreSQL that blocks destructive SQL, holds risky writes for a person and can undo any applied write."
 readme = "README.md"
 requires-python = ">=3.12"

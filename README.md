@@ -222,7 +222,7 @@ Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against 
 | | Free | Solo | Pro | Enterprise |
 |---|---|---|---|---|
 | For | trying it, side projects | one developer | a team | many databases |
-| Price | $0 | $49/month (checkout opening soon) | **$199/month** or $1,990/year | [talk to us](https://github.com/ege-usta/lomberk/discussions) |
+| Price | $0 | $49/month | **$199/month** or $1,990/year | [talk to us](https://github.com/ege-usta/lomberk/discussions) |
 | Hard gate, holds, capture, ledger, remote MCP, API/CLI approvals, `lomberk log` | ✓ | ✓ | ✓ | ✓ |
 | Undo reaches back | 24 hours | 30 days | 30 days | no limit |
 | Web panel, audit export | | ✓ | ✓ | ✓ |
@@ -231,7 +231,7 @@ Tested on PostgreSQL 14, 15, 16, 17 and 18 — the full test suite runs against 
 | Billing | | card, self-serve | card, self-serve | annual invoice |
 | Help | GitHub issues | GitHub issues | GitHub issues | priority answers; help with your security questionnaire |
 
-**[Buy Pro](https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU)**: the key arrives by email right away. For Enterprise, open a [discussion](https://github.com/ege-usta/lomberk/discussions) with how many databases and approvers you have, and we'll reply with a quote. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
+**[Buy Solo](https://buy.polar.sh/polar_cl_y7Arm2k6ApOWPhfLTLrxZcxxlRcKHSCTtx5d90O6ixU)** or **[Buy Pro](https://buy.polar.sh/polar_cl_YqG6acsQyrldmOnlSzRDyHX5o1bWT76m33Afd3VTgEU)**: the key arrives by email right away. For Enterprise, open a [discussion](https://github.com/ege-usta/lomberk/discussions) with how many databases and approvers you have, and we'll reply with a quote. Payments, invoices and sales tax are handled by [Polar](https://polar.sh), the merchant of record.
 
 Lomberk is self-hosted and your data never reaches us. There is no phone support or on-call; the docs and `lomberk doctor` are built so you can set it up alone.
 

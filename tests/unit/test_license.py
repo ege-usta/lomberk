@@ -220,10 +220,11 @@ def test_a_malformed_activation_reply_refuses(polar):
         lic.check_license("KEY-1", ["SSO"], Store())
 
 
-def test_solo_is_the_benefit_and_covers_one_person(polar, monkeypatch):
-    polar.reply = (200, '{"status": "granted", "benefit_id": "ben-solo"}')
-    assert validate_key("KEY-1").status == "invalid"  # no Solo ids configured
-    monkeypatch.setattr(lic, "SOLO_BENEFIT_IDS", frozenset({"ben-solo"}))
+def test_solo_is_the_benefit_and_covers_one_person(polar):
+    polar.reply = (200, '{"status": "granted", "benefit_id": "ben-other-product"}')
+    assert validate_key("KEY-1").status == "invalid"  # another product's key in the same organization
+    assert len(lic.SOLO_BENEFIT_IDS) == 1 and not lic.SOLO_BENEFIT_IDS & lic.PRO_BENEFIT_IDS
+    polar.reply = (200, f'{{"status": "granted", "benefit_id": "{next(iter(lic.SOLO_BENEFIT_IDS))}"}}')
     assert validate_key("KEY-1").solo and not validate_key("KEY-1").enterprise
     assert lic.check_license("KEY-1", []) == "solo"
     # The team features need the team plan: a Solo key refuses startup instead of quietly turning them on.
