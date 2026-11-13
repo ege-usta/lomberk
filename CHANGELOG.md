@@ -2,6 +2,14 @@
 
 All notable changes to Lomberk. Versions follow [Semantic Versioning](https://semver.org/); before 1.0, a minor version may change behavior.
 
+## [0.2.1] — 2026-11-13
+
+### Added
+- Solo keys work: Lomberk recognizes the Solo license, and the README and site link to its checkout ($49/month, one database).
+
+### Tested
+- The published 0.2.0 package end to end on Supabase through the session pooler: setup, firewall, approval holds, `wait_for_approval`, undo of inserts, updates and deletes (also on a table with row level security), and ledger verification.
+
 ## [0.2.0] — 2026-11-11
 
 First release on PyPI and the MCP Registry.
